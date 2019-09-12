@@ -18,11 +18,9 @@
 #           2012-2014 Johns Hopkins University (Author: Daniel Povey)
 #                2015 Guoguo Chen
 #
-# and kaldi/egs/wsj/s5/local/wsj_format_data.sh:
+# and kaldi/egs/wsj/s5/local/wsj_prepare_char_dict.sh
 #
-# Copyright 2012  Microsoft Corporation
-#                 Johns Hopkins University (Author: Daniel Povey)
-#           2015  Guoguo Chen
+# Copyright 2017  Hossein Hadian
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,6 +46,7 @@ import re
 import warnings
 import itertools
 import locale
+import tempfile
 
 from collections import OrderedDict
 
@@ -244,12 +243,15 @@ def cat(*paths):
                 yield line.rstrip()
 
 
-def pipe_to(in_stream, path, append=False):
+def pipe_to(in_stream, file_, append=False):
     '''Write in_stream to file'''
-    with open(path, 'a' if append else 'w') as f:
+    if isinstance(file_, str):
+        with open(file_, 'a' if append else 'w') as f:
+            pipe_to(in_stream, f)
+    else:
         for line in in_stream:
             # unix-style line ends
-            print(line, file=f, end='\n')
+            print(line, file=file_, end='\n')
 
 
 def wc_l(inp):
@@ -589,6 +591,48 @@ def wsj_prepare_dict(data_root, dict_suffix=''):
     )
 
 
+def prepare_char_dict(data_root, src_dict_suffix, dst_dict_suffix):
+    phone_dir = os.path.join(data_root, 'local', 'dict' + src_dict_suffix)
+    dir_ = os.path.join(data_root, 'local', 'dict' + dst_dict_suffix)
+    mkdir(dir_)
+
+    lexicon1_raw_nosil_txt = os.path.join(phone_dir, 'lexicon1_raw_nosil.txt')
+    phn_lexicon2_raw_nosil_txt = os.path.join(
+        phone_dir, 'lexicon2_raw_nosil.txt')
+    unique = OrderedDict()
+    for entry in cat(lexicon1_raw_nosil_txt):
+        unique.setdefault(entry.split(' ')[0], entry)
+    pipe_to(unique.values(), phn_lexicon2_raw_nosil_txt)
+
+    char_lexicon2_raw_nosil_txt = os.path.join(dir_, 'lexicon2_raw_nosil.txt')
+    bad_chars = set("!~@#$%^&*()+=/\",;:?_{}-")
+    pipe_to(
+        (
+            ' '.join([x] + [y for y in x if y not in bad_chars])
+            for x in unique.keys()
+        ),
+        char_lexicon2_raw_nosil_txt
+    )
+    del unique
+
+    pipe_to(['SIL', 'SPN', 'NSN'], os.path.join(dir_, 'silence_phones.txt'))
+    pipe_to(['SIL'], os.path.join(dir_, 'optional_silence.txt'))
+
+    pipe_to(
+        sort(set(cat(
+            ['!SIL  SIL', '<SPOKEN_NOISE>  SPN', '<NOISE>  NSN'],
+            char_lexicon2_raw_nosil_txt,
+        ))),
+        os.path.join(dir_, 'lexicon.txt')
+    )
+
+    pipe_to(
+        sort(set(cat(*(
+            x.split(' ')[1:] for x in cat(char_lexicon2_raw_nosil_txt))))),
+        os.path.join(dir_, 'nonsilence_phones.txt'),
+    )
+
+
 def main(args=None):
     '''Prepare WSJ data'''
 
@@ -610,9 +654,13 @@ def main(args=None):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    # wsj_data_prep(wsj_subdirs, options.data_root)
+    wsj_data_prep(wsj_subdirs, options.data_root)
 
     wsj_prepare_dict(options.data_root, '_nosp')
+
+    # do not extend dictionary with potential non-oovs
+
+    prepare_char_dict(options.data_root, '_nosp', '_char')
 
 
 if __name__ == '__main__':

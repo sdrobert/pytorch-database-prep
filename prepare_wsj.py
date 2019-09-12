@@ -12,6 +12,12 @@
 #
 # Copyright 2010-2011 Microsoft Corporation
 #
+# and kaldi/egs/wsj/s5/local/wsj_prepare_dict.sh:
+#
+# Copyright 2010-2012 Microsoft Corporation
+#           2012-2014 Johns Hopkins University (Author: Daniel Povey)
+#                2015 Guoguo Chen
+#
 # and kaldi/egs/wsj/s5/local/wsj_format_data.sh:
 #
 # Copyright 2012  Microsoft Corporation
@@ -41,6 +47,7 @@ import argparse
 import re
 import warnings
 import itertools
+import locale
 
 from collections import OrderedDict
 
@@ -60,6 +67,9 @@ __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"
 __license__ = "Apache 2.0"
 __copyright__ = "Copyright 2019 Sean Robertson"
+
+
+locale.setlocale(locale.LC_ALL, 'C')
 
 
 def glob(root, pattern):
@@ -225,14 +235,18 @@ def normalize_transcript(in_stream, noiseword):
 def cat(*paths):
     '''yields lines of files in order'''
     for path in paths:
-        with open(path) as f:
-            for line in f:
+        if isinstance(path, str):
+            with open(path) as f:
+                for line in f:
+                    yield line.rstrip()
+        else:  # pretend this is stdin
+            for line in path:
                 yield line.rstrip()
 
 
-def pipe_to(in_stream, path):
+def pipe_to(in_stream, path, append=False):
     '''Write in_stream to file'''
-    with open(path, 'w') as f:
+    with open(path, 'a' if append else 'w') as f:
         for line in in_stream:
             # unix-style line ends
             print(line, file=f, end='\n')
@@ -508,8 +522,75 @@ with names like 11-13.1
     )
 
 
+def wsj_prepare_dict(data_root, dict_suffix=''):
+    dir_ = os.path.join(data_root, 'local', 'dict' + dict_suffix)
+    cmudict = os.path.join(dir_, 'cmudict')
+    mkdir(cmudict)
+
+    # we use the github URL mentioned here
+    # http://www.speech.cs.cmu.edu/cgi-bin/cmudict
+    # to avoid using subversion.
+    url = (
+        'https://raw.githubusercontent.com/Alexir/CMUdict/'
+        '7a37de79f7e650fd6334333b1b5d2bcf0dee8ad3/'
+    )
+    for x in {'cmudict.0.7a', 'cmudict-0.7b.symbols'}:
+        # 0.7b.symbols the same as 0.7a.symbols
+        path = os.path.join(cmudict, x)
+        if not os.path.exists(path):
+            request.urlretrieve(url + x, path)
+
+    silence_phones_txt = os.path.join(dir_, 'silence_phones.txt')
+    optional_silence_txt = os.path.join(dir_, 'optional_silence.txt')
+    pipe_to(['SIL', 'SPN', 'NSN'], silence_phones_txt)
+    pipe_to(['SIL'], optional_silence_txt)
+
+    nonsilence_phones_txt = os.path.join(dir_, 'nonsilence_phones.txt')
+    phone_pattern = re.compile(r'^(\D+)\d*$')
+    phones_of = dict()
+    for phone in cat(os.path.join(cmudict, 'cmudict-0.7b.symbols')):
+        match = phone_pattern.match(phone)
+        if not match:
+            raise ValueError("Bad phone {}".format(phone))
+        base = match.groups(1)  # no stress
+        phones_of.setdefault(base, []).append(phone)
+    pipe_to(
+        (' '.join(x) for x in phones_of.values()),
+        nonsilence_phones_txt
+    )
+    del phones_of
+
+    # skip extra_questions.txt
+
+    # there were a few updates to 0.7.a that make the resulting lexicon
+    # slightly different from Kaldi's
+    lexicon_raw_nosil_txt = os.path.join(dir_, 'lexicon1_raw_nosil.txt')
+    entry_pattern = re.compile(r'^(\S+)\(\d+\) (.*)$')
+    lexicon_raw_nosil_lines = []
+    for line in cat(os.path.join(cmudict, 'cmudict.0.7a')):
+        if line.startswith(';;;'):
+            continue
+        match = entry_pattern.match(line)
+        if match is None:
+            lexicon_raw_nosil_lines.append(line)
+        else:
+            lexicon_raw_nosil_lines.append(
+                ' '.join([match.group(1), match.group(2)]))
+    pipe_to(lexicon_raw_nosil_lines, lexicon_raw_nosil_txt)
+    del lexicon_raw_nosil_lines
+
+    lexicon_txt = os.path.join(dir_, 'lexicon.txt')
+    pipe_to(
+        sort(set(cat(
+            ['!SIL  SIL', '<SPOKEN_NOISE>  SPN', '<UNK>  SPN', '<NOISE>  NSN'],
+            lexicon_raw_nosil_txt
+        ))),
+        lexicon_txt
+    )
+
+
 def main(args=None):
-    '''Prepare wsj data'''
+    '''Prepare WSJ data'''
 
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
@@ -529,7 +610,9 @@ def main(args=None):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    wsj_data_prep(wsj_subdirs, options.data_root)
+    # wsj_data_prep(wsj_subdirs, options.data_root)
+
+    wsj_prepare_dict(options.data_root, '_nosp')
 
 
 if __name__ == '__main__':

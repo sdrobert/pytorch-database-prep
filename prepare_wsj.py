@@ -33,7 +33,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
+
+# some relevant files to the setup:
+# https://catalog.ldc.upenn.edu/docs/LDC93S6A/readme.txt
+# https://catalog.ldc.upenn.edu/docs/LDC94S13A/wsj1.txt
+
 
 from __future__ import absolute_import
 from __future__ import division
@@ -44,23 +48,24 @@ import sys
 import argparse
 import re
 import warnings
-import itertools
 import locale
-import tempfile
+import gzip
+import itertools
 
 from collections import OrderedDict
+from shutil import copyfileobj
 
-import sphfile
+import ngram_lm
 
-try:
-    import pathlib
-except ImportError:
-    import pathlib2 as pathlib
+from common import glob, mkdir, sort, cat, pipe_to, wc_l
+from pydrobert.torch.util import parse_arpa_lm
 
 try:
     import urllib.request as request
 except ImportError:
     import urllib2 as request
+
+from unlzw import unlzw
 
 __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"
@@ -69,25 +74,6 @@ __copyright__ = "Copyright 2019 Sean Robertson"
 
 
 locale.setlocale(locale.LC_ALL, 'C')
-
-
-def glob(root, pattern):
-    path = pathlib.Path(root)
-    for match in path.glob(pattern):
-        yield match.as_posix()
-
-
-def mkdir(*dirs):
-    '''make a directory structures, ok if exists'''
-    for dir_ in dirs:
-        if not os.path.isdir(dir_):
-            os.makedirs(dir_)
-
-
-def sort(in_stream):
-    '''yields sorted input stream'''
-    for line in sorted(in_stream):
-        yield line
 
 
 def find_link_dir(wsj_subdirs, rel_path, required=True):
@@ -231,39 +217,6 @@ def normalize_transcript(in_stream, noiseword):
         yield out
 
 
-def cat(*paths):
-    '''yields lines of files in order'''
-    for path in paths:
-        if isinstance(path, str):
-            with open(path) as f:
-                for line in f:
-                    yield line.rstrip()
-        else:  # pretend this is stdin
-            for line in path:
-                yield line.rstrip()
-
-
-def pipe_to(in_stream, file_, append=False):
-    '''Write in_stream to file'''
-    if isinstance(file_, str):
-        with open(file_, 'a' if append else 'w') as f:
-            pipe_to(in_stream, f)
-    else:
-        for line in in_stream:
-            # unix-style line ends
-            print(line, file=file_, end='\n')
-
-
-def wc_l(inp):
-    '''Output number of lines in file or stream'''
-    if isinstance(inp, str):
-        with open(inp) as f:
-            v = wc_l(f)
-        return '{} {}'.format(v, inp)
-    else:
-        return sum(1 for x in inp)
-
-
 def utt2spk_to_spk2utt(in_stream):
     spk_hash = OrderedDict()
     for line in in_stream:
@@ -275,8 +228,9 @@ def utt2spk_to_spk2utt(in_stream):
 
 def wsj_data_prep(wsj_subdirs, data_root):
 
+    lmdir = os.path.join(data_root, 'local', 'nist_lm')
     dir_ = os.path.join(data_root, 'local', 'data')
-    mkdir(dir_)
+    mkdir(dir_, lmdir)
 
     wv1_pattern = re.compile(r'\.wv1$', flags=re.I)
 
@@ -496,6 +450,77 @@ with names like 11-13.1
 
         pipe_to(utt2spk_to_spk2utt(cat(utt2spk)), spk2utt)
 
+    # XXX(sdrobert): Here's why I don't copy wfl_64.lst
+    # https://groups.google.com/forum/#!topic/kaldi-developers/Q2TZQMvDvEU
+
+    # bcb20onp.z is not gzipped, it's lzw zipped. Unlike Kaldi, we do an
+    # additional step where we uncompress and recompress as a gzipped file
+    dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
+    base_lm_dir = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'base_lm')
+    with open(os.path.join(base_lm_dir, 'bcb20onp.z'), 'rb') as file_:
+        compressed = file_.read()
+    decompressed = unlzw(compressed)
+    with gzip.open(os.path.join(lmdir, 'lm_bg.arpa.gz'), 'wb') as file_:
+        file_.write(decompressed)
+    del compressed, decompressed
+
+    # tcb20onp.z is not actually compressed
+    lm_tg_gz = os.path.join(lmdir, 'lm_tg.arpa.gz')
+    with open(os.path.join(base_lm_dir, 'tcb20onp.z')) as src_, \
+            gzip.open(lm_tg_gz, 'wt') as dst_:
+        for line in src_:
+            if line.startswith('\\data\\'):
+                break
+        if line.startswith('\\data\\'):
+            dst_.write(line)
+        copyfileobj(src_, dst_)
+
+    # the baseline language models are hideously malformed. We're going to
+    # filter most warnings about their probabilities.
+    warnings.filterwarnings('ignore', 'Calculated backoff', UserWarning)
+    # the criterion for pruning is a bit different from IRSTLM. The threshold
+    # was modified to produce roughly the same size model as with IRSTLM at
+    # threshold 1e-7.
+    lm_tgpr_gz = os.path.join(lmdir, 'lm_tgpr.arpa.gz')
+    with gzip.open(lm_tg_gz, 'rt') as file_:
+        ngram_list = parse_arpa_lm(file_)
+    lm = ngram_lm.BackoffNGramLM(ngram_list)
+    lm.relative_entropy_pruning(15e-8)
+    ngram_list = lm.to_ngram_list()
+    with gzip.open(lm_tgpr_gz, 'wt') as file_:
+        ngram_lm.write_arpa(ngram_list, file_)
+    del lm, ngram_list
+
+    with open(os.path.join(base_lm_dir, 'bcb05onp.z'), 'rb') as file_:
+        compressed = file_.read()
+    decompressed = unlzw(compressed)
+    with gzip.open(os.path.join(lmdir, 'lm_bg_5k.arpa.gz'), 'wb') as file_:
+        file_.write(decompressed)
+    del compressed, decompressed
+
+    # tcb05cnp.z *is* compressed
+    lm_tg_5k_gz = os.path.join(lmdir, 'lm_tg_5k.arpa.gz')
+    with open(os.path.join(base_lm_dir, 'tcb05cnp.z'), 'rb') as file_:
+        compressed = file_.read()
+    decompressed = unlzw(compressed)
+    first_idx = decompressed.find(b'\\data\\')
+    second_idx = decompressed.find(b'\\data\\', first_idx + 1)
+    decompressed = decompressed[second_idx:]
+    with gzip.open(lm_tg_5k_gz, 'wb') as file_:
+        file_.write(decompressed)
+    del compressed, decompressed
+
+    lm_tgpr_5k_gz = os.path.join(lmdir, 'lm_tgpr_5k.arpa.gz')
+    with gzip.open(lm_tg_5k_gz, 'rt') as file_:
+        ngram_list = parse_arpa_lm(file_)
+    lm = ngram_lm.BackoffNGramLM(ngram_list)
+    lm.relative_entropy_pruning(15e-8)
+    ngram_list = lm.to_ngram_list()
+    with gzip.open(lm_tgpr_5k_gz, 'wt') as file_:
+        ngram_lm.write_arpa(ngram_list, file_)
+    del lm, ngram_list
+
     spkrinfo = os.path.join(dir_, 'wsj0-train-spkrinfo.txt')
     if not os.path.isfile(spkrinfo):
         request.urlretrieve(
@@ -634,7 +659,7 @@ def prepare_char_dict(data_root, src_dict_suffix, dst_dict_suffix):
 
 
 def main(args=None):
-    '''Prepare WSJ data'''
+    '''Prepare WSJ data for end-to-end pytorch training'''
 
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
@@ -655,6 +680,8 @@ def main(args=None):
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
     wsj_data_prep(wsj_subdirs, options.data_root)
+
+    # prepare_lang.sh converts the arpa models to FSTs, so we skip it
 
     wsj_prepare_dict(options.data_root, '_nosp')
 

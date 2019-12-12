@@ -18,3 +18,9 @@ similar to [SRILM](http://www.speech.sri.com/projects/srilm/). If the threshold
 is chosen appropriately, the results
 [are](microsoft.com/en-us/research/wp-content/uploads/2000/10/2000-joshuago-icslp.pdf)
 [very](https://arxiv.org/pdf/cs/0006025.pdf) similar.
+
+## TODO
+
+[BPE](https://www.aclweb.org/anthology/P16-1162.pdf)
+https://leimao.github.io/blog/Byte-Pair-Encoding/
+https://arxiv.org/pdf/1712.06855.pdf

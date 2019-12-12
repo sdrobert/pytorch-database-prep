@@ -39,6 +39,7 @@ __all__ = [
     'pipe_to',
     'wc_l',
     'chmod_u_plus_w',
+    'uniq',
 ]
 
 
@@ -62,6 +63,15 @@ def sort(in_stream):
     '''yields sorted input stream'''
     for line in sorted(in_stream):
         yield line
+
+
+def uniq(in_stream):
+    '''yields input stream with duplicate subssequent lines suppressed'''
+    last = None
+    for line in in_stream:
+        if line != last:
+            yield line
+            last = line
 
 
 def cat(*paths):

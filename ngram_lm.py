@@ -21,7 +21,8 @@ import warnings
 import sys
 import locale
 
-from collections import OrderedDict
+from collections import OrderedDict, Counter
+from itertools import product
 
 import numpy as np
 
@@ -31,7 +32,10 @@ __license__ = "Apache 2.0"
 __copyright__ = "Copyright 2019 Sean Robertson"
 __all__ = [
     'BackoffNGramLM',
-    'write_arpa'
+    'write_arpa',
+    'ngram_counts_to_prob_list_mle',
+    'ngram_counts_to_prob_list_add_k',
+    'ngram_counts_to_prob_list_simple_good_turing',
 ]
 
 locale.setlocale(locale.LC_ALL, 'C')
@@ -49,7 +53,7 @@ class BackoffNGramLM(object):
 
     Parameters
     ----------
-    ngram_list : sequence
+    prob_list : sequence
         See :mod:`pydrobert.torch.util.parse_arpa_lm`
     sos : str, optional
         The start-of-sequence symbol. When calculating the probability of a
@@ -72,14 +76,14 @@ class BackoffNGramLM(object):
        Models," ArXiv ePrint, 2000
     '''
 
-    def __init__(self, ngram_list, sos=None, eos=None, unk=None):
+    def __init__(self, prob_list, sos=None, eos=None, unk=None):
         self.trie = self.TrieNode(0.0, 0.0)
         self.vocab = set()
-        if not len(ngram_list) or not len(ngram_list[0]):
-            raise ValueError('ngram_list must contain (all) unigrams')
-        for order, dict_ in enumerate(ngram_list):
+        if not len(prob_list) or not len(prob_list[0]):
+            raise ValueError('prob_list must contain (all) unigrams')
+        for order, dict_ in enumerate(prob_list):
             is_first = not order
-            is_last = order == len(ngram_list) - 1
+            is_last = order == len(prob_list) - 1
             for context, value in dict_.items():
                 if is_first:
                     self.vocab.add(context)
@@ -121,7 +125,7 @@ class BackoffNGramLM(object):
                 'out-of-vocabulary symbol "{}" does not have unigram count. '
                 'Out-of-vocabulary tokens will raise an error'.formart(unk))
             self.unk = None
-        assert self.trie.depth == len(ngram_list)
+        assert self.trie.depth == len(prob_list)
 
     class TrieNode(object):
 
@@ -263,7 +267,7 @@ class BackoffNGramLM(object):
 
         def to_ngram_list(self):
             nodes_by_depth = self._gather_nodes_by_depth(self.depth)
-            ngram_list = []
+            prob_list = []
             for order, nodes in enumerate(nodes_by_depth):
                 is_first = not order
                 is_last = order == self.depth - 1
@@ -277,8 +281,8 @@ class BackoffNGramLM(object):
                     else:
                         value = (node.lprob, node.bo)
                     dict_[context] = value
-                ngram_list.append(dict_)
-            return ngram_list
+                prob_list.append(dict_)
+            return prob_list
 
     def conditional(self, context):
         r'''Return the log probability of the last word in the context
@@ -434,22 +438,22 @@ class BackoffNGramLM(object):
         return 10. ** (-joint / M)
 
 
-def write_arpa(ngram_list, out=sys.stdout):
+def write_arpa(prob_list, out=sys.stdout):
     '''Convert an lists of n-gram probabilities to arpa format
 
     The inverse operation of :func:`pydrobert.torch.util.parse_arpa_lm`
 
     Parameters
     ----------
-    ngram_list : list of dict
+    prob_list : list of dict
     out : file or str, optional
         Path or file object to output to
     '''
     if isinstance(out, str):
         with open(out, 'w') as f:
-            return write_arpa(ngram_list, f)
+            return write_arpa(prob_list, f)
     entries_by_order = []
-    for idx, dict_ in enumerate(ngram_list):
+    for idx, dict_ in enumerate(prob_list):
         entries = sorted(
             (k, v) if idx else ((k,), v)
             for (k, v) in dict_.items()
@@ -470,3 +474,351 @@ def write_arpa(ngram_list, out=sys.stdout):
                     entry[1][0], ' '.join(entry[0]), entry[1][1]))
         out.write('\n')
     out.write('\\end\\\n')
+
+
+def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
+    '''Determine probabilities based on MLE of observed n-gram counts
+
+    For a given n-gram :math:`w`, the maximum likelihood
+    estimate of the last token given the first is:
+
+    .. math::
+
+        Pr(w) = C(w) / N
+
+    Where :math:`C(w)` is the count of the n-gram and :math:`N` is the sum of
+    all counts of the same order. Many counts will be zero, especially for
+    large n-grams or rare words, making this a not terribly generalizable
+    solution.
+
+    Parameters
+    ----------
+    ngram_counts : sequence
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to
+        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
+        Keys are tuples of tokens (n-grams) of the appropriate length, with
+        the exception of unigrams, whose keys are the tokens themselves.
+        Values are the counts of those n-grams in the corpus
+    eps_lprob : float, optional
+        A very negative value substituted as "negligible probability"
+
+    Returns
+    -------
+    prob_list : sequence
+        Corresponding n-gram conditional probabilities. See
+        :mod:`pydrobert.torch.util.parse_arpa_lm`
+
+    Examples
+    --------
+    >>> from collections import Counter
+    >>> text = 'a man a plan a canal panama'
+    >>> ngram_counts = [
+    >>>     Counter(
+    >>>         tuple(text[offs:offs + order]) if order > 1
+    >>>         else text[offs:offs + order]
+    >>>         for offs in range(len(text) - order + 1)
+    >>>     )
+    >>>     for order in range(1, 4)
+    >>> ]
+    >>> ngram_counts[0]['<unk>'] = 0  # add oov to vocabulary
+    >>> ngram_counts[0]['a']
+    10
+    >>> sum(ngram_counts[0].values())
+    27
+    >>> ngram_counts[1][('a', ' ')]
+    3
+    >>> sum(ngram_counts[1].values())
+    26
+    >>> prob_list = ngram_counts_to_prob_list_mle(ngram_counts)
+    >>> prob_list[0]['a']   # (log10(10 / 27), eps_lprob)
+    (-0.43136376415898736, -99.99)
+    >>> '<unk>' in prob_list[0]  # no probability mass gets removed
+    False
+    >>> prob_list[1][('a', ' ')]  # (log10((3 / 26) / (10 / 27)), eps_lprob)
+    (-0.5064883290921682, -99.99)
+
+    Notes
+    -----
+    To be compatible with back-off models, MLE estimates assign a negligible
+    backoff probability (`eps_lprob`) to n-grams where necessary. This means
+    the probability mass might not exactly sum to one.
+    '''
+    return ngram_counts_to_prob_list_add_k(
+        ngram_counts, eps_lprob=-99.99, k=0.)
+
+
+def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
+    r'''MLE probabilities with constant discount factor added to counts
+
+    Similar to :func:`ngram_counts_to_prob_list_mle`, but with a constant
+    added to each count to smooth out probabilities:
+
+    .. math::
+
+        Pr(w) = (C(w) + k)/(N + k|V|)
+
+    Where :math:`V` is the vocabulary set. The initial vocabulary set is
+    determined from the unique unigrams :math:`V = U`. The bigram vocabulary
+    set is the Cartesian product :math:`V = U \times U`, trigrams
+    :math:`V = U \times U \times U`, and so on.
+
+    Parameters
+    ----------
+    ngram_counts : sequence
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to
+        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
+        Keys are tuples of tokens (n-grams) of the appropriate length, with
+        the exception of unigrams, whose keys are the tokens themselves.
+        Values are the counts of those n-grams in the corpus
+    eps_lprob : float, optional
+        A very negative value substituted as "negligible probability"
+
+    Returns
+    -------
+    prob_list : sequence
+        Corresponding n-gram conditional probabilities. See
+        :mod:`pydrobert.torch.util.parse_arpa_lm`
+
+    Examples
+    --------
+    >>> from collections import Counter
+    >>> text = 'a man a plan a canal panama'
+    >>> ngram_counts = [
+    >>>     Counter(
+    >>>         tuple(text[offs:offs + order]) if order > 1
+    >>>         else text[offs:offs + order]
+    >>>         for offs in range(len(text) - order + 1)
+    >>>     )
+    >>>     for order in range(1, 4)
+    >>> ]
+    >>> ngram_counts[0]['<unk>'] = 0  # add oov to vocabulary
+    >>> ngram_counts[0]['a']
+    10
+    >>> sum(ngram_counts[0].values())
+    27
+    >>> sum(ngram_counts[1].values())
+    26
+    >>> prob_list = ngram_counts_to_prob_list_add_k(ngram_counts, k=1)
+    >>> prob_list[0]['a']   # (log10((10 + 1) / (27 + 8)), eps_lprob)
+    (-0.5026753591920505, -99.999)
+    >>> # Pr('<unk>') = 1 / (27 + 8) = 1 / 35
+    >>> # Pr('<unk>', 'a') = 1 / (26 + 8 * 8) = 1 / 90
+    >>> # Pr('a' | '<unk>') = Pr('<unk>', 'a') / Pr('<unk>') = 35 / 90
+    >>> prob_list[1][('<unk>', 'a')]  # (log10(35 / 90), eps_lprob)
+    (-0.4101744650890493, -99.999)
+    '''
+    max_order = len(ngram_counts) - 1
+    if not len(ngram_counts):
+        raise ValueError('At least unigram counts must exist')
+    vocab = list(ngram_counts[0])
+    prob_list = [{tuple(): (0, None)}]  # Pr(empty) = 1., will remove at end
+    for order, counts in enumerate(ngram_counts):
+        new_counts = dict()
+        N = 0
+        for ngram in product(vocab, repeat=order + 1):
+            count = counts.get(ngram if order else ngram[0], 0) + k
+            if not count:
+                continue
+            new_counts[ngram] = count
+            N += count
+        if N < 1:
+            if not order:
+                raise ValueError('Total unigram count is not positive')
+            warnings.warn(
+                'total {}-gram count is not positive. Skipping this and all '
+                'higher order n-grams in return'.format(order + 1))
+            break
+        log_N = np.log10(N)
+        probs = dict(
+            (ngram, np.log10(count) - log_N - prob_list[-1][ngram[:-1]][0])
+            for (ngram, count) in new_counts.items()
+        )
+        if order != max_order:
+            probs = dict(
+                (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
+        prob_list.append(probs)
+    del prob_list[0]
+    prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
+    return prob_list
+
+
+def _get_simple_good_turing_log_scores(counts, eps_lprob):
+    # this follows GT smoothing w/o tears section 6 pretty closely. You might
+    # not know what's happening otherwise
+    N_r = Counter(counts.values())
+    max_r = max(N_r.keys())
+    N_r = np.array(tuple(N_r.get(i, 0) for i in range(max_r + 2)))
+    N_r[0] = 0
+    r = np.arange(max_r + 2)
+    N = (N_r * r).sum()
+    log_N = np.log10(N)
+
+    # find S(r) = a r^b
+    nonzeros = np.where(N_r != 0)[0]
+    Z_rp1 = 2. * N_r[1:-1]
+    j = r[1:-1]
+    diff = nonzeros - j[..., None]
+    i = j - np.where(-diff < 1, max_r, -diff).min(1)
+    i[0] = 0
+    k = j + np.where(diff < 1, max_r, diff).min(1)
+    k[-1] = 2 * j[-1] - i[-1]
+    Z_rp1 /= k - i
+    y = np.log10(Z_rp1[nonzeros - 1])  # Z_rp1 does not include r=0
+    x = np.log10(r[nonzeros])
+    # regress on y = bx + a
+    mu_x, mu_y = x.mean(), y.mean()
+    num = ((x - mu_x) * (y - mu_y)).sum()
+    denom = ((x - mu_x) ** 2).sum()
+    b = num / denom if denom else 0.0
+    a = mu_y - b * mu_x
+    log_Srp1 = a + b * np.log10(r[1:])
+
+    # determine direct estimates of r* (x) as well as regressed estimates of
+    # r* (y). Use x until absolute difference between x and y is statistically
+    # significant (> 2 std dev of gauss defined by x)
+    log_r_star = np.empty(max_r + 1, dtype=float)
+    log_Nr = log_r_star[0] = np.log10(N_r[1]) if N_r[1] else eps_lprob + log_N
+    switched = False
+    C, ln_10 = np.log10(1.69), np.log(10)
+    for r_ in range(1, max_r + 1):
+        switched |= not N_r[r_]
+        log_rp1 = np.log10(r_ + 1)
+        log_y = log_rp1 + log_Srp1[r_] - log_Srp1[r_ - 1]
+        if not switched:
+            if N_r[r_ + 1]:
+                log_Nrp1 = np.log10(N_r[r_ + 1])
+            else:
+                log_Nrp1 = eps_lprob + log_N + log_Nr
+            log_x = log_rp1 + log_Nrp1 - log_Nr
+            if log_y > log_x:
+                log_abs_diff = log_y + np.log1p(-np.exp(log_x - log_y))
+            elif log_x < log_y:
+                log_abs_diff = log_x + np.log1p(-np.exp(log_y - log_x))
+            else:
+                log_abs_diff = -float('inf')
+            log_z = C + log_rp1 - log_Nr + .5 * log_Nrp1
+            log_z += .5 * np.log1p(N_r[r_ + 1] / N_r[r_]) / ln_10
+            if log_abs_diff <= log_z:
+                switched = True
+            else:
+                log_r_star[r_] = log_x
+            log_Nr = log_Nrp1
+        if switched:
+            log_r_star[r_] = log_y
+
+    # G&S tell us to renormalize the prob mass among the nonzero r terms. i.e.
+    # p[0] = r_star[0] / N
+    # p[i] = (1 - p[0]) r_star[i] / N'
+    # where N' = \sum_i>0 N_r[i] r_star[i]
+    max_log_r_star = np.max(log_r_star[1:][nonzeros[:-1] - 1])
+    log_Np = np.log10(
+        (N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
+    log_Np += max_log_r_star
+    log_p_0 = log_r_star[0] - log_N
+    log_p_r = log_r_star - log_Np + np.log10(1 - 10 ** log_p_0)
+    log_p_r[0] = log_p_0
+    return log_p_r
+
+
+def ngram_counts_to_prob_list_simple_good_turing(
+        ngram_counts, eps_lprob=-99.999):
+    r'''Determine probabilities based on n-gram counts using simple good-turing
+
+    Simple Good-Turing smoothing discounts counts of n-grams according to the
+    following scheme:
+
+    .. math::
+
+        r_* = (r + 1) N_{r + 1} / N_r
+
+    Where :math:`r` is the original count of the n-gram in question,
+    :math:`r_*` the discounted, and :math:`N_r` is the count of the number of
+    times any n-gram had a count `r`.
+
+    When :math:`N_r` becomes sparse, it is replaced with a log-linear
+    regression of :math:`N_r` values, :math:`S(r) = a + b \log r`.
+
+    Parameters
+    ----------
+    ngram_counts : sequence
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to
+        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
+        Keys are tuples of tokens (n-grams) of the appropriate length, with
+        the exception of unigrams, whose keys are the tokens themselves.
+        Values are the counts of those n-grams in the corpus
+    eps_lprob : float, optional
+        A very negative value substituted as "negligible probability"
+
+    Returns
+    -------
+    prob_list : sequence
+        Corresponding n-gram conditional probabilities. See
+        :mod:`pydrobert.torch.util.parse_arpa_lm`
+
+    Warnings
+    --------
+    This function manually defines all n-grams of the target order given a
+    vocabulary. This means that higher-order n-grams will be very large.
+    Further, it makes no distinction between start tokens, end tokens, and
+    regular tokens. This means inappropriate n-grams, such as
+    ``('<s>', '<s>', 'a')`` or ``('</s>', 'a')``, will have to be manually
+    removed.
+
+    Examples
+    --------
+    >>> from collections import Counter
+    >>> text = 'a man a plan a canal panama'
+    >>> ngram_counts = [
+    >>>     Counter(
+    >>>         tuple(text[offs:offs + order]) if order > 1
+    >>>         else text[offs:offs + order]
+    >>>         for offs in range(len(text) - order + 1)
+    >>>     )
+    >>>     for order in range(1, 4)
+    >>> ]
+    >>> ngram_counts[0]['<unk>'] = 0  # add oov to vocabulary
+    >>> ngram_counts[0]['a']
+    (10, 1)
+    >>> sum(ngram_counts[0].values())
+    27
+    >>> Counter(ngram_counts[0].values())
+    Counter({2: 3, 10: 1, 6: 1, 4: 1, 1: 1, 0: 1})
+    >>> # N_1 = 1, N_2 = 3, N_3 = 1
+    >>> prob_list = ngram_counts_to_prob_list_simple_good_turing(ngram_counts)
+    >>> # Pr('<unk>') = Pr(r=0) = N_1 / N_0 / N *= 1 / 27
+    >>> prob_list[0]['<unk>']   # (log10(1 / 27), eps_lprob)
+    (-1.4313637641589874, -99.999)
+
+    References
+    ----------
+    .. [gale1995] W. A. Gale and G. Sampson, "Good‐Turing frequency estimation
+       without tears," Journal of Quantitative Linguistics, vol. 2, no. 3, pp.
+       217-237, Jan. 1995.
+    '''
+    if len(ngram_counts) < 1:
+        raise ValueError('At least unigram counts must exist')
+    max_order = len(ngram_counts) - 1
+    vocab = set(ngram_counts[0])
+    prob_list = [{tuple(): (0, None)}]
+    for order, counts in enumerate(ngram_counts):
+        probs = dict()
+        log_scores = _get_simple_good_turing_log_scores(counts, eps_lprob)
+        N_0_vocab = set()
+        for ngram in product(vocab, repeat=order + 1):
+            r = counts.get(ngram if order else ngram[0], 0)
+            probs[ngram] = log_scores[r] - prob_list[-1][ngram[:-1]][0]
+            if not r:
+                N_0_vocab.add(ngram)
+        if N_0_vocab:
+            log_N_0 = np.log10(len(N_0_vocab))
+            for ngram in N_0_vocab:
+                # distribute r=0 probability mass over unseen n-grams
+                probs[ngram] -= log_N_0
+        if order != max_order:
+            probs = dict(
+                (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
+        prob_list.append(probs)
+    del prob_list[0]
+    prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
+    return prob_list
+

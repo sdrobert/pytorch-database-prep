@@ -36,6 +36,7 @@ __all__ = [
     'ngram_counts_to_prob_list_mle',
     'ngram_counts_to_prob_list_add_k',
     'ngram_counts_to_prob_list_simple_good_turing',
+    'ngram_counts_to_prob_list_katz_backoff',
 ]
 
 locale.setlocale(locale.LC_ALL, 'C')
@@ -477,19 +478,19 @@ def write_arpa(prob_list, out=sys.stdout):
 
 
 def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
-    '''Determine probabilities based on MLE of observed n-gram counts
+    r'''Determine probabilities based on MLE of observed n-gram counts
 
-    For a given n-gram :math:`w`, the maximum likelihood
-    estimate of the last token given the first is:
+    For a given n-gram :math:`p, w`, where :math:`p` is a prefix, :math:`w` is
+    the next word, the maximum likelihood estimate of the last token given the
+    prefix is:
 
     .. math::
 
-        Pr(w) = C(w) / N
+        Pr(w | p) = C(p, w) / (\sum_w' C(p, w'))
 
-    Where :math:`C(w)` is the count of the n-gram and :math:`N` is the sum of
-    all counts of the same order. Many counts will be zero, especially for
-    large n-grams or rare words, making this a not terribly generalizable
-    solution.
+    Where :math:`C(x)` Is the count of the sequence :math:`x`. Many counts will
+    be zero, especially for large n-grams or rare words, making this a not
+    terribly generalizable solution.
 
     Parameters
     ----------
@@ -527,15 +528,15 @@ def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
     27
     >>> ngram_counts[1][('a', ' ')]
     3
-    >>> sum(ngram_counts[1].values())
-    26
+    >>> sum(v for (k, v) in ngram_counts[1].items() if k[0] == 'a')
+    9
     >>> prob_list = ngram_counts_to_prob_list_mle(ngram_counts)
     >>> prob_list[0]['a']   # (log10(10 / 27), eps_lprob)
     (-0.43136376415898736, -99.99)
     >>> '<unk>' in prob_list[0]  # no probability mass gets removed
     False
-    >>> prob_list[1][('a', ' ')]  # (log10((3 / 26) / (10 / 27)), eps_lprob)
-    (-0.5064883290921682, -99.99)
+    >>> prob_list[1][('a', ' ')]  # (log10(3 / 9), eps_lprob)
+    (-0.47712125471966244, -99.99)
 
     Notes
     -----
@@ -547,6 +548,21 @@ def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
         ngram_counts, eps_lprob=-99.99, k=0.)
 
 
+def _get_cond_mle(order, counts, vocab, k):
+    n_counts = dict()  # C(p, w) + k
+    d_counts = dict()  # \sum_w' C(p, w') + k|V|
+    for ngram in product(vocab, repeat=order + 1):
+        c = counts.get(ngram if order else ngram[0], 0) + k
+        if not c:
+            continue
+        n_counts[ngram] = c
+        d_counts[ngram[:-1]] = d_counts.get(ngram[:-1], 0) + c
+    return dict(
+        (ng, np.log10(num) - np.log10(d_counts[ng[:-1]]))
+        for ng, num in n_counts.items()
+    )
+
+
 def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
     r'''MLE probabilities with constant discount factor added to counts
 
@@ -555,9 +571,10 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
 
     .. math::
 
-        Pr(w) = (C(w) + k)/(N + k|V|)
+        Pr(w|p) = (C(p,w) + k)/(\sum_w' C(p, w') + k|V|)
 
-    Where :math:`V` is the vocabulary set. The initial vocabulary set is
+    Where :math:`p` is a prefix, :math:`w` is the next word, and
+    :math:`V` is the vocabulary set. The initial vocabulary set is
     determined from the unique unigrams :math:`V = U`. The bigram vocabulary
     set is the Cartesian product :math:`V = U \times U`, trigrams
     :math:`V = U \times U \times U`, and so on.
@@ -596,53 +613,53 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
     10
     >>> sum(ngram_counts[0].values())
     27
-    >>> sum(ngram_counts[1].values())
-    26
+    >>> ('a', '<unk>') not in ngram_counts[1]
+    True
+    >>> sum(v for (k, v) in ngram_counts[1].items() if k[0] == 'a')
+    9
     >>> prob_list = ngram_counts_to_prob_list_add_k(ngram_counts, k=1)
     >>> prob_list[0]['a']   # (log10((10 + 1) / (27 + 8)), eps_lprob)
     (-0.5026753591920505, -99.999)
-    >>> # Pr('<unk>') = 1 / (27 + 8) = 1 / 35
-    >>> # Pr('<unk>', 'a') = 1 / (26 + 8 * 8) = 1 / 90
-    >>> # Pr('a' | '<unk>') = Pr('<unk>', 'a') / Pr('<unk>') = 35 / 90
-    >>> prob_list[1][('<unk>', 'a')]  # (log10(35 / 90), eps_lprob)
-    (-0.4101744650890493, -99.999)
+    >>> # Pr('a' | '<unk>') = (C('<unk>', 'a') + k) / (C('<unk>', .) + k|V|)
+    >>> #                   = 1 / 8
+    >>> prob_list[1][('<unk>', 'a')]  # (log10(1 / 8), eps_lprob)
+    (-0.9030899869919435, -99.999)
+    >>> # Pr('<unk>' | 'a') = (C('a', '<unk>') + k) / (C('a', .) + k|V|)
+    >>> #                   = 1 / (9 + 8)
+    >>> prob_list[1][('a', '<unk>')]  # (log10(1 / 17), eps_lprob)
+    (-1.2304489213782739, -99.999)
     '''
     max_order = len(ngram_counts) - 1
     if not len(ngram_counts):
         raise ValueError('At least unigram counts must exist')
-    vocab = list(ngram_counts[0])
-    prob_list = [{tuple(): (0, None)}]  # Pr(empty) = 1., will remove at end
+    vocab = set(ngram_counts[0])
+    prob_list = []
     for order, counts in enumerate(ngram_counts):
-        new_counts = dict()
-        N = 0
-        for ngram in product(vocab, repeat=order + 1):
-            count = counts.get(ngram if order else ngram[0], 0) + k
-            if not count:
-                continue
-            new_counts[ngram] = count
-            N += count
-        if N < 1:
-            if not order:
-                raise ValueError('Total unigram count is not positive')
-            warnings.warn(
-                'total {}-gram count is not positive. Skipping this and all '
-                'higher order n-grams in return'.format(order + 1))
-            break
-        log_N = np.log10(N)
-        probs = dict(
-            (ngram, np.log10(count) - log_N - prob_list[-1][ngram[:-1]][0])
-            for (ngram, count) in new_counts.items()
-        )
+        probs = _get_cond_mle(order, counts, vocab, k)
         if order != max_order:
             probs = dict(
                 (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
         prob_list.append(probs)
-    del prob_list[0]
     prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
     return prob_list
 
 
-def _get_simple_good_turing_log_scores(counts, eps_lprob):
+def _log10sumexp(*args):
+    if len(args) > 1:
+        return _log10sumexp(np.array(args, dtype=float))
+    x = args[0]
+    if np.any(np.isnan(x)):
+        return np.nan
+    if np.any(np.isposinf(x)):
+        return np.inf
+    x = x[np.isfinite(x)]
+    if not len(x):
+        return 0.
+    max_ = np.max(x)
+    return np.log10((10 ** (x - max_)).sum()) + max_
+
+
+def _simple_good_turing_counts(counts, eps_lprob):
     # this follows GT smoothing w/o tears section 6 pretty closely. You might
     # not know what's happening otherwise
     N_r = Counter(counts.values())
@@ -652,9 +669,9 @@ def _get_simple_good_turing_log_scores(counts, eps_lprob):
     r = np.arange(max_r + 2)
     N = (N_r * r).sum()
     log_N = np.log10(N)
+    nonzeros = np.where(N_r != 0)[0]
 
     # find S(r) = a r^b
-    nonzeros = np.where(N_r != 0)[0]
     Z_rp1 = 2. * N_r[1:-1]
     j = r[1:-1]
     diff = nonzeros - j[..., None]
@@ -710,14 +727,15 @@ def _get_simple_good_turing_log_scores(counts, eps_lprob):
     # p[0] = r_star[0] / N
     # p[i] = (1 - p[0]) r_star[i] / N'
     # where N' = \sum_i>0 N_r[i] r_star[i]
+    # we convert back to counts so that our conditional MLEs are accurate
     max_log_r_star = np.max(log_r_star[1:][nonzeros[:-1] - 1])
     log_Np = np.log10(
         (N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
     log_Np += max_log_r_star
     log_p_0 = log_r_star[0] - log_N
-    log_p_r = log_r_star - log_Np + np.log10(1 - 10 ** log_p_0)
-    log_p_r[0] = log_p_0
-    return log_p_r
+    log_r_star[1:] += -log_Np + np.log10(1 - 10 ** log_p_0) + log_N
+
+    return log_r_star
 
 
 def ngram_counts_to_prob_list_simple_good_turing(
@@ -729,14 +747,24 @@ def ngram_counts_to_prob_list_simple_good_turing(
 
     .. math::
 
-        r_* = (r + 1) N_{r + 1} / N_r
+        r^* = (r + 1) N_{r + 1} / N_r
 
     Where :math:`r` is the original count of the n-gram in question,
-    :math:`r_*` the discounted, and :math:`N_r` is the count of the number of
+    :math:`r^*` the discounted, and :math:`N_r` is the count of the number of
     times any n-gram had a count `r`.
 
     When :math:`N_r` becomes sparse, it is replaced with a log-linear
     regression of :math:`N_r` values, :math:`S(r) = a + b \log r`.
+    :math:`r^*` for :math:`r > 0` are renormalized so that
+    :math:`\sum_r N_r r^* = \sum_r N_r r`.
+
+    We assume a closed vocabulary and that, for any order n-gram, :math:`N_0`
+    is the size of the set of n-grams with frequency zero. This method differs
+    from traditional Good-Turing, which assumes one unseen "event" (i.e.
+    n-gram) per level. See below notes for more details.
+
+    If, for a given order of n-gram, none of the terms have frequency
+    zero, this function will warn and use MLEs.
 
     Parameters
     ----------
@@ -755,14 +783,29 @@ def ngram_counts_to_prob_list_simple_good_turing(
         Corresponding n-gram conditional probabilities. See
         :mod:`pydrobert.torch.util.parse_arpa_lm`
 
+    Notes
+    -----
+    The traditional definition of Good-Turing is somewhat vague about how to
+    assign probability mass among unseen events. By setting
+    :math:`r^* = N_1 / N` for :math:`r = 0`, it's implicitly stating that
+    :math:`N_0 = 1`, that is, there's only one possible unseen event. This is
+    consistent with introducing a special token, e.g. ``"<unk>"``, that does
+    not occur in the corpus. It also collapses unseen n-grams into one event.
+
+    We cannot bootstrap the backoff penalty to be the probability of the
+    unseen term because the backoff will be combined with a lower-order
+    estimate, and Good-Turing uses a fixed unseen probability.
+
+    As our solution, we assume the vocabulary is closed. Any term that appears
+    zero times is added to :math:`N_0`. If all terms appear, then
+    :math:`N_0 = 0` and we revert to the MLE. While you can simulate the
+    traditional Good-Turing at the unigram-level by introducing ``"<unk>"``
+    with count 0, this will not hold for higher-order n-grams.
+
     Warnings
     --------
     This function manually defines all n-grams of the target order given a
     vocabulary. This means that higher-order n-grams will be very large.
-    Further, it makes no distinction between start tokens, end tokens, and
-    regular tokens. This means inappropriate n-grams, such as
-    ``('<s>', '<s>', 'a')`` or ``('</s>', 'a')``, will have to be manually
-    removed.
 
     Examples
     --------
@@ -777,17 +820,19 @@ def ngram_counts_to_prob_list_simple_good_turing(
     >>>     for order in range(1, 4)
     >>> ]
     >>> ngram_counts[0]['<unk>'] = 0  # add oov to vocabulary
-    >>> ngram_counts[0]['a']
-    (10, 1)
     >>> sum(ngram_counts[0].values())
     27
     >>> Counter(ngram_counts[0].values())
     Counter({2: 3, 10: 1, 6: 1, 4: 1, 1: 1, 0: 1})
     >>> # N_1 = 1, N_2 = 3, N_3 = 1
     >>> prob_list = ngram_counts_to_prob_list_simple_good_turing(ngram_counts)
-    >>> # Pr('<unk>') = Pr(r=0) = N_1 / N_0 / N *= 1 / 27
+    >>> # Pr('<unk>') = Pr(r=0) = N_1 / N_0 / N = 1 / 27
     >>> prob_list[0]['<unk>']   # (log10(1 / 27), eps_lprob)
     (-1.4313637641589874, -99.999)
+    >>> # Pr('a'|'<unk>') = Cstar('<unk>', 'a') / (Cstar('unk', .))
+    >>> #                 = rstar[0] / (|V| * rstar[0]) = 1 / 8
+    >>> prob_list[1][('<unk>', 'a')]  # (log10(1 / 8), eps_lprob)
+    (-0.9030899869919435, -99.999)
 
     References
     ----------
@@ -799,26 +844,204 @@ def ngram_counts_to_prob_list_simple_good_turing(
         raise ValueError('At least unigram counts must exist')
     max_order = len(ngram_counts) - 1
     vocab = set(ngram_counts[0])
-    prob_list = [{tuple(): (0, None)}]
+    prob_list = []
     for order, counts in enumerate(ngram_counts):
-        probs = dict()
-        log_scores = _get_simple_good_turing_log_scores(counts, eps_lprob)
         N_0_vocab = set()
+        log_r_stars = _simple_good_turing_counts(counts, eps_lprob)
+        n_counts = dict()
+        d_counts = dict()
         for ngram in product(vocab, repeat=order + 1):
             r = counts.get(ngram if order else ngram[0], 0)
-            probs[ngram] = log_scores[r] - prob_list[-1][ngram[:-1]][0]
-            if not r:
+            if r:
+                c = 10. ** log_r_stars[r]
+                n_counts[ngram] = c
+                d_counts[ngram[:-1]] = d_counts.get(ngram[:-1], 0) + c
+            else:
                 N_0_vocab.add(ngram)
-        if N_0_vocab:
-            log_N_0 = np.log10(len(N_0_vocab))
+        N_0 = len(N_0_vocab)
+        if N_0:
+            c = (10 ** log_r_stars[0]) / N_0
             for ngram in N_0_vocab:
-                # distribute r=0 probability mass over unseen n-grams
-                probs[ngram] -= log_N_0
+                n_counts[ngram] = c
+                d_counts[ngram[:-1]] = d_counts.get(ngram[:-1], 0) + c
+            probs = dict(
+                (ng, np.log10(n_counts[ng]) - np.log10(d_counts[ng[:-1]]))
+                for ng in n_counts
+            )
+        else:
+            warnings.warn(
+                'No {}-grams were missing. Using MLE instead'
+                ''.format(order + 1))
+            probs = _get_cond_mle(order, counts, vocab, 0)
         if order != max_order:
             probs = dict(
                 (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
         prob_list.append(probs)
-    del prob_list[0]
     prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
     return prob_list
 
+
+def _get_katz_discounted_counts(counts, k):
+    N_r = Counter(counts.values())
+    max_r = max(N_r.keys())
+    N_r = np.array(tuple(N_r.get(i, 0) for i in range(max_r + 2)))
+    N_r[0] = 1
+    r = np.arange(max_r + 2)
+    N = (N_r * r).sum()
+    log_N = np.log10(N)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log_Nr = np.log10(N_r)
+        log_rp1 = np.log10(r + 1)
+        log_r_star = log_rp1[:-1] + log_Nr[1:] - log_Nr[:-1]
+    if k + 1 < len(N_r):
+        log_d_rp1 = np.zeros(max_r, dtype=float)
+        log_num_minu = log_r_star[1:k + 1] - log_rp1[:k]
+        log_subtra = np.log10(k + 1) + log_Nr[k + 1] - log_Nr[1]
+        if log_subtra >= 0:
+            raise ValueError('Your corpus is too small for this')
+        # np.log10((10 ** (x - max_)).sum()) + max_
+        log_num = log_num_minu + np.log10(
+            1 - 10 ** (log_subtra - log_num_minu))
+        log_denom = np.log1p(-(10 ** log_subtra)) / np.log(10)
+        log_d_rp1[:k] = log_num - log_denom
+    else:
+        log_d_rp1 = log_r_star[1:] - log_rp1[:-1]
+    log_r_star = np.empty(max_r + 1, dtype=float)
+    log_r_star[0] = log_Nr[1]
+    log_r_star[1:] = log_d_rp1 + log_rp1[:-2]
+    assert np.isclose(_log10sumexp(log_r_star + log_Nr[:-1]), log_N)
+    return log_r_star
+
+
+def ngram_counts_to_prob_list_katz_backoff(
+        ngram_counts, k=5, eps_lprob=-99.999):
+    r'''Determine probabilities based on Katz's backoff algorithm
+
+    Kat'z backoff algorithm determines the conditional probability of the last
+    token in n-gram :math:`w = (w_1, w_2, ..., w_n)` as
+
+    .. math::
+
+        Pr_{BO}(w_n|w_{n-1}, w_{n-2} ..., w_1) = \begin{cases}
+            d_w Pr_{MLE}(w_n|w_{n-1}, w_{n-1}, ..., w_1) & \text{if }C(w) > 0
+            \alpha(w_1, ..., w_{n-1}) Pr_{BO}(w_n|w_{n-1}, ..., w_2)&
+                                                                    \text{else}
+        \end{cases}
+
+    Where :math:`Pr_{MLE}` is the maximum likelihood estimate (based on
+    frequencies), :math:`d_w` is some discount factor (based on Good-Turing
+    for low-frequency n-grams), and :math:`\alpha` is an allowance of the
+    leftover probability mass from discounting.
+
+    Parameters
+    ----------
+    ngram_counts : sequence
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to
+        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
+        Keys are tuples of tokens (n-grams) of the appropriate length, with
+        the exception of unigrams, whose keys are the tokens themselves.
+        Values are the counts of those n-grams in the corpus
+    k : int, optional
+        `k` is a threshold such that, if :math:`C(w) > k`, no discounting will
+        be applied to the term. That is, the probability mass assigned for
+        backoff will be entirely from n-grams s.t. :math:`C(w) \leq k`
+    eps_lprob : float, optional
+        A very negative value substituted as "negligible probability"
+
+    Returns
+    -------
+    prob_list : sequence
+        Corresponding n-gram conditional probabilities. See
+        :mod:`pydrobert.torch.util.parse_arpa_lm`
+
+
+    Examples
+    --------
+    >>> from nltk.corpus import brown
+    >>> from collections import Counter
+    >>> text = tuple(brown.words())[:20000]
+    >>> ngram_counts = [
+    >>>     Counter(
+    >>>         text[offs:offs + order] if order > 1
+    >>>         else text[offs]
+    >>>         for offs in range(len(text) - order + 1)
+    >>>     )
+    >>>     for order in range(1, 4)
+    >>> ]
+    >>> del text
+    >>> prob_list = ngram_counts_to_prob_list_katz_backoff(ngram_counts)
+
+    References
+    ----------
+    .. [katz1987] S. Katz, "Estimation of probabilities from sparse data for
+       the language model component of a speech recognizer," IEEE Transactions
+       on Acoustics, Speech, and Signal Processing, vol. 35, no. 3, pp.
+       400-401, Mar. 1987.
+    '''
+    if len(ngram_counts) < 1:
+        raise ValueError('At least unigram counts must exist')
+    if k < 1:
+        raise ValueError('k too low')
+    prob_list = []
+    max_order = len(ngram_counts) - 1
+    for order, counts in enumerate(ngram_counts):
+        if not order:  # MLE for unigrams
+            probs = _get_cond_mle(order, counts, set(counts), 0)
+            if order != max_order:
+                probs = dict(
+                    (ngram, (prob, eps_lprob))
+                    for (ngram, prob) in probs.items())
+            prob_list.append(probs)
+            continue
+        probs = dict()
+        log_r_stars = _get_katz_discounted_counts(counts, k)
+        # P_katz(w|pr) = C*(pr, w) / \sum_x C*(pr, x) if C(pr, w) > 0
+        #                alpha(pr) Pr_katz(w|pr[1:]) else
+        # alpha(pr) = (1 - sum_{c(pr, w) > 0} Pr*(w|pr)
+        #             / (1 - sum_{c(pr, w) > 0} Pr*(w|pr[1:]))
+        # note: \sum_w C*(pr, w) = \sum_w C(pr, w), which is why we can
+        # normalize by the true counts
+        lg_num_subtras = dict()  # logsumexp(log c*(pr,w)) for c(pr,w) > 0
+        lg_den_subtras = dict()  # logsumexp(log Pr(w|pr[1:]) for c(pr, w) > 0
+        lg_pref_counts = dict()  # logsumexp(log c(pr)) for c(pr,w) > 0
+        for ngram, r in counts.items():
+            if not r:
+                continue
+            log_r_star = log_r_stars[r]
+            probs[ngram] = log_r_star
+            lg_num_subtras[ngram[:-1]] = _log10sumexp(
+                lg_num_subtras.get(ngram[:-1], -np.inf), log_r_star)
+            lg_den_subtras[ngram[:-1]] = _log10sumexp(
+                lg_den_subtras.get(ngram[:-1], -np.inf),
+                prob_list[-1][ngram[1:]][0]
+            )
+            lg_pref_counts[ngram[:-1]] = _log10sumexp(
+                lg_pref_counts.get(ngram[:-1], -np.inf), np.log10(r))
+        for ngram in probs:
+            probs[ngram] -= lg_pref_counts[ngram[:-1]]
+        for prefix, lg_num_subtra in lg_num_subtras.items():
+            lg_den_subtra = lg_den_subtras[prefix]
+            num_subtra = 10. ** (lg_num_subtra - lg_pref_counts[prefix])
+            den_subtra = 10. ** lg_den_subtra
+            if np.isclose(num_subtra, 1.) or np.isclose(den_subtra, 1.):
+                # this tends to happen when the probability mass of extensions
+                # of the prefix solely lies on one or two high frequency terms
+                # s.t. their count exceeds k. For example, in the Brown
+                # Corpus, "Hong" only occurs before "Kong", with the count of
+                # "Hong Kong" being 11.
+                warnings.warn(
+                    'Cannot back off to prefix {}. Will assign negligible '
+                    'probability. If this is an issue, try increasing k'
+                    ''.format(prefix))
+                continue
+            log_alpha = np.log1p(-num_subtra) - np.log1p(-den_subtra)
+            log_alpha /= np.log(10)
+            log_prob, bad_backoff = prob_list[-1][prefix]
+            assert bad_backoff == eps_lprob
+            prob_list[-1][prefix] = (log_prob, log_alpha)
+        if order != max_order:
+            probs = dict(
+                (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
+        prob_list.append(probs)
+    prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
+    return prob_list

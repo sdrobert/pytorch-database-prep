@@ -900,8 +900,8 @@ def _get_katz_discounted_counts(counts, k):
         if log_subtra >= 0:
             raise ValueError('Your corpus is too small for this')
         # np.log10((10 ** (x - max_)).sum()) + max_
-        log_num = log_num_minu + np.log10(
-            1 - 10 ** (log_subtra - log_num_minu))
+        log_num = log_num_minu + np.log1p(
+            -10 ** (log_subtra - log_num_minu)) / np.log(10)
         log_denom = np.log1p(-(10 ** log_subtra)) / np.log(10)
         log_d_rp1[:k] = log_num - log_denom
     else:
@@ -914,7 +914,7 @@ def _get_katz_discounted_counts(counts, k):
 
 
 def ngram_counts_to_prob_list_katz_backoff(
-        ngram_counts, k=5, eps_lprob=-99.999):
+        ngram_counts, k=7, eps_lprob=-99.999, _cmu_hacks=False):
     r'''Determine probabilities based on Katz's backoff algorithm
 
     Kat'z backoff algorithm determines the conditional probability of the last
@@ -948,12 +948,25 @@ def ngram_counts_to_prob_list_katz_backoff(
     eps_lprob : float, optional
         A very negative value substituted as "negligible probability"
 
+    Warnings
+    --------
+    If the counts of the extensions of a prefix are all above k, no discounting
+    will be applied to those counts, meaning no probability mass can be
+    assigned to unseen events.
+
+    For example, in the Brown corpus, "Hong" is always followed by "Kong". The
+    bigram "Hong Kong" occurs something like 10 times, so it's not discounted.
+    Thus :math:`P_{BO}(Kong|Hong) = 1` :math:`P_{BO}(not Kong|Hong) = 0`.
+
+    A :obj:`UserWarning` will be issued whenever ths happens. If this bothers
+    you, you could try increasing `k` or, better yet, abandon Katz Backoff
+    altogether.
+
     Returns
     -------
     prob_list : sequence
         Corresponding n-gram conditional probabilities. See
         :mod:`pydrobert.torch.util.parse_arpa_lm`
-
 
     Examples
     --------
@@ -984,17 +997,43 @@ def ngram_counts_to_prob_list_katz_backoff(
         raise ValueError('k too low')
     prob_list = []
     max_order = len(ngram_counts) - 1
-    for order, counts in enumerate(ngram_counts):
-        if not order:  # MLE for unigrams
-            probs = _get_cond_mle(order, counts, set(counts), 0)
-            if order != max_order:
-                probs = dict(
-                    (ngram, (prob, eps_lprob))
-                    for (ngram, prob) in probs.items())
-            prob_list.append(probs)
-            continue
+    probs = _get_cond_mle(0, ngram_counts[0], set(ngram_counts[0]), 0)
+    if 0 != max_order:
+        probs = dict(
+            (ngram, (prob, eps_lprob))
+            for (ngram, prob) in probs.items())
+    prob_list.append(probs)
+    log_r_stars = [
+        _get_katz_discounted_counts(counts, k)
+        for counts in ngram_counts[1:]
+    ]
+    if _cmu_hacks:
+        # A note on CMU compatibility. First, the standard non-ML estimate of
+        # P(w|p) = C(p, w) / C(p) instead of P(w|p) = C(p, w) / sum_w' C(p, w')
+        # Second, this below loop. We add one to the count of a prefix whenever
+        # that prefix has only one child and that child's count is greater than
+        # k (in increment_context.cc). This ensures there's a non-zero backoff
+        # to assign to unseen contexts starting with that prefix (N.B. this
+        # hack should be extended to the case where all children have count
+        # greater than k, but I don't want to reinforce this behaviour). Note
+        # that it is applied AFTER the MLE for unigrams, and AFTER deriving
+        # discounted counts.
+        for order in range(len(ngram_counts) - 1, 0, -1):
+            prefix2children = dict()
+            for ngram, count in ngram_counts[order].items():
+                prefix2children.setdefault(ngram[:-1], []).append(ngram)
+            for prefix, children in prefix2children.items():
+                if (
+                        len(children) == 1 and
+                        ngram_counts[order][children[0]] > k):
+                    for oo in range(order):
+                        pp = prefix[:oo + 1]
+                        if not oo:
+                            pp = pp[0]
+                        ngram_counts[oo][pp] += 1
+    for order in range(1, len(ngram_counts)):
+        counts = ngram_counts[order]
         probs = dict()
-        log_r_stars = _get_katz_discounted_counts(counts, k)
         # P_katz(w|pr) = C*(pr, w) / \sum_x C*(pr, x) if C(pr, w) > 0
         #                alpha(pr) Pr_katz(w|pr[1:]) else
         # alpha(pr) = (1 - sum_{c(pr, w) > 0} Pr*(w|pr)
@@ -1007,7 +1046,7 @@ def ngram_counts_to_prob_list_katz_backoff(
         for ngram, r in counts.items():
             if not r:
                 continue
-            log_r_star = log_r_stars[r]
+            log_r_star = log_r_stars[order - 1][r]
             probs[ngram] = log_r_star
             lg_num_subtras[ngram[:-1]] = _log10sumexp(
                 lg_num_subtras.get(ngram[:-1], -np.inf), log_r_star)
@@ -1018,17 +1057,26 @@ def ngram_counts_to_prob_list_katz_backoff(
             lg_pref_counts[ngram[:-1]] = _log10sumexp(
                 lg_pref_counts.get(ngram[:-1], -np.inf), np.log10(r))
         for ngram in probs:
-            probs[ngram] -= lg_pref_counts[ngram[:-1]]
+            prefix = ngram[:-1]
+            if _cmu_hacks:
+                if order == 1:
+                    prefix = prefix[0]
+                lg_norm = np.log10(ngram_counts[order - 1][prefix])
+            else:
+                lg_norm = lg_pref_counts[prefix]
+            probs[ngram] -= lg_norm
         for prefix, lg_num_subtra in lg_num_subtras.items():
             lg_den_subtra = lg_den_subtras[prefix]
-            num_subtra = 10. ** (lg_num_subtra - lg_pref_counts[prefix])
+            if _cmu_hacks:
+                if order == 1:
+                    lg_norm = np.log10(ngram_counts[order - 1][prefix[0]])
+                else:
+                    lg_norm = np.log10(ngram_counts[order - 1][prefix])
+            else:
+                lg_norm = lg_pref_counts[prefix]
+            num_subtra = 10. ** (lg_num_subtra - lg_norm)
             den_subtra = 10. ** lg_den_subtra
             if np.isclose(num_subtra, 1.) or np.isclose(den_subtra, 1.):
-                # this tends to happen when the probability mass of extensions
-                # of the prefix solely lies on one or two high frequency terms
-                # s.t. their count exceeds k. For example, in the Brown
-                # Corpus, "Hong" only occurs before "Kong", with the count of
-                # "Hong Kong" being 11.
                 warnings.warn(
                     'Cannot back off to prefix {}. Will assign negligible '
                     'probability. If this is an issue, try increasing k'

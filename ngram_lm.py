@@ -39,6 +39,7 @@ __all__ = [
     'ngram_counts_to_prob_list_simple_good_turing',
     'ngram_counts_to_prob_list_katz_backoff',
     'ngram_counts_to_prob_list_absolute_discounting',
+    'ngram_counts_to_prob_list_kneser_ney',
 ]
 
 locale.setlocale(locale.LC_ALL, 'C')
@@ -1184,7 +1185,7 @@ def _absolute_discounting(ngram_counts, deltas, eps_lprob):
 
 
 def ngram_counts_to_prob_list_absolute_discounting(
-        ngram_counts, delta=None, eps_lprob=-99.99):
+        ngram_counts, delta=None, eps_lprob=-99.999):
     r'''Determine probabilities from n-gram counts using absolute discounting
 
     Absolute discounting (based on the formulation in [chen1999]_) interpolates
@@ -1231,9 +1232,15 @@ def ngram_counts_to_prob_list_absolute_discounting(
         the recursion; or a tuple of length `ngram_counts`, where
         each element is either a :class:`float` or :obj:`None`, specifying
         either a fixed value or the default value for every order of the
-        recursion (except the zeroth-order)
+        recursion (except the zeroth-order), unigrams first
     eps_lprob : float, optional
         A very negative value substituted as "negligible probability"
+
+    Returns
+    -------
+    prob_list : sequence
+        Corresponding n-gram conditional probabilities. See
+        :mod:`pydrobert.torch.util.parse_arpa_lm`
 
     Examples
     --------
@@ -1251,7 +1258,7 @@ def ngram_counts_to_prob_list_absolute_discounting(
     10
     >>> sum(ngram_counts[0].values())
     27
-    >>> len(set(ngram_counts[0]))
+    >>> len(ngram_counts[0])
     7
     >>> sum(1 for k in ngram_counts[1] if k[0] == 'a')
     4
@@ -1281,12 +1288,6 @@ def ngram_counts_to_prob_list_absolute_discounting(
     >>> prob_list[1][('a', 'n')]  # (log10 Pr(n|a), log10 gamma_2(a, n))
     (-0.37488240820653906, -0.6020599913279624)
 
-    Returns
-    -------
-    prob_list : sequence
-        Corresponding n-gram conditional probabilities. See
-        :mod:`pydrobert.torch.util.parse_arpa_lm`
-
     References
     ----------
     .. [chen1999] S. F. Chen and J. Goodman, "An empirical study of smoothing
@@ -1305,6 +1306,206 @@ def ngram_counts_to_prob_list_absolute_discounting(
         if d is None else [d]
         for (d, counts) in zip(delta, ngram_counts)
     )
-    if not all(all(0. <= dd <= 1. for dd in d) for d in delta):
+    if not all(len(d) and all(0. <= dd <= 1. for dd in d) for d in delta):
+        raise ValueError('deltas {} must be in [0, 1]'.format(delta))
+    return _absolute_discounting(ngram_counts, delta, eps_lprob)
+
+
+def ngram_counts_to_prob_list_kneser_ney(
+        ngram_counts, delta=None, sos=None, eps_lprob=-99.999):
+    r'''Determine probabilities from counts using Kneser-Ney(-like) estimates
+
+    Chen and Goodman's implemented Kneser-Ney smoothing [chen1999]_ is the same
+    as absolute discounting, but with lower-order n-gram counts ((n-1)-grams,
+    (n-2)-grams, etc.) replaced with adjusted counts:
+
+    .. math::
+
+        C'(w_1, \ldots, w_k) = \begin{cases}
+            C(w_1, \ldots, w_k) & k = n \lor w_1 = sos \\
+            \left|\left\{v : C(v, w_1, \ldots, w_k) > 0\right\}\right| & else\\
+        \end{cases}
+
+    The adjusted count is the number of unique prefixes the n-gram can occur
+    with. We do not modify n-grams starting with the start-of-sequence `sos`
+    token (as per [heafield2013]_) as they cannot have a preceding context.
+
+    By default, modified Kneser-Ney is performed, which uses different
+    absolute discounts for different adjusted counts:
+
+    .. math::
+
+        Pr_{KN}(w_1, \ldots, w_n) =
+            \frac{C'(w_1, \ldots, w_n) - \delta(C'(w_1, \ldots, w_n))}
+                 {\sum_{w'} C'(w_1, \ldots, w_{n-1}, w')}
+            + \gamma(w_1, \ldots, w_{n-1}) Pr_{KN}(w_n|w_1, \ldots, w_{n-1})
+
+    :math:`\gamma` are chosen so that :math:`Pr_{KN}(\cdot)` sum to one.
+    As a base case, :math:`Pr_{KN}(\emptyset) = 1 / \left\|V\right\|`.
+
+    Letting :math:`N_c` be defined as in
+    :func:`ngram_counts_to_prob_list_absolute_discounting`, and
+    :math:`y = N_1 / (N_1 + 2 N_2)`, the default value for
+    :math:`\delta(\cdot)` is
+
+    .. math::
+
+        \delta(k) = k - y (N_{k + 1} / N_k)
+
+    Where we set :math:`\delta(0) = 0` and :math:`\delta(>3) = \delta(3)`.
+
+    Parameters
+    ----------
+    ngram_counts : sequence
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to
+        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
+        Keys are tuples of tokens (n-grams) of the appropriate length, with
+        the exception of unigrams, whose keys are the tokens themselves.
+        Values are the counts of those n-grams in the corpus
+    delta : float or tuple or :obj:`None`, optional
+        The absolute discount to apply to non-zero values. `delta` may be
+        a :class:`float`, at which point a fixed discount will be applied to
+        all orders of the recursion. If :obj:`None`, the default values defined
+        above will be employed. `delta` can be a :class:`tuple` of the same
+        length as `ngram_counts`, which can be used to specify discounts at
+        each level of the recursion (excluding the zero-th order), unigrams
+        first. If an element is a :class:`float`, that fixed discount will
+        be applied to all nonzero counts at that order. If :obj:`None`, `delta`
+        will be calculated in the default manner for that order. Finally, an
+        element can be a :class:`tuple` itself of positive length. In this
+        case, the elements of that tuple will correspond to the values of
+        :math:`\delta(k)` where the i-th indexed element is
+        :math:`\delta(i+1)`. Counts above the last :math:`\delta(k)` will use
+        the same discount as the last :math:`\delta(k)`. Elements within the
+        tuple can be either :class:`float` (use this value) or :obj:`None`
+        (use defafult)
+    sos : str or :obj:`None`, optional
+        The start-of-sequence symbol. Defaults to ``'<S>'`` if that symbol is
+        in the vocabulary, otherwise ``'<s>'``
+    eps_lprob : float, optional
+        A very negative value substituted as "negligible probability"
+
+    Returns
+    -------
+    prob_list : sequence
+        Corresponding n-gram conditional probabilities. See
+        :mod:`pydrobert.torch.util.parse_arpa_lm`
+
+    Examples
+    --------
+    >>> from collections import Counter
+    >>> text = 'a man a plan a canal panama'
+    >>> ngram_counts = [
+    >>>     Counter(
+    >>>         tuple(text[offs:offs + order]) if order > 1
+    >>>         else text[offs:offs + order]
+    >>>         for offs in range(len(text) - order + 1)
+    >>>     )
+    >>>     for order in range(1, 5)
+    >>> ]
+    >>> ngram_counts[0]
+    Counter({'a': 10, ' ': 6, 'n': 4, 'm': 2, 'p': 2, 'l': 2, 'c': 1})
+    >>> adjusted_unigrams = dict(
+    >>>     (k, sum(1 for kk in ngram_counts[1] if kk[1] == k))
+    >>>     for k in ngram_counts[0]
+    >>> )
+    >>> adjusted_unigrams
+    {'a': 6, ' ': 3, 'm': 2, 'n': 1, 'p': 1, 'l': 2, 'c': 1}
+    >>> adjusted_bigrams = dict(
+    >>>     (k, sum(1 for kk in ngram_counts[2] if kk[1:] == k))
+    >>>     for k in ngram_counts[1]
+    >>> )
+    >>> adjusted_trigrams = dict(
+    >>>     (k, sum(1 for kk in ngram_counts[3] if kk[1:] == k))
+    >>>     for k in ngram_counts[2]
+    >>> )
+    >>> len(adjusted_unigrams)
+    7
+    >>> sum(adjusted_unigrams.values())
+    16
+    >>> sum(1 for k in adjusted_bigrams if k[0] == 'a')
+    4
+    >>> sum(v for k, v in adjusted_bigrams.items() if k[0] == 'a')
+    7
+    >>> prob_list = ngram_counts_to_prob_list_kneser_ney(
+    >>>     ngram_counts, delta=.5)
+    >>> # gamma_0() = 0.5 * 7 / 16
+    >>> # Pr(a) = (6 - 0.5) / 16 + 0.5 * (7 / 16) * (1 / 7)
+    >>> # Pr(a) = 3 / 8
+    >>> # BO(a) = gamma_1(a) = 0.5 * 4 / 7 = 2 / 7
+    >>> prob_list[0]['a']  # (log10 Pr(a), log10 BO(a))
+    (-0.42596873227228116, -0.5440680443502757)
+    >>> adjusted_bigrams[('a', 'n')]
+    4
+    >>> adjusted_unigrams['n']
+    1
+    >>> sum(1 for k in adjusted_trigrams if k[:2] == ('a', 'n'))
+    2
+    >>> sum(v for k, v in adjusted_trigrams.items() if k[:2] == ('a', 'n'))
+    4
+    >>> # Pr(n) = (1 - 0.5) / 16 + 0.5 (7 / 16) (1 / 7) = 1 / 16
+    >>> # Pr(n|a) = (4 - 0.5) / 7 + gamma_1(a) Pr(n)
+    >>> #         = (4 - 0.5) / 7 + (2 / 7) (1 / 16)
+    >>> #         = (64 - 8 + 2) / 112
+    >>> #         = 29 / 56
+    >>> # BO(a, n) = gamma_2(a, n) = 0.5 (2 / 4) = 1 / 4
+    (-0.2857900291072443, -0.6020599913279624)
+
+    Notes
+    -----
+    As discussed in [chen1999]_, Kneser-Ney is usually formulated so that only
+    unigram counts are adjusted. However, they themselves experiment with
+    modified counts for all lower orders.
+
+    References
+    ----------
+    .. [chen1999] S. F. Chen and J. Goodman, "An empirical study of smoothing
+       techniques for language modeling," Computer Speech & Language, vol. 13,
+       no. 4, pp. 359-394, Oct. 1999, doi: 10.1006/csla.1999.0128.
+    .. [heafield2013] K. Heafield, I. Pouzyrevsky, J. H. Clark, and P. Koehn,
+       "Scalable modified Kneser-Ney language model estimation,” in Proceedings
+       of the 51st Annual Meeting of the Association for Computational
+       Linguistics, Sofia, Bulgaria, 2013, vol. 2, pp. 690-696.
+    '''
+    if len(ngram_counts) < 1:
+        raise ValueError('At least unigram counts must exist')
+    if not isinstance(delta, Iterable):
+        delta = (delta,) * len(ngram_counts)
+    if len(delta) != len(ngram_counts):
+        raise ValueError(
+            'Expected {} deltas, got {}'.format(len(ngram_counts), len(delta)))
+    if sos is None:
+        sos = '<S>' if '<S>' in ngram_counts[0] else '<s>'
+    new_ngram_counts = [ngram_counts[-1]]
+    for order in range(len(ngram_counts) - 2, -1, -1):
+        new_counts = dict()
+        for ngram, count in ngram_counts[order + 1].items():
+            if not count:
+                continue
+            suffix = ngram[1:] if order else ngram[1]
+            new_counts[suffix] = new_counts.get(suffix, 0) + 1
+        new_counts.update(
+            (k, v) for (k, v) in ngram_counts[order].items()
+            if (order and k[0] == sos) or (not order and k == sos)
+        )
+        new_ngram_counts.insert(0, new_counts)
+    ngram_counts = new_ngram_counts
+    delta = list(delta)
+    for i in range(len(delta)):
+        ds, counts = delta[i], ngram_counts[i]
+        if ds is None:
+            ds = (None, None, None)
+        if not isinstance(ds, Iterable):
+            ds = (ds,)
+        ds = tuple(ds)
+        try:
+            last_deft = len(ds) - ds[::-1].index(None) - 1
+            optimals = _optimal_deltas(counts, last_deft + 1)
+            assert len(optimals) == len(ds)
+            ds = tuple(y if x is None else x for (x, y) in zip(ds, optimals))
+        except ValueError:
+            pass
+        delta[i] = ds
+    if not all(len(d) and all(0. <= dd <= 1. for dd in d) for d in delta):
         raise ValueError('deltas {} must be in [0, 1]'.format(delta))
     return _absolute_discounting(ngram_counts, delta, eps_lprob)

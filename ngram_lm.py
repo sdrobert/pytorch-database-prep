@@ -22,6 +22,7 @@ import sys
 import locale
 
 from collections import OrderedDict, Counter
+from collections.abc import Iterable
 from itertools import product
 
 import numpy as np
@@ -37,6 +38,7 @@ __all__ = [
     'ngram_counts_to_prob_list_add_k',
     'ngram_counts_to_prob_list_simple_good_turing',
     'ngram_counts_to_prob_list_katz_backoff',
+    'ngram_counts_to_prob_list_absolute_discounting',
 ]
 
 locale.setlocale(locale.LC_ALL, 'C')
@@ -1093,3 +1095,216 @@ def ngram_counts_to_prob_list_katz_backoff(
         prob_list.append(probs)
     prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
     return prob_list
+
+
+def _N_xplus_suff(s, counts, x=1, gte=True):
+    # Calculates N_{1+}(\cdot s) when x=1.
+    # Counts the number of unique prefixes with which s occurs which have
+    # count >= x. Make it only c == x when gte is false
+    if not isinstance(s, tuple):
+        s = (s,)
+    if gte:
+        return sum(
+            1 for ng, v in counts.items() if ng[-len(s):] == s and v >= x)
+    else:
+        return sum(
+            1 for ng, v in counts.items() if ng[-len(s):] == s and v == x)
+
+
+def _N_xplus_pref(p, counts, x=1, gte=True):
+    # Calculates N_{1+}(p \cdot) when x=1.
+    # Counts the number of unique suffixes with which p occurs which have
+    # count >= x
+    if not isinstance(p, tuple):
+        p = (p,)
+    if gte:
+        return sum(
+            1 for ng, v in counts.items() if ng[:len(p)] == p and v >= x)
+    else:
+        return sum(
+            1 for ng, v in counts.items() if ng[:len(p)] == p and v == x)
+
+
+def _optimal_deltas(counts, y):
+    N_r = Counter(counts.values())
+    if not all(N_r[r] for r in range(1, y + 2)):
+        raise ValueError(
+            'Your dataset is too small to use the default discount '
+            '(or maybe you removed the hapax before estimating probs?)')
+    Y = N_r[1] / (N_r[1] + 2 * N_r[2])
+    return [r - Y * N_r[r + 1] / N_r[r] for r in range(1, y + 1)]
+
+
+def _absolute_discounting(ngram_counts, deltas, eps_lprob):
+    V = len(set(ngram_counts[0]))
+    prob_list = [{tuple(): (-np.log10(V), eps_lprob)}]
+    max_order = len(ngram_counts) - 1
+    for order, counts, delta in zip(
+            range(len(ngram_counts)), ngram_counts, deltas):
+        delta = np.array(delta, dtype=float)
+        n_counts = dict()
+        d_counts = dict()
+        pr2bin = dict()
+        for ngram, count in counts.items():
+            if not count:
+                continue
+            if not order:
+                ngram = (ngram,)
+            bin_ = min(count - 1, len(delta) - 1)
+            d = delta[bin_]
+            assert count - d >= 0.
+            prefix = ngram[:-1]
+            n_counts[ngram] = n_counts.get(ngram, 0) + count - d
+            d_counts[prefix] = d_counts.get(prefix, 0) + count
+            prefix_bins = pr2bin.setdefault(prefix, np.zeros(len(delta)))
+            prefix_bins[bin_] += 1
+        for prefix, prefix_bins in pr2bin.items():
+            with np.errstate(divide='ignore'):
+                prefix_bins = np.log10(prefix_bins)
+                prefix_bins += np.log10(delta)
+            gamma = _log10sumexp(prefix_bins)
+            gamma -= np.log10(d_counts[prefix])
+            lprob, bo = prob_list[-1][prefix]
+            assert np.isclose(bo, eps_lprob)
+            prob_list[-1][prefix] = (lprob, gamma)
+        probs = dict()
+        for ngram, n_count in n_counts.items():
+            prefix = ngram[:-1]
+            lprob = np.log10(n_count) - np.log10(d_counts[prefix])
+            lower_order = prob_list[-1][prefix][1]  # gamma(prefix)
+            lower_order += prob_list[-1][ngram[1:]][0]  # Pr(w|prefix[1:])
+            lprob = _log10sumexp(lprob, lower_order)
+            if order != max_order:
+                lprob = (lprob, eps_lprob)
+            probs[ngram] = lprob
+        prob_list.append(probs)
+    del prob_list[0]  # zero-th order
+    prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
+    return prob_list
+
+
+def ngram_counts_to_prob_list_absolute_discounting(
+        ngram_counts, delta=None, eps_lprob=-99.99):
+    r'''Determine probabilities from n-gram counts using absolute discounting
+
+    Absolute discounting (based on the formulation in [chen1999]_) interpolates
+    between higher-order and lower-order n-grams as
+
+    .. math::
+
+        Pr_{abs}(w_n|w_{n-1}, \ldots w_1) =
+            \frac{\max\left\{C(w_1, \ldots, w_n) - \delta, 0\right\}}
+                {\sum_w' C(w_1, \ldots, w_{n-1}, w')}
+            - \gamma(w_1, \ldots, w_{n-1})
+               Pr_{abs}(w_n|w_{n-1}, \ldots, w_2)
+
+    Where :math:`\gamma` are chosen so :math:`Pr_{abs}(\cdot)` sum to one and
+    :math:`\delta \in [0, 1]`. For the base case, we pretend there's such a
+    thing as a zeroth-order n-gram, and
+    :math:`Pr_{abs}(\emptyset) = 1 / \left\|V\right\|`.
+
+    Letting
+
+    .. math::
+
+        N_c = \left|\left\{
+                (w'_1, \ldots, w'_n): C(w'_1, \ldots, w'_n) = c
+            \right\}\right|
+
+    :math:`\delta` is often chosen to be :math:`\delta = N_1 / (N_1 + 2N_2)`
+    for a given order n-gram. We can use different :math:`\delta` for different
+    orders of the recursion.
+
+    Parameters
+    ----------
+    ngram_counts : sequence
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to
+        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
+        Keys are tuples of tokens (n-grams) of the appropriate length, with
+        the exception of unigrams, whose keys are the tokens themselves.
+        Values are the counts of those n-grams in the corpus
+    delta : float or tuple or :obj:`None`, optional
+        The absolute discount to apply to non-zero values. `delta` can take
+        one of three forms: a :class:`float` to be used identically for all
+        orders of the recursion; :obj:`None` specifies that the above formula
+        for calculating `delta` should be used separately for each order of
+        the recursion; or a tuple of length `ngram_counts`, where
+        each element is either a :class:`float` or :obj:`None`, specifying
+        either a fixed value or the default value for every order of the
+        recursion (except the zeroth-order)
+    eps_lprob : float, optional
+        A very negative value substituted as "negligible probability"
+
+    Examples
+    --------
+    >>> from collections import Counter
+    >>> text = 'a man a plan a canal panama'
+    >>> ngram_counts = [
+    >>>     Counter(
+    >>>         tuple(text[offs:offs + order]) if order > 1
+    >>>         else text[offs:offs + order]
+    >>>         for offs in range(len(text) - order + 1)
+    >>>     )
+    >>>     for order in range(1, 4)
+    >>> ]
+    >>> ngram_counts[0]['a']
+    10
+    >>> sum(ngram_counts[0].values())
+    27
+    >>> len(set(ngram_counts[0]))
+    7
+    >>> sum(1 for k in ngram_counts[1] if k[0] == 'a')
+    4
+    >>> sum(v for k, v in ngram_counts[1].items() if k[0] == 'a')
+    9
+    >>> prob_list = ngram_counts_to_prob_list_absolute_discounting(
+    >>>     ngram_counts, delta=0.5)
+    >>> # gamma_0() = 0.5 * 7 / 27
+    >>> # Pr(a) = (10 - 0.5) / 27 + 0.5 (7 / 27) (1 / 7) = 10 / 27
+    >>> # BO(a) = gamma_1(a) = 0.5 * 4 / 9 = 2 / 9
+    >>> prob_list[0]['a']  # (log10 Pr(a), log10 gamma_1(a))
+    (-0.4313637641589874, -0.6532125137753437)
+    >>> ngram_counts[1][('a', 'n')]
+    4
+    >>> ngram_counts[0]['n']
+    4
+    >>> sum(1 for k in ngram_counts[2] if k[:2] == ('a', 'n'))
+    2
+    >>> sum(v for k, v in ngram_counts[2].items() if k[:2] == ('a', 'n'))
+    4
+    >>> # Pr(n) = (4 - 0.5) / 27 + 0.5 (7 / 27) (1 / 7) = 4 / 27
+    >>> # Pr(n|a) = (4 - 0.5) / 9 + gamma_1(a) Pr(n)
+    >>> #         = (4 - 0.5) / 9 + 0.5 (4 / 9) (4 / 27)
+    >>> #         = (108 - 13.5 + 8) / 243
+    >>> #         = 102.5 / 243
+    >>> # BO(a, n) = gamma_2(a, n) = 0.5 (2 / 4) = 1 / 4
+    >>> prob_list[1][('a', 'n')]  # (log10 Pr(n|a), log10 gamma_2(a, n))
+    (-0.37488240820653906, -0.6020599913279624)
+
+    Returns
+    -------
+    prob_list : sequence
+        Corresponding n-gram conditional probabilities. See
+        :mod:`pydrobert.torch.util.parse_arpa_lm`
+
+    References
+    ----------
+    .. [chen1999] S. F. Chen and J. Goodman, "An empirical study of smoothing
+       techniques for language modeling," Computer Speech & Language, vol. 13,
+       no. 4, pp. 359-394, Oct. 1999, doi: 10.1006/csla.1999.0128.
+    '''
+    if len(ngram_counts) < 1:
+        raise ValueError('At least unigram counts must exist')
+    if not isinstance(delta, Iterable):
+        delta = (delta,) * len(ngram_counts)
+    if len(delta) != len(ngram_counts):
+        raise ValueError(
+            'Expected {} deltas, got {}'.format(len(ngram_counts), len(delta)))
+    delta = tuple(
+        _optimal_deltas(counts, 1)
+        if d is None else [d]
+        for (d, counts) in zip(delta, ngram_counts)
+    )
+    if not all(all(0. <= dd <= 1. for dd in d) for d in delta):
+        raise ValueError('deltas {} must be in [0, 1]'.format(delta))
+    return _absolute_discounting(ngram_counts, delta, eps_lprob)

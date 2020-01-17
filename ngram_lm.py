@@ -1133,12 +1133,12 @@ def _optimal_deltas(counts, y):
             'Your dataset is too small to use the default discount '
             '(or maybe you removed the hapax before estimating probs?)')
     Y = N_r[1] / (N_r[1] + 2 * N_r[2])
-    return [r - Y * N_r[r + 1] / N_r[r] for r in range(1, y + 1)]
+    return [r - (r + 1) * Y * N_r[r + 1] / N_r[r] for r in range(1, y + 1)]
 
 
-def _absolute_discounting(ngram_counts, deltas, eps_lprob):
+def _absolute_discounting(ngram_counts, deltas):
     V = len(set(ngram_counts[0]))
-    prob_list = [{tuple(): (-np.log10(V), eps_lprob)}]
+    prob_list = [{tuple(): (-np.log10(V), 0.)}]
     max_order = len(ngram_counts) - 1
     for order, counts, delta in zip(
             range(len(ngram_counts)), ngram_counts, deltas):
@@ -1147,10 +1147,11 @@ def _absolute_discounting(ngram_counts, deltas, eps_lprob):
         d_counts = dict()
         pr2bin = dict()
         for ngram, count in counts.items():
-            if not count:
-                continue
             if not order:
                 ngram = (ngram,)
+                n_counts.setdefault(ngram, 0)
+            if not count:
+                continue
             bin_ = min(count - 1, len(delta) - 1)
             d = delta[bin_]
             assert count - d >= 0.
@@ -1166,17 +1167,19 @@ def _absolute_discounting(ngram_counts, deltas, eps_lprob):
             gamma = _log10sumexp(prefix_bins)
             gamma -= np.log10(d_counts[prefix])
             lprob, bo = prob_list[-1][prefix]
-            assert np.isclose(bo, eps_lprob)
             prob_list[-1][prefix] = (lprob, gamma)
         probs = dict()
         for ngram, n_count in n_counts.items():
             prefix = ngram[:-1]
-            lprob = np.log10(n_count) - np.log10(d_counts[prefix])
+            if n_count:
+                lprob = np.log10(n_count) - np.log10(d_counts[prefix])
+            else:
+                lprob = -float('inf')
             lower_order = prob_list[-1][prefix][1]  # gamma(prefix)
             lower_order += prob_list[-1][ngram[1:]][0]  # Pr(w|prefix[1:])
             lprob = _log10sumexp(lprob, lower_order)
             if order != max_order:
-                lprob = (lprob, eps_lprob)
+                lprob = (lprob, 0.)
             probs[ngram] = lprob
         prob_list.append(probs)
     del prob_list[0]  # zero-th order
@@ -1199,10 +1202,9 @@ def ngram_counts_to_prob_list_absolute_discounting(
             - \gamma(w_1, \ldots, w_{n-1})
                Pr_{abs}(w_n|w_{n-1}, \ldots, w_2)
 
-    Where :math:`\gamma` are chosen so :math:`Pr_{abs}(\cdot)` sum to one and
-    :math:`\delta \in [0, 1]`. For the base case, we pretend there's such a
-    thing as a zeroth-order n-gram, and
-    :math:`Pr_{abs}(\emptyset) = 1 / \left\|V\right\|`.
+    Where :math:`\gamma` are chosen so :math:`Pr_{abs}(\cdot)` sum to one.
+    For the base case, we pretend there's such a thing as a zeroth-order
+    n-gram, and :math:`Pr_{abs}(\emptyset) = 1 / \left\|V\right\|`.
 
     Letting
 
@@ -1306,13 +1308,10 @@ def ngram_counts_to_prob_list_absolute_discounting(
         if d is None else [d]
         for (d, counts) in zip(delta, ngram_counts)
     )
-    if not all(len(d) and all(0. <= dd <= 1. for dd in d) for d in delta):
-        raise ValueError('deltas {} must be in [0, 1]'.format(delta))
     return _absolute_discounting(ngram_counts, delta, eps_lprob)
 
 
-def ngram_counts_to_prob_list_kneser_ney(
-        ngram_counts, delta=None, sos=None, eps_lprob=-99.999):
+def ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=None, sos=None):
     r'''Determine probabilities from counts using Kneser-Ney(-like) estimates
 
     Chen and Goodman's implemented Kneser-Ney smoothing [chen1999]_ is the same
@@ -1350,7 +1349,7 @@ def ngram_counts_to_prob_list_kneser_ney(
 
     .. math::
 
-        \delta(k) = k - y (N_{k + 1} / N_k)
+        \delta(k) = k - (k + 1) y (N_{k + 1} / N_k)
 
     Where we set :math:`\delta(0) = 0` and :math:`\delta(>3) = \delta(3)`.
 
@@ -1382,8 +1381,6 @@ def ngram_counts_to_prob_list_kneser_ney(
     sos : str or :obj:`None`, optional
         The start-of-sequence symbol. Defaults to ``'<S>'`` if that symbol is
         in the vocabulary, otherwise ``'<s>'``
-    eps_lprob : float, optional
-        A very negative value substituted as "negligible probability"
 
     Returns
     -------
@@ -1478,7 +1475,10 @@ def ngram_counts_to_prob_list_kneser_ney(
         sos = '<S>' if '<S>' in ngram_counts[0] else '<s>'
     new_ngram_counts = [ngram_counts[-1]]
     for order in range(len(ngram_counts) - 2, -1, -1):
-        new_counts = dict()
+        if order:
+            new_counts = dict()
+        else:  # preserve vocabulary
+            new_counts = dict.fromkeys(ngram_counts[order], 0)
         for ngram, count in ngram_counts[order + 1].items():
             if not count:
                 continue
@@ -1506,6 +1506,4 @@ def ngram_counts_to_prob_list_kneser_ney(
         except ValueError:
             pass
         delta[i] = ds
-    if not all(len(d) and all(0. <= dd <= 1. for dd in d) for d in delta):
-        raise ValueError('deltas {} must be in [0, 1]'.format(delta))
-    return _absolute_discounting(ngram_counts, delta, eps_lprob)
+    return _absolute_discounting(ngram_counts, delta)

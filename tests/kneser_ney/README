@@ -1,0 +1,10 @@
+Like Katz, we're comparing our implementation to someone else's on
+Plato's Republic (see setup details in ../katz/README).
+
+We're comparing against KenLM. KenLM treats each line as a sentence, adds
+<s> and </s> to the beginning and and (even if the line is blank). KenLM adds
+<unk>
+
+To get the model:
+
+bin/lmplz --text republic.txt --order 3 --arpa republic.arpa

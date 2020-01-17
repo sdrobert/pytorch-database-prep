@@ -19,6 +19,8 @@ from __future__ import print_function
 import os
 import re
 
+from collections import Counter
+
 import numpy as np
 import pytest
 import ngram_lm
@@ -26,7 +28,9 @@ import ngram_lm
 from pydrobert.torch.util import parse_arpa_lm
 
 
+KK_DIR = os.path.join(os.path.dirname(__file__), 'kneser_ney')
 KATZ_DIR = os.path.join(os.path.dirname(__file__), 'katz')
+
 
 @pytest.fixture
 def katz_ngram_counts():
@@ -85,4 +89,33 @@ def test_katz_backoff(katz_ngram_counts):
         assert set(exp_probs) == set(act_probs)
         for ngram, exp_prob in exp_probs.items():
             act_prob = act_probs[ngram]
-            assert np.allclose(exp_prob, act_prob, atol=1e-2), ngram
+            assert np.allclose(exp_prob, act_prob, atol=1e-4), ngram
+
+
+def test_kneser_ney():
+    exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, 'republic.arpa'))
+    ngram_counts = [
+        Counter({'<unk>': 0, '<s>': 0, '</s>': 0}), Counter(), Counter()]
+    # Note: KenLM doesn't count <s> or </s> in unigrams
+    with open(os.path.join(KK_DIR, 'republic.txt')) as f:
+        for line in f:
+            s = tuple(['<s>'] + line.strip().split() + ['</s>'])
+            for order, counts in enumerate(ngram_counts):
+                counts.update(
+                    s[i:i + order + 1] if order else s[i]
+                    for i in range(
+                        max(1 - order, 0), len(s) - order - max(1 - order, 0))
+                )
+    exp_vocab = set(exp_prob_list[0])
+    count_vocab = set(ngram_counts[0])
+    assert exp_vocab == count_vocab, exp_vocab - count_vocab
+    act_prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(ngram_counts)
+    # While it doesn't really matter - you shouldn't ever need to predict <s> -
+    # it's strange that KenLM sets the unigram probability of <s> to 1
+    act_prob_list[0]['<s>'] = (0., act_prob_list[0]['<s>'][1])
+    for order in range(3):
+        exp_probs, act_probs = exp_prob_list[order], act_prob_list[order]
+        assert set(exp_probs) == set(act_probs)
+        for ngram, exp_prob in exp_probs.items():
+            act_prob = act_probs[ngram]
+            assert np.allclose(exp_prob, act_prob, atol=1e-4), ngram

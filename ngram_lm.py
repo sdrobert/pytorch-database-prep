@@ -1002,9 +1002,7 @@ def ngram_counts_to_prob_list_katz_backoff(
     max_order = len(ngram_counts) - 1
     probs = _get_cond_mle(0, ngram_counts[0], set(ngram_counts[0]), 0)
     if 0 != max_order:
-        probs = dict(
-            (ngram, (prob, eps_lprob))
-            for (ngram, prob) in probs.items())
+        probs = dict((ngram, (prob, 0.)) for (ngram, prob) in probs.items())
     prob_list.append(probs)
     log_r_stars = [
         _get_katz_discounted_counts(counts, k)
@@ -1039,8 +1037,8 @@ def ngram_counts_to_prob_list_katz_backoff(
         probs = dict()
         # P_katz(w|pr) = C*(pr, w) / \sum_x C*(pr, x) if C(pr, w) > 0
         #                alpha(pr) Pr_katz(w|pr[1:]) else
-        # alpha(pr) = (1 - sum_{c(pr, w) > 0} Pr*(w|pr)
-        #             / (1 - sum_{c(pr, w) > 0} Pr*(w|pr[1:]))
+        # alpha(pr) = (1 - sum_{c(pr, w) > 0} Pr_katz(w|pr)
+        #             / (1 - sum_{c(pr, w) > 0} Pr_katz(w|pr[1:]))
         # note: \sum_w C*(pr, w) = \sum_w C(pr, w), which is why we can
         # normalize by the true counts
         lg_num_subtras = dict()  # logsumexp(log c*(pr,w)) for c(pr,w) > 0
@@ -1079,16 +1077,26 @@ def ngram_counts_to_prob_list_katz_backoff(
                 lg_norm = lg_pref_counts[prefix]
             num_subtra = 10. ** (lg_num_subtra - lg_norm)
             den_subtra = 10. ** lg_den_subtra
-            if np.isclose(num_subtra, 1.) or np.isclose(den_subtra, 1.):
+            if np.isclose(den_subtra, 1.):  # 1 - den_subtra = 0
+                # If the denominator is zero, it means nothing we're backing
+                # off to has a nonzero probability. It doesn't really matter
+                # what we put here, but let's not warn about it (we've already
+                # warned about the prefix)
+                log_alpha = 0.
+            elif np.isclose(num_subtra, 1.):
                 warnings.warn(
                     'Cannot back off to prefix {}. Will assign negligible '
                     'probability. If this is an issue, try increasing k'
                     ''.format(prefix))
-                continue
-            log_alpha = np.log1p(-num_subtra) - np.log1p(-den_subtra)
-            log_alpha /= np.log(10)
+                # If the numerator is zero and the denominator is nonzero,
+                # this means we did not discount any probability mass for
+                # unseen terms. The only way to make a proper distribution is
+                # to set alpha to zero
+                log_alpha = eps_lprob
+            else:
+                log_alpha = np.log1p(-num_subtra) - np.log1p(-den_subtra)
+                log_alpha /= np.log(10)
             log_prob, bad_backoff = prob_list[-1][prefix]
-            assert bad_backoff == eps_lprob
             prob_list[-1][prefix] = (log_prob, log_alpha)
         if order != max_order:
             probs = dict(
@@ -1096,34 +1104,6 @@ def ngram_counts_to_prob_list_katz_backoff(
         prob_list.append(probs)
     prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
     return prob_list
-
-
-def _N_xplus_suff(s, counts, x=1, gte=True):
-    # Calculates N_{1+}(\cdot s) when x=1.
-    # Counts the number of unique prefixes with which s occurs which have
-    # count >= x. Make it only c == x when gte is false
-    if not isinstance(s, tuple):
-        s = (s,)
-    if gte:
-        return sum(
-            1 for ng, v in counts.items() if ng[-len(s):] == s and v >= x)
-    else:
-        return sum(
-            1 for ng, v in counts.items() if ng[-len(s):] == s and v == x)
-
-
-def _N_xplus_pref(p, counts, x=1, gte=True):
-    # Calculates N_{1+}(p \cdot) when x=1.
-    # Counts the number of unique suffixes with which p occurs which have
-    # count >= x
-    if not isinstance(p, tuple):
-        p = (p,)
-    if gte:
-        return sum(
-            1 for ng, v in counts.items() if ng[:len(p)] == p and v >= x)
-    else:
-        return sum(
-            1 for ng, v in counts.items() if ng[:len(p)] == p and v == x)
 
 
 def _optimal_deltas(counts, y):
@@ -1179,6 +1159,12 @@ def _absolute_discounting(ngram_counts, deltas):
             lower_order += prob_list[-1][ngram[1:]][0]  # Pr(w|prefix[1:])
             lprob = _log10sumexp(lprob, lower_order)
             if order != max_order:
+                # the only time the backoff will not be recalculated is if
+                # no words ever follow the prefix. In this case, we actually
+                # want to back off to a lower-order estimate
+                # Pr(w|prefix) = P(w|prefix[1:]). We can achieve this by
+                # setting gamma(prefix) = 1 and treating the higher-order
+                # contribution to Pr(w|prefix) as zero
                 lprob = (lprob, 0.)
             probs[ngram] = lprob
         prob_list.append(probs)
@@ -1187,8 +1173,7 @@ def _absolute_discounting(ngram_counts, deltas):
     return prob_list
 
 
-def ngram_counts_to_prob_list_absolute_discounting(
-        ngram_counts, delta=None, eps_lprob=-99.999):
+def ngram_counts_to_prob_list_absolute_discounting(ngram_counts, delta=None):
     r'''Determine probabilities from n-gram counts using absolute discounting
 
     Absolute discounting (based on the formulation in [chen1999]_) interpolates
@@ -1308,7 +1293,7 @@ def ngram_counts_to_prob_list_absolute_discounting(
         if d is None else [d]
         for (d, counts) in zip(delta, ngram_counts)
     )
-    return _absolute_discounting(ngram_counts, delta, eps_lprob)
+    return _absolute_discounting(ngram_counts, delta)
 
 
 def ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=None, sos=None):

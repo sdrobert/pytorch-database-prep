@@ -106,7 +106,7 @@ class BackoffNGramLM(object):
             raise ValueError(
                 'start-of-sequence symbol "{}" does not have unigram '
                 'entry.'.format(sos))
-        self.trie.sos = sos
+        self.eos = self.trie.sos = sos
         if eos is None:
             if '</S>' in self.vocab:
                 eos = '</S>'
@@ -116,7 +116,7 @@ class BackoffNGramLM(object):
             raise ValueError(
                 'end-of-sequence symbol "{}" does not have unigram '
                 'entry.'.format(eos))
-        self.eos = eos
+        self.eos = self.trie.eos = eos
         if unk is None:
             if '<UNK>' in self.vocab:
                 unk = '<UNK>'
@@ -127,7 +127,7 @@ class BackoffNGramLM(object):
         else:
             warnings.warn(
                 'out-of-vocabulary symbol "{}" does not have unigram count. '
-                'Out-of-vocabulary tokens will raise an error'.formart(unk))
+                'Out-of-vocabulary tokens will raise an error'.format(unk))
             self.unk = None
         assert self.trie.depth == len(prob_list)
 
@@ -139,6 +139,7 @@ class BackoffNGramLM(object):
             self.children = OrderedDict()
             self.depth = 0
             self.sos = None
+            self.eos = None
 
         def add_child(self, context, lprob, bo):
             assert len(context)
@@ -176,11 +177,18 @@ class BackoffNGramLM(object):
                 context = context[1:]
             # should never get here
 
-        def log_prob(self, context):
+        def log_prob(self, context, _srilm_hacks=False):
             joint = 0.0
             for prefix in range(
                     2 if context[0] == self.sos else 1, len(context) + 1):
                 joint += self.conditional(context[:prefix])
+            if _srilm_hacks and context[0] == self.sos:
+                # this is a really silly thing that SRI does - it estimates
+                # the initial SOS probability with an EOS probability. Why?
+                # The unigram probability of an SOS is 0. However, we assume
+                # the sentence-initial SOS exists prior to the generation task,
+                # and isn't a "real" part of the vocabulary
+                joint += self.conditional((self.eos,))
             return joint
 
         def _gather_nodes_by_depth(self, order):
@@ -194,19 +202,46 @@ class BackoffNGramLM(object):
                         (ctx + (k,), v) for (k, v) in parent.children.items())
             return nodes_by_depth
 
-        def relative_entropy_pruning(self, threshold, eps=1e-8):
+        def _gather_nodes_at_depth(self, order):
+            nodes = [(tuple(), self)]
+            for _ in range(order):
+                last, nodes = nodes, []
+                for ctx, parent in last:
+                    nodes.extend(
+                        (ctx + (k,), v) for (k, v) in parent.children.items())
+            return nodes
+
+        def _renormalize_backoffs_for_order(self, order):
+            nodes = self._gather_nodes_at_depth(order)
+            base_10 = np.log(10)
+            for h, node in nodes:
+                if not len(node.children):
+                    node.bo = 0.0
+                    continue
+                num = 0.0
+                denom = 0.0
+                for w, child in node.children.items():
+                    assert child.lprob is not None
+                    num -= 10. ** child.lprob
+                    denom -= 10. ** self.conditional(h[1:] + (w,))
+                new_bo = (np.log1p(num) - np.log1p(denom)) / base_10
+                node.bo = new_bo
+
+        def renormalize_backoffs(self):
+            for order in range(1, self.depth):  # final order has no backoffs
+                self._renormalize_backoffs_for_order(order)
+
+        def relative_entropy_pruning(
+                self, threshold, eps=1e-8, _srilm_hacks=False):
             nodes_by_depth = self._gather_nodes_by_depth(self.depth - 1)
             base_10 = np.log(10)
             while nodes_by_depth:
                 nodes = nodes_by_depth.pop()  # highest order first
                 for h, node in nodes:
-                    if not len(node.children):
-                        node.bo = 0.0  # no need for a backoff
-                        continue
                     num = 0.0
                     denom = 0.0
                     logP_w_given_hprimes = []  # log P(w | h')
-                    P_h = 10. ** self.log_prob(h)  # log P(h)
+                    P_h = 10 ** self.log_prob(h, _srilm_hacks=_srilm_hacks)
                     for w, child in node.children.items():
                         assert child.lprob is not None
                         num -= 10. ** child.lprob
@@ -225,12 +260,17 @@ class BackoffNGramLM(object):
                             'Calculated backoff ({}) differs from stored '
                             'backoff ({}) for context {}'
                             ''.format(log_alpha, node.bo, h))
-                    num_change = 0.
-                    denom_change = 0.
+                    if _srilm_hacks:
+                        # technically these should match when well-formed, but
+                        # re-calculating alpha allows us to re-normalize an
+                        # ill-formed language model
+                        log_alpha = node.bo
                     for idx, w in enumerate(tuple(node.children)):
                         child = node.children[w]
+                        if child.bo:
+                            continue  # don't prune children with backoffs
                         logP_w_given_h = child.lprob
-                        P_w_given_h = 10 ** child.lprob
+                        P_w_given_h = 10 ** logP_w_given_h
                         logP_w_given_hprime = logP_w_given_hprimes[idx]
                         P_w_given_hprime = 10 ** logP_w_given_hprime
                         new_num = num + P_w_given_h
@@ -238,26 +278,19 @@ class BackoffNGramLM(object):
                         log_alphaprime = np.log1p(new_num)
                         log_alphaprime -= np.log1p(new_denom)
                         log_alphaprime /= base_10
+                        log_delta_prob = logP_w_given_hprime + log_alphaprime
+                        log_delta_prob -= logP_w_given_h
                         KL = -P_h * (
-                            P_w_given_h * (
-                                logP_w_given_hprime + log_alphaprime
-                                - logP_w_given_h
-                            ) +
+                            P_w_given_h * log_delta_prob +
                             (log_alphaprime - log_alpha) * (1. + num)
                         )
                         delta_perplexity = 10. ** KL - 1
                         if delta_perplexity < threshold:
                             node.children.pop(w)
-                            # we update the backoff weights only after we've
-                            # pruned all the children, as per paper instruction
-                            num_change += P_w_given_h
-                            denom_change += P_w_given_hprime
-                    if len(node.children):
-                        node.bo = np.log1p(num + num_change)
-                        node.bo -= np.log1p(denom + denom_change)
-                        node.bo /= base_10
-                    else:
-                        node.bo = 0.0
+                    # we don't have to set backoff properly (we'll renormalize
+                    # at end). We just have to signal whether we can be pruned
+                    # to our parents (do *we* have children?)
+                    node.bo = float('nan') if len(node.children) else None
             # recalculate depth in case it's changed
             self.depth = -1
             cur_nodes = (self,)
@@ -268,8 +301,9 @@ class BackoffNGramLM(object):
                     next_nodes.extend(parent.children.values())
                 cur_nodes = next_nodes
             assert self.depth >= 1
+            self.renormalize_backoffs()
 
-        def to_ngram_list(self):
+        def to_prob_list(self):
             nodes_by_depth = self._gather_nodes_by_depth(self.depth)
             prob_list = []
             for order, nodes in enumerate(nodes_by_depth):
@@ -348,11 +382,12 @@ class BackoffNGramLM(object):
             raise ValueError('context must have at least one token')
         return self.trie.log_prob(context)
 
-    def to_ngram_list(self):
-        return self.trie.to_ngram_list()
+    def to_prob_list(self):
+        return self.trie.to_prob_list()
 
-    def relative_entropy_pruning(self, threshold):
-        return self.trie.relative_entropy_pruning(threshold)
+    def relative_entropy_pruning(self, threshold, _srilm_hacks=False):
+        return self.trie.relative_entropy_pruning(
+            threshold, _srilm_hacks=_srilm_hacks)
 
     def sequence_perplexity(self, sequence, include_delimiters=True):
         r'''Return the perplexity of the sequence using this language model
@@ -649,7 +684,8 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
 
 def _log10sumexp(*args):
     if len(args) > 1:
-        return _log10sumexp(np.array(args, dtype=float))
+        return _log10sumexp(args)
+    args = np.array(args, dtype=float, copy=False)
     x = args[0]
     if np.any(np.isnan(x)):
         return np.nan

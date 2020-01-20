@@ -18,6 +18,7 @@ from __future__ import print_function
 
 import os
 import re
+import gzip
 
 from collections import Counter
 
@@ -30,6 +31,7 @@ from pydrobert.torch.util import parse_arpa_lm
 
 KK_DIR = os.path.join(os.path.dirname(__file__), 'kneser_ney')
 KATZ_DIR = os.path.join(os.path.dirname(__file__), 'katz')
+RE_DIR = os.path.join(os.path.dirname(__file__), 're_pruning')
 
 
 @pytest.fixture
@@ -113,6 +115,23 @@ def test_kneser_ney():
     # While it doesn't really matter - you shouldn't ever need to predict <s> -
     # it's strange that KenLM sets the unigram probability of <s> to 1
     act_prob_list[0]['<s>'] = (0., act_prob_list[0]['<s>'][1])
+    for order in range(3):
+        exp_probs, act_probs = exp_prob_list[order], act_prob_list[order]
+        assert set(exp_probs) == set(act_probs)
+        for ngram, exp_prob in exp_probs.items():
+            act_prob = act_probs[ngram]
+            assert np.allclose(exp_prob, act_prob, atol=1e-4), ngram
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+def test_relative_entropy_pruning():
+    with open(os.path.join(RE_DIR, 'republic.arpa')) as f:
+        unpruned_prob_list = parse_arpa_lm(f)
+    lm = ngram_lm.BackoffNGramLM(unpruned_prob_list)
+    lm.relative_entropy_pruning(1e-5, _srilm_hacks=True)
+    act_prob_list = lm.to_prob_list()
+    del lm, unpruned_prob_list
+    exp_prob_list = parse_arpa_lm(os.path.join(RE_DIR, 'republic.pruned.arpa'))
     for order in range(3):
         exp_probs, act_probs = exp_prob_list[order], act_prob_list[order]
         assert set(exp_probs) == set(act_probs)

@@ -1,0 +1,14 @@
+Same setup as usual (../katz/README), but this time we're using SRILM
+(http://www.speech.sri.com/projects/srilm/). IRSTLM
+creates some bonkers LMs that aren't valid probability distributions, and
+neither KenLM nor CMU-Cam do relative entropy pruning.
+
+Create unpruned LM:
+
+bin/i686-m64/ngram-count -minprune 5 -order 3 -text republic.txt -lm republic.arpa
+
+Prune LM:
+
+bin/i686-m64/ngram -prune 1e-5 -minprune 2 -lm republic.arpa -write-lm republic.pruned.arpa
+
+Note that lower thresholds such as 1e-7 run into floating point issues.

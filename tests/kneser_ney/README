@@ -8,3 +8,7 @@ We're comparing against KenLM. KenLM treats each line as a sentence, adds
 To get the model:
 
 bin/lmplz --text republic.txt --order 3 --arpa republic.arpa
+
+To get the model that prunes bigrams and trigrams of count 1:
+
+bin/lmplz --text republic.txt --order 3 --prune 0 1 1 --arpa republic.pruned.arpa

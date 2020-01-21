@@ -18,7 +18,6 @@ from __future__ import print_function
 
 import os
 import re
-import gzip
 
 from collections import Counter
 
@@ -94,8 +93,8 @@ def test_katz_backoff(katz_ngram_counts):
             assert np.allclose(exp_prob, act_prob, atol=1e-4), ngram
 
 
-def test_kneser_ney():
-    exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, 'republic.arpa'))
+@pytest.fixture
+def kneser_ney_ngram_counts():
     ngram_counts = [
         Counter({'<unk>': 0, '<s>': 0, '</s>': 0}), Counter(), Counter()]
     # Note: KenLM doesn't count <s> or </s> in unigrams
@@ -108,16 +107,38 @@ def test_kneser_ney():
                     for i in range(
                         max(1 - order, 0), len(s) - order - max(1 - order, 0))
                 )
+    return ngram_counts
+
+
+def test_kneser_ney_unpruned(kneser_ney_ngram_counts):
+    exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, 'republic.arpa'))
     exp_vocab = set(exp_prob_list[0])
-    count_vocab = set(ngram_counts[0])
+    count_vocab = set(kneser_ney_ngram_counts[0])
     assert exp_vocab == count_vocab, exp_vocab - count_vocab
-    act_prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(ngram_counts)
+    act_prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
+        kneser_ney_ngram_counts)
     # While it doesn't really matter - you shouldn't ever need to predict <s> -
     # it's strange that KenLM sets the unigram probability of <s> to 1
     act_prob_list[0]['<s>'] = (0., act_prob_list[0]['<s>'][1])
     for order in range(3):
         exp_probs, act_probs = exp_prob_list[order], act_prob_list[order]
         assert set(exp_probs) == set(act_probs)
+        for ngram, exp_prob in exp_probs.items():
+            act_prob = act_probs[ngram]
+            assert np.allclose(exp_prob, act_prob, atol=1e-4), ngram
+
+
+def test_kneser_ney_pruning(kneser_ney_ngram_counts):
+    exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, 'republic.pruned.arpa'))
+    # prune out bigrams and trigrams with count 1:
+    pruned = set()
+    for counts in kneser_ney_ngram_counts[1:]:
+        pruned.update(k for (k, v) in counts.items() if v == 1)
+    act_prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
+        kneser_ney_ngram_counts, to_prune=pruned)
+    act_prob_list[0]['<s>'] = (0., act_prob_list[0]['<s>'][1])
+    for order in range(3):
+        exp_probs, act_probs = exp_prob_list[order], act_prob_list[order]
         for ngram, exp_prob in exp_probs.items():
             act_prob = act_probs[ngram]
             assert np.allclose(exp_prob, act_prob, atol=1e-4), ngram

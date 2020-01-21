@@ -53,8 +53,6 @@ class BackoffNGramLM(object):
     models, and two, to calculate the perplexity of a language model on a
     corpus. It is very inefficient.
 
-    Relative entropy pruning based on [stolcke2000]_
-
     Parameters
     ----------
     prob_list : sequence
@@ -73,11 +71,6 @@ class BackoffNGramLM(object):
         for a token, the token is replaced with this symbol. Defaults to
         ``'<UNK>'`` if that symbol is in the vocabulary, otherwise
         ``'<unk>'``
-
-    References
-    ----------
-    .. [stolcke2000] A. Stolcke "Entropy-based Pruning of Backoff Language
-       Models," ArXiv ePrint, 2000
     '''
 
     def __init__(self, prob_list, sos=None, eos=None, unk=None):
@@ -228,6 +221,23 @@ class BackoffNGramLM(object):
                 node.bo = new_bo
 
         def renormalize_backoffs(self):
+            r'''Ensure backoffs induce a valid probability distribution
+
+            Backoff models follow the same recursive formula for determining
+            the probability of the next token:
+
+            .. math::
+
+                Pr(w_n|w_1, \ldots w_{n-1}) = \begin{cases}
+                    Entry(w_1, \ldots, w_n) &
+                                        \text{if }Entry(\ldots)\text{ exists}\\
+                    Backoff(w_1, \ldots, w_{n-1})P(w_n|w_{n-1}, \ldots, w_2) &
+                                        \text{otherwise}
+                \end{cases}
+
+            Calling this method renormalizes :math:`Backoff(\ldots)` such that,
+            where possible, :math:`\sum_w Pr(w|\ldots) = 1`
+            '''
             for order in range(1, self.depth):  # final order has no backoffs
                 self._renormalize_backoffs_for_order(order)
 
@@ -386,6 +396,34 @@ class BackoffNGramLM(object):
         return self.trie.to_prob_list()
 
     def relative_entropy_pruning(self, threshold, _srilm_hacks=False):
+        r'''Prune n-grams with negligible impact on model perplexity
+
+        This method iterates through n-grams, highest order first, looking to
+        absorb their explicit probabilities into a backoff. The language model
+        defines a distribution over sequences, :math:`s \sim p(\cdot|\theta)`.
+        Assuming this is the true distribution of sequences, we can define
+        an approximation of :math:`p(\cdot)`, :math:`q(\cdot)`, as one that
+        replaces one explicit n-gram probability with a backoff.
+        [stolcke2000]_ defines the relative change in model perplexity as:
+
+        .. math::
+
+            \Delta PP = e^{D_{KL}(p\|q)} - 1
+
+        Where :math:`D_{KL}` is the KL-divergence between the two
+        distributions. This method will prune an n-gram whenever the change
+        in model perplexity is negligible (below `threshold`). More details
+        can be found in [stolcke2000]_.
+
+        Parameters
+        ----------
+        threshold : float
+
+        References
+        ----------
+        .. [stolcke2000] A. Stolcke "Entropy-based Pruning of Backoff Language
+           Models," ArXiv ePrint, 2000
+        '''
         return self.trie.relative_entropy_pruning(
             threshold, _srilm_hacks=_srilm_hacks)
 
@@ -440,8 +478,8 @@ class BackoffNGramLM(object):
 
             Pr(corpus) = Pr(s_1, s_2, ..., s_S) = Pr(s_1)Pr(s_2)...Pr(s_S)
 
-        We calculate the corpus perplexity as the corpus probablity normalized
-        by the total number of tokens in the corpus. Letting
+        We calculate the corpus perplexity as the inverse corpus probablity
+        normalized by the total number of tokens in the corpus. Letting
         :math:`M = \sum_i^S N_i`, the corpus perplexity is
 
         .. math::
@@ -1152,7 +1190,7 @@ def _optimal_deltas(counts, y):
     return [r - (r + 1) * Y * N_r[r + 1] / N_r[r] for r in range(1, y + 1)]
 
 
-def _absolute_discounting(ngram_counts, deltas):
+def _absolute_discounting(ngram_counts, deltas, to_prune):
     V = len(set(ngram_counts[0]))
     prob_list = [{tuple(): (-np.log10(V), 0.)}]
     max_order = len(ngram_counts) - 1
@@ -1172,15 +1210,22 @@ def _absolute_discounting(ngram_counts, deltas):
             d = delta[bin_]
             assert count - d >= 0.
             prefix = ngram[:-1]
-            n_counts[ngram] = n_counts.get(ngram, 0) + count - d
             d_counts[prefix] = d_counts.get(prefix, 0) + count
-            prefix_bins = pr2bin.setdefault(prefix, np.zeros(len(delta)))
-            prefix_bins[bin_] += 1
+            prefix_bins = pr2bin.setdefault(prefix, np.zeros(len(delta) + 1))
+            if ngram in to_prune:
+                prefix_bins[-1] += count
+            else:
+                prefix_bins[bin_] += 1
+                n_counts[ngram] = count - d
         for prefix, prefix_bins in pr2bin.items():
+            if prefix in to_prune:
+                continue
             with np.errstate(divide='ignore'):
                 prefix_bins = np.log10(prefix_bins)
-                prefix_bins += np.log10(delta)
+                prefix_bins[:-1] += np.log10(delta)
             gamma = _log10sumexp(prefix_bins)
+            if prefix == ('introduction',):
+                print(prefix_bins, 10 ** prefix_bins, d_counts[prefix])
             gamma -= np.log10(d_counts[prefix])
             lprob, bo = prob_list[-1][prefix]
             prob_list[-1][prefix] = (lprob, gamma)
@@ -1209,7 +1254,8 @@ def _absolute_discounting(ngram_counts, deltas):
     return prob_list
 
 
-def ngram_counts_to_prob_list_absolute_discounting(ngram_counts, delta=None):
+def ngram_counts_to_prob_list_absolute_discounting(
+        ngram_counts, delta=None, to_prune=set()):
     r'''Determine probabilities from n-gram counts using absolute discounting
 
     Absolute discounting (based on the formulation in [chen1999]_) interpolates
@@ -1256,8 +1302,14 @@ def ngram_counts_to_prob_list_absolute_discounting(ngram_counts, delta=None):
         each element is either a :class:`float` or :obj:`None`, specifying
         either a fixed value or the default value for every order of the
         recursion (except the zeroth-order), unigrams first
-    eps_lprob : float, optional
-        A very negative value substituted as "negligible probability"
+    to_prune : set, optional
+        A set of n-grams that will not be explicitly set in the return value.
+        This differs from simply removing those n-grams from `ngram_counts` in
+        some key ways. First, pruned counts can still be used to calculate
+        default `delta` values. Second, as per [chen1999]_, pruned counts are
+        still summed in the denominator,
+        :math:`\sum_w' C(w_1, \ldots, w_{n-1}, w')`, which then make their
+        way into the numerator of :math:`gamma(w_1, \ldots, w_{n-1})`.
 
     Returns
     -------
@@ -1329,10 +1381,11 @@ def ngram_counts_to_prob_list_absolute_discounting(ngram_counts, delta=None):
         if d is None else [d]
         for (d, counts) in zip(delta, ngram_counts)
     )
-    return _absolute_discounting(ngram_counts, delta)
+    return _absolute_discounting(ngram_counts, delta, to_prune)
 
 
-def ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=None, sos=None):
+def ngram_counts_to_prob_list_kneser_ney(
+        ngram_counts, delta=None, sos=None, to_prune=set()):
     r'''Determine probabilities from counts using Kneser-Ney(-like) estimates
 
     Chen and Goodman's implemented Kneser-Ney smoothing [chen1999]_ is the same
@@ -1402,6 +1455,15 @@ def ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=None, sos=None):
     sos : str or :obj:`None`, optional
         The start-of-sequence symbol. Defaults to ``'<S>'`` if that symbol is
         in the vocabulary, otherwise ``'<s>'``
+    to_prune : set, optional
+        A set of n-grams that will not be explicitly set in the return value.
+        This differs from simply removing those n-grams from `ngram_counts` in
+        some key ways. First, nonzero counts of pruned n-grams are used when
+        calculating adjusted counts of the remaining terms. Second, pruned
+        counts can still be used to calculate default `delta` values. Second,
+        as per [chen1999]_, pruned counts are still summed in the denominator,
+        :math:`\sum_w' C(w_1, \ldots, w_{n-1}, w')`, which then make their
+        way into the numerator of :math:`gamma(w_1, \ldots, w_{n-1})`.
 
     Returns
     -------
@@ -1507,7 +1569,7 @@ def ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=None, sos=None):
             new_counts[suffix] = new_counts.get(suffix, 0) + 1
         new_counts.update(
             (k, v) for (k, v) in ngram_counts[order].items()
-            if (order and k[0] == sos) or (not order and k == sos)
+            if ((order and k[0] == sos) or (not order and k == sos))
         )
         new_ngram_counts.insert(0, new_counts)
     ngram_counts = new_ngram_counts
@@ -1525,6 +1587,7 @@ def ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=None, sos=None):
             assert len(optimals) == len(ds)
             ds = tuple(y if x is None else x for (x, y) in zip(ds, optimals))
         except ValueError:
-            pass
+            if None in ds:
+                raise
         delta[i] = ds
-    return _absolute_discounting(ngram_counts, delta)
+    return _absolute_discounting(ngram_counts, delta, to_prune)

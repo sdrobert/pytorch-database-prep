@@ -20,6 +20,7 @@ from __future__ import print_function
 import warnings
 import sys
 import locale
+import re
 
 from collections import OrderedDict, Counter
 from collections.abc import Iterable
@@ -40,6 +41,7 @@ __all__ = [
     'ngram_counts_to_prob_list_katz_backoff',
     'ngram_counts_to_prob_list_absolute_discounting',
     'ngram_counts_to_prob_list_kneser_ney',
+    'text_to_sent_list',
 ]
 
 locale.setlocale(locale.LC_ALL, 'C')
@@ -1591,3 +1593,56 @@ def ngram_counts_to_prob_list_kneser_ney(
                 raise
         delta[i] = ds
     return _absolute_discounting(ngram_counts, delta, to_prune)
+
+
+def text_to_sents(
+        text, sent_end_expr=r'[.?!]+', word_delim_expr=r'\W+',
+        to_case='upper', trim_empty_sents=False):
+    '''Convert a block of text to a list of sentences, each a list of words
+
+    Parameters
+    ----------
+    text : str
+        The text to parse
+    set_end_expr : str or re.Pattern, optional
+        A regular expression indicating an end of a sentence. By default, this
+        is one or more of the characters ".?!"
+    word_delim_expr : str or re.Pattern, optional
+        A regular expression used for splitting words. By default, it is one
+        or more of any non-alphanumeric character (including ' and -). Any
+        empty words are removed from the sentence
+    to_case : {'lower', 'upper', :obj:`None`}, optional
+        Convert all words to a specific case: ``'lower'`` is lower case,
+        ``'upper'`` is upper case, anything else performs no conversion
+    trim_empty_sents : bool, optional
+        If :obj:`True`, any sentences with no words in them will be removed
+        from the return value. The exception is an empty final string, which
+        is always removed.
+
+    Returns
+    -------
+    sents : list of tuples
+        A list of sentences from `text`. Each sentence/element is actually a
+        tuple of the words in the sentences
+    '''
+    if not isinstance(sent_end_expr, re.Pattern):
+        sent_end_expr = re.compile(sent_end_expr)
+    if not isinstance(word_delim_expr, re.Pattern):
+        word_delim_expr = re.compile(word_delim_expr)
+    sents = sent_end_expr.split(text)
+    i = 0
+    while i < len(sents):
+        sent = word_delim_expr.split(sents[i])
+        sent = tuple(w for w in sent if w)
+        if to_case == 'lower':
+            sent = tuple(w.lower() for w in sent)
+        elif to_case == 'upper':
+            sent = tuple(w.upper() for w in sent)
+        if trim_empty_sents and not sent:
+            del sents[i]
+        else:
+            sents[i] = sent
+            i += 1
+    if sents and not sents[-1]:
+        del sents[-1]
+    return sents

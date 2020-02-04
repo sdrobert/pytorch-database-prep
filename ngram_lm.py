@@ -371,7 +371,7 @@ class BackoffNGramLM(object):
                 ctx, node = stack.pop()
                 stack.extend((ctx + (w,), c) for w, c in node.children.items())
                 if len(ctx) == 1:
-                    ctx == ctx[0]
+                    ctx = ctx[0]
                     if ctx in to_prune:
                         extra_mass = _log10sumexp(extra_mass, node.lprob)
                         node.lprob = eps_lprob

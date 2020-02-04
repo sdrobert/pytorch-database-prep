@@ -239,3 +239,38 @@ def test_prune_by_threshold():
     pruned_prob_list = lm.to_prob_list()
     assert len(pruned_prob_list) == 1
     assert len(pruned_prob_list[0]) == len(ngram_counts[0])
+
+
+def test_prune_by_name():
+    eps_lprob = -30
+    sents = ngram_lm.text_to_sents(LIPSUM)
+    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, 3)
+    ngram_counts[0]['<UNK>'] = 0
+    prob_list = ngram_lm.ngram_counts_to_prob_list_mle(ngram_counts)
+    to_prune = set(ngram_counts[0])
+    to_prune.remove('QUI')
+    to_prune |= set(k[:-1] for k in ngram_counts[-1])
+    lm = ngram_lm.BackoffNGramLM(prob_list)
+    lm.prune_by_name(to_prune, eps_lprob=eps_lprob)
+    pruned_prob_list = lm.to_prob_list()
+    assert len(pruned_prob_list) == len(prob_list)
+    for pruned_dict_, dict_ in zip(pruned_prob_list, prob_list):
+        assert set(pruned_dict_) == set(dict_)
+    assert all(
+        pruned_prob_list[1][k][0] == eps_lprob
+        for k in set(pruned_prob_list[1]) & to_prune)
+    assert not any(
+        pruned_prob_list[1][k][0] == eps_lprob
+        for k in set(pruned_prob_list[1]) - to_prune)
+    assert all(
+        k == 'QUI' or v[0] == eps_lprob
+        for (k, v) in pruned_prob_list[0].items())
+    assert np.isclose(pruned_prob_list[0]['QUI'][0], 0.0)
+    to_prune = (set(ngram_counts[1]) | set(ngram_counts[2])) - to_prune
+    lm.prune_by_name(to_prune, eps_lprob=eps_lprob)
+    pruned_prob_list = lm.to_prob_list()
+    assert len(pruned_prob_list) == 1
+    assert all(
+        k == 'QUI' or v == eps_lprob
+        for (k, v) in pruned_prob_list[0].items())
+    assert np.isclose(pruned_prob_list[0]['QUI'], 0.0)

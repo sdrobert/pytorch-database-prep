@@ -41,7 +41,8 @@ __all__ = [
     'ngram_counts_to_prob_list_katz_backoff',
     'ngram_counts_to_prob_list_absolute_discounting',
     'ngram_counts_to_prob_list_kneser_ney',
-    'text_to_sent_list',
+    'text_to_sents',
+    'sents_to_ngram_counts',
 ]
 
 locale.setlocale(locale.LC_ALL, 'C')
@@ -1646,3 +1647,63 @@ def text_to_sents(
     if sents and not sents[-1]:
         del sents[-1]
     return sents
+
+
+def sents_to_ngram_counts(
+        sents, max_order, sos='<S>', eos='</S>', count_unigram_sos=False):
+    '''Count n-grams in sentence lists up to a maximum order
+
+    Parameters
+    ----------
+    sents : list of tuples
+        A list of sentences, where each sentence is a tuple of its words
+    max_order : int
+        The maximum order (inclusive) of n-gram to count
+    sos : str, optional
+        A token representing the start-of-sequence
+    eos : str, optional
+        A token representing the end-of-sequence
+    count_unigram_sos : bool, optional
+        If :obj:`False`, the unigram count of the start-of-sequence token will
+        always be zero (though higher-order n-grams beginning with the SOS
+        can have counts).
+
+    Returns
+    -------
+    ngram_counts : list of dicts
+        A list of length `max_order` where ``ngram_counts[0]`` is a dictionary
+        of unigram counts, ``ngram_counts[1]`` of bigram counts, etc.
+
+    Notes
+    -----
+    The way n-grams count start-of-sequence and end-of-sequence tokens differ
+    from package to package. For example, some tools left-pad sentences with
+    n - 1 start-of-sequence tokens (e.g. making ``Pr(x|<s><s>)`` a valid
+    conditional). Others only count sos and eos tokens for n > 1.
+
+    This function adds one (and only one) sos and eos to the beginning and end
+    of each sentence before counting n-grams with only one exception. By
+    default, `count_unigram_sos` is set to :obj:`False`, meaning the
+    start-of-sequence token will not be counted as a unigram. This makes sense
+    in the word prediction context, since a language model should never predict
+    the next word to be the start-of-sequence token, rather, it always exists
+    prior to the first word being predicted. This exception can be disabled
+    by setting `count_unigram_sos` to :obj:`True`
+    '''
+    if max_order < 1:
+        raise ValueError('max_order ({}) must be >= 1'.format(max_order))
+    ngram_counts = [Counter() for _ in range(max_order)]
+    ngram_counts[0].setdefault(sos, 0)
+    for sent in sents:
+        if {sos, eos} & set(sent):
+            raise ValueError(
+                'start-of-sequence ({}) or end-of-sequence ({}) found in '
+                'sentence "{}"'.format(sos, eos, ' '.join(sent)))
+        sent = (sos,) + tuple(sent) + (eos,)
+        for order, counter in zip(range(1, max_order + 1), ngram_counts):
+            if order == 1:
+                counter.update(sent if count_unigram_sos else sent[1:])
+            else:
+                counter.update(
+                    sent[s:s + order] for s in range(len(sent) - order + 1))
+    return ngram_counts

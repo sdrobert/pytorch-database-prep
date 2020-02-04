@@ -182,3 +182,25 @@ def test_text_to_sents():
     assert len(sents) == 5
     assert sents[2][3:6] == ('EST', 'QUI', 'DOLOREM')
     assert sents[4][-4:] == ('QUO', 'VOLUPTAS', 'NULLA', 'PARIATUR')
+
+
+def test_sents_to_ngram_counts():
+    sent = 'what am I chopped liver'.split()
+    sents = [sent]
+    for s in range(1, len(sent)):
+        sents.append(sent[s:] + sent[:s])
+    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, len(sent) + 2)
+    assert not ngram_counts[0]['<S>']
+    assert ngram_counts[0]['</S>'] == len(sents)
+    for word in sent:
+        assert ngram_counts[0][word] == len(sents)
+        assert ngram_counts[1][('<S>', word)] == 1
+        assert ngram_counts[1][(word, '</S>')] == 1
+    assert len(ngram_counts[-1]) == len(sents)
+    assert all(
+        ngram_counts[-1][('<S>',) + tuple(s) + ('</S>',)] == 1 for s in sents)
+    ngram_counts_b = ngram_lm.sents_to_ngram_counts(
+        sents, len(sent) + 2, count_unigram_sos=True)
+    assert ngram_counts_b[0]['<S>'] == len(sents)
+    ngram_counts_b[0]['<S>'] = 0
+    assert ngram_counts == ngram_counts_b

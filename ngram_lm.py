@@ -220,8 +220,23 @@ class BackoffNGramLM(object):
                     assert child.lprob is not None
                     num -= 10. ** child.lprob
                     denom -= 10. ** self.conditional(h[1:] + (w,))
+                if np.isclose(num, -1.0):
+                    if node.bo > -10:
+                        warnings.warn(
+                            'Found a non-negligible backoff for n-gram {} '
+                            'when no backoff mass should exist'.format(h))
+                    continue
                 new_bo = (np.log1p(num) - np.log1p(denom)) / base_10
                 node.bo = new_bo
+
+        def recalculate_depth(self):
+            max_depth = 0
+            stack = [(max_depth, self)]
+            while stack:
+                depth, node = stack.pop()
+                max_depth = max(max_depth, depth)
+                stack.extend((depth + 1, c) for c in node.children.values())
+            self.depth = max_depth
 
         def renormalize_backoffs(self):
             r'''Ensure backoffs induce a valid probability distribution
@@ -334,6 +349,46 @@ class BackoffNGramLM(object):
                     dict_[context] = value
                 prob_list.append(dict_)
             return prob_list
+
+        def prune_by_threshold(self, lprob):
+            for order in range(self.depth - 1, 0, -1):
+                for _, parent in self._gather_nodes_at_depth(order):
+                    for w in set(parent.children):
+                        child = parent.children[w]
+                        if not child.children and child.lprob <= lprob:
+                            del parent.children[w]
+            self.renormalize_backoffs()
+            self.recalculate_depth()
+
+        def prune_by_name(self, to_prune, eps_lprob):
+            to_prune = set(to_prune)
+            # we'll prune by threshold in a second pass, so no need to worry
+            # about parent-child stuff
+            extra_mass = -float('inf')
+            remainder = set()
+            stack = [((w,), c) for w, c in self.children.items()]
+            while stack:
+                ctx, node = stack.pop()
+                stack.extend((ctx + (w,), c) for w, c in node.children.items())
+                if len(ctx) == 1:
+                    ctx == ctx[0]
+                    if ctx in to_prune:
+                        extra_mass = _log10sumexp(extra_mass, node.lprob)
+                        node.lprob = eps_lprob
+                    elif node.lprob > eps_lprob:
+                        remainder.add(ctx)
+                elif ctx in to_prune:
+                    node.lprob = eps_lprob
+            # we never *actually* remove unigrams - we set their probablities
+            # to roughly zero and redistribute the collected mass across the
+            # remainder
+            if not remainder:
+                raise ValueError('No unigrams are left unpruned!')
+            extra_mass -= np.log10(len(remainder))
+            for w in remainder:
+                child = self.children[w]
+                child.lprob = _log10sumexp(child.lprob, extra_mass)
+            self.prune_by_threshold(eps_lprob)
 
     def conditional(self, context):
         r'''Return the log probability of the last word in the context
@@ -516,6 +571,54 @@ class BackoffNGramLM(object):
             M += N
             joint += self.log_prob(sequence)
         return 10. ** (-joint / M)
+
+    def prune_by_threshold(self, lprob):
+        '''Prune n-grams with a log-probability leq to a threshold
+
+        This method prunes n-grams with a conditional log-probability less than
+        or equal to some fixed threshold. The reclaimed probability mass is
+        sent to the (n-1)-gram's backoff.
+
+        This method never prunes unigrams. Further, it cannot prune n-grams
+        which are a prefix of some higher-order n-gram that has a conditional
+        probability above that threshold, since the higher-order n-gram may
+        have need of the lower-order's backoff.
+
+        Parameters
+        ----------
+        lprob : float
+            The base-10 log probability of conditionals, below or at which the
+            n-gram will be pruned.
+        '''
+        self.trie.prune_by_threshold(lprob)
+
+    def prune_by_name(self, to_prune, eps_lprob=-99.999):
+        '''Prune n-grams by name
+
+        This method prunes n-grams of arbitrary order by name. For n-grams of
+        order > 1, the reclaimed probability mass is allotted to the
+        appropriate backoff. For unigrams, the reclaimed probability mass is
+        distributed uniformly across the remaining unigrams.
+
+        This method prunes nodes by setting their probabilities a small
+        log-probability (`eps_lprob`), then calling :func:`prune_by_threshold`
+        with that small log-probability. This ensures we do not remove the
+        backoff of higher-order n-grams (instead setting the probability of
+        "pruned" nodes very low), and gets rid of lower-order nodes that were
+        previously "pruned" but had to exist for their backoff when their
+        backoff is now no longer needed.
+
+        Unigrams are never fully pruned - their log probabilities are set to
+        `eps_lprob`.
+
+        Parameters
+        ----------
+        to_prune : set
+            A set of all n-grams of all orders to prune.
+        eps_lprob : float, optional
+            A base 10 log probability considered negligible
+        '''
+        self.trie.prune_by_name(to_prune, eps_lprob)
 
 
 def write_arpa(prob_list, out=sys.stdout):
@@ -715,6 +818,9 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
     prob_list = []
     for order, counts in enumerate(ngram_counts):
         probs = _get_cond_mle(order, counts, vocab, k)
+        if not order:
+            for v in vocab:
+                probs.setdefault((v,), eps_lprob)
         if order != max_order:
             probs = dict(
                 (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())

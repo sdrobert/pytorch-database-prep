@@ -204,3 +204,38 @@ def test_sents_to_ngram_counts():
     assert ngram_counts_b[0]['<S>'] == len(sents)
     ngram_counts_b[0]['<S>'] = 0
     assert ngram_counts == ngram_counts_b
+
+
+def test_prune_by_threshold():
+    sents = ngram_lm.text_to_sents(LIPSUM)
+    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, 3)
+    ngram_counts[0]['<UNK>'] = 0
+    prob_list = ngram_lm.ngram_counts_to_prob_list_mle(ngram_counts)
+    will_keep = set(prob_list[0])
+    will_discard = set()
+    for dict_ in prob_list[:0:-1]:
+        for ngram, lprob in dict_.items():
+            if isinstance(lprob, tuple):
+                lprob = lprob[0]
+            if (
+                    lprob <= -0.1 and
+                    not any(high[:len(ngram)] == ngram for high in will_keep)):
+                will_discard.add(ngram)
+            else:
+                will_keep.add(ngram)
+    lm = ngram_lm.BackoffNGramLM(prob_list)
+    lm.prune_by_threshold(-0.1)
+    pruned_prob_list = lm.to_prob_list()
+    for pruned_dict, dict_ in zip(pruned_prob_list, prob_list):
+        kept = set(pruned_dict)
+        assert not (kept - will_keep)
+        assert not (kept & will_discard)
+        for ngram in kept:
+            v1, v2 = pruned_dict[ngram], dict_[ngram]
+            if isinstance(v1, tuple):
+                v1, v2 = v1[0], v2[0]
+            assert np.isclose(v1, v2)
+    lm.prune_by_threshold(0.0)
+    pruned_prob_list = lm.to_prob_list()
+    assert len(pruned_prob_list) == 1
+    assert len(pruned_prob_list[0]) == len(ngram_counts[0])

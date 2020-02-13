@@ -622,6 +622,73 @@ def wsj_prepare_dict(data_root, dict_suffix=''):
     )
 
 
+def dict_get_acronym_prons(oovlist, dict_):
+    # this function first extracts single-letter acronyms from the CMU dict.
+    # It then looks for words in the oovlist file that look like acronyms, and
+    # builds up some pronunciations based on them
+    #
+    # consult Kaldi's wsj/s5/local/dict/get_acronym_prons.pl for more details
+
+    def get_letter_prons(letters, letter_prons):
+        acronym = list(letters)
+        prons = [""]
+        while acronym:
+            letter = acronym.pop(0)
+            n = 1
+            while acronym and acronym[0] == letter:
+                acronym.pop(0)
+                n += 1
+            letter_pron = letter_prons[letter]
+            prons_of_block = []
+            if n == 2:
+                for lpron in letter_pron:
+                    prons_of_block.append("D AH1 B AH0 L " + lpron)
+                    prons_of_block.append(lpron + " " + lpron)
+            elif n == 3:
+                for lpron in letter_pron:
+                    prons_of_block.append("T R IH1 P AH0 L " + lpron)
+                    prons_of_block.append(" ".join([lpron] * 3))
+            else:
+                for lpron in letter_pron:
+                    prons_of_block.append(" ".join([lpron] * n))
+            new_prons = []
+            for pron in prons:
+                for pron_of_block in prons_of_block:
+                    if pron:
+                        new_prons.append(pron + " " + pron_of_block)
+                    else:
+                        new_prons.append(pron_of_block)
+            prons = new_prons
+        assert prons[0] != ""
+        for pron in prons:
+            yield pron
+
+    if isinstance(dict_, str):
+        dict_ = cat(dict_)
+
+    letter_pattern = re.compile(r'^[A-Z]\.$')
+    letter_prons = dict()
+    for line in dict_:
+        word, pron = line.strip().split(' ', maxsplit=1)
+        if letter_pattern.match(word):
+            letter = word[0]
+            letter_prons.setdefault(letter, []).append(pron.strip())
+
+    if isinstance(oovlist, str):
+        oovlist = cat(oovlist)
+
+    acro_wo_points_pattern = re.compile(r'^[A-Z]{1,5}$')
+    acro_w_points_pattern = re.compile(r'^([A-Z]\.){1,4}[A-Z]\.?$')
+    for word in oovlist:
+        word = word.strip()
+        if acro_wo_points_pattern.match(word):
+            for pron in get_letter_prons(word, letter_prons):
+                yield word + "  " + pron
+        elif acro_w_points_pattern.match(word):
+            for pron in get_letter_prons(word.replace('.', ''), letter_prons):
+                yield word + "  " + pron
+
+
 def dict_get_rules(
         in_, disallow_empty_suffix=True, min_prefix_len=3,
         ignore_prefix_stress=True, min_suffix_count=20):
@@ -989,6 +1056,12 @@ def dict_select_candidate_prons(candidates, max_prons=4, min_rule_score=0.35):
     # that all returned candidates have a score >= min_rule_score
     #
     # wsj/s5/local/dict/select_candidates.pl
+    #
+    # AFAICT Perl sort-keys-by-value introduces non-determinism in the order
+    # of pronunciations of the same score. Unfortunately, this determines the
+    # ultimate candidate pronunciations of some OOV words.
+    # We pre-empt a bit of that non-determinism, but don't expect perfect
+    # matching values with Kaldi.
 
     def process_word(cur_lines):
         pron2rule_score = dict()
@@ -1003,8 +1076,8 @@ def dict_select_candidate_prons(candidates, max_prons=4, min_rule_score=0.35):
                 pron2line[pron] = line
         prons = sorted(
             pron2rule_score,
-            key=lambda x: pron2rule_score[x],
-            reverse=True
+            key=lambda x: (-pron2rule_score[x], x),
+            reverse=False
         )
         for pron, _ in zip(prons, range(max_prons)):
             yield pron2line[pron]
@@ -1095,6 +1168,15 @@ def wsj_extend_dict(dir_13_32_1, data_root, src_dict_suffix, mincount=2):
     #             if not (set(word) & digits) and count >= mincount:
     #                 oov_lst.write(word + '\n')
     # del counts
+
+    pipe_to(
+        dict_get_acronym_prons(
+            os.path.join(dst_dict_dir, 'oovlist'),
+            os.path.join(dict_cmu),
+        ),
+        os.path.join(dst_dict_dir, 'dict.acronyms'),
+    )
+    return
 
     f_dir = os.path.join(dst_dict_dir, 'f')
     b_dir = os.path.join(dst_dict_dir, 'b')

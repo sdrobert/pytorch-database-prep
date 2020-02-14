@@ -220,13 +220,21 @@ class BackoffNGramLM(object):
                     assert child.lprob is not None
                     num -= 10. ** child.lprob
                     denom -= 10. ** self.conditional(h[1:] + (w,))
-                if np.isclose(num, -1.0):
+                if num < -1.:
+                    raise ValueError(
+                        'Too much probability mass {} on children of n-gram {}'
+                        ''.format(-num, h))
+                elif np.isclose(num, -1.0):
                     if node.bo > -10:
                         warnings.warn(
                             'Found a non-negligible backoff for n-gram {} '
                             'when no backoff mass should exist'.format(h))
                     continue
-                new_bo = (np.log1p(num) - np.log1p(denom)) / base_10
+                if np.isclose(denom, -1.0):
+                    # We'll never back off. By convention, this is 0. (Pr(1.))
+                    new_bo = 0.0
+                else:
+                    new_bo = (np.log1p(num) - np.log1p(denom)) / base_10
                 node.bo = new_bo
 
         def recalculate_depth(self):
@@ -239,23 +247,6 @@ class BackoffNGramLM(object):
             self.depth = max_depth
 
         def renormalize_backoffs(self):
-            r'''Ensure backoffs induce a valid probability distribution
-
-            Backoff models follow the same recursive formula for determining
-            the probability of the next token:
-
-            .. math::
-
-                Pr(w_n|w_1, \ldots w_{n-1}) = \begin{cases}
-                    Entry(w_1, \ldots, w_n) &
-                                        \text{if }Entry(\ldots)\text{ exists}\\
-                    Backoff(w_1, \ldots, w_{n-1})P(w_n|w_{n-1}, \ldots, w_2) &
-                                        \text{otherwise}
-                \end{cases}
-
-            Calling this method renormalizes :math:`Backoff(\ldots)` such that,
-            where possible, :math:`\sum_w Pr(w|\ldots) = 1`
-            '''
             for order in range(1, self.depth):  # final order has no backoffs
                 self._renormalize_backoffs_for_order(order)
 
@@ -452,6 +443,26 @@ class BackoffNGramLM(object):
 
     def to_prob_list(self):
         return self.trie.to_prob_list()
+
+    def renormalize_backoffs(self):
+        r'''Ensure backoffs induce a valid probability distribution
+
+        Backoff models follow the same recursive formula for determining
+        the probability of the next token:
+
+        .. math::
+
+            Pr(w_n|w_1, \ldots w_{n-1}) = \begin{cases}
+                Entry(w_1, \ldots, w_n) &
+                                    \text{if }Entry(\ldots)\text{ exists}\\
+                Backoff(w_1, \ldots, w_{n-1})P(w_n|w_{n-1}, \ldots, w_2) &
+                                    \text{otherwise}
+            \end{cases}
+
+        Calling this method renormalizes :math:`Backoff(\ldots)` such that,
+        where possible, :math:`\sum_w Pr(w|\ldots) = 1`
+        '''
+        return self.trie.renormalize_backoffs()
 
     def relative_entropy_pruning(self, threshold, _srilm_hacks=False):
         r'''Prune n-grams with negligible impact on model perplexity

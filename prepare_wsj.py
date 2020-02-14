@@ -1098,160 +1098,159 @@ def dict_select_candidate_prons(candidates, max_prons=4, min_rule_score=0.35):
 
 
 def wsj_extend_dict(dir_13_32_1, data_root, src_dict_suffix, mincount=2):
-    src_dict_dir = os.path.join(
-        data_root, 'local', 'dict' + src_dict_suffix)
+    src_dict_dir = os.path.join(data_root, 'local', 'dict' + src_dict_suffix)
     dst_dict_dir = os.path.join(
         data_root, 'local', 'dict' + src_dict_suffix + '_larger')
-    # if os.path.isdir(dst_dict_dir):
-    #     rmtree(dst_dict_dir)
-    # copytree(src_dict_dir, dst_dict_dir)
+    if os.path.isdir(dst_dict_dir):
+        rmtree(dst_dict_dir)
+    copytree(src_dict_dir, dst_dict_dir)
 
     # lexicon1_raw_nosil.txt is an unsorted (?) version of dict.cmu
     dict_cmu = os.path.join(dst_dict_dir, 'dict.cmu')
-    # pipe_to(
-    #     sort(set(cat(os.path.join(src_dict_dir, 'lexicon1_raw_nosil.txt')))),
-    #     dict_cmu
-    # )
-
-    # pipe_to(
-    #     sort(set(
-    #         x.split()[0]
-    #         for x in cat(dict_cmu))),
-    #     os.path.join(dst_dict_dir, 'wordlist.cmu')
-    # )
-
-    # cleaned_gz = os.path.join(dst_dict_dir, 'cleaned.gz')
-    # train_data_root = os.path.join(
-    #     dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
-    # assert os.path.isdir(train_data_root)
-    # train_data_files = []
-    # for subdir in ('87', '88', '89'):
-    #     train_data_files.extend(
-    #         glob(os.path.join(train_data_root, subdir), r'*.z'))
-    # isword = set(
-    #     x.strip() for x in cat(os.path.join(dst_dict_dir, 'wordlist.cmu')))
-    # with gzip.open(cleaned_gz, 'wt') as out:
-    #     for train_data_file in train_data_files:
-    #         with open(train_data_file, 'rb') as in_:
-    #             compressed = in_.read()
-    #         decompressed = unlzw(compressed)
-    #         in_ = io.TextIOWrapper(io.BytesIO(decompressed))
-    #         for line in in_:
-    #             if line.startswith('<'):
-    #                 continue
-    #             A = line.strip().upper().split(' ')
-    #             for n, a in enumerate(A):
-    #                 if a not in isword and len(a) > 1 and a.endswith('.'):
-    #                     out.write(a[:-1])
-    #                     if n < len(A) - 1:
-    #                         out.write("\n")
-    #                 else:
-    #                     out.write(a + " ")
-    #             out.write("\n")
-    #         del in_, compressed, decompressed
-
-    # counts = Counter()
-    # with gzip.open(cleaned_gz, 'rt') as cleaned:
-    #     for line in cleaned:
-    #         for token in line.strip().split():
-    #             counts[token] += 1
-    # counts = sorted(((v, k) for (k, v) in counts.items()), reverse=True)
-    # digits = set(str(x) for x in range(10))
-    # with open(os.path.join(dst_dict_dir, 'unigrams'), 'w') as unigrams, \
-    #         open(os.path.join(dst_dict_dir, 'oov.counts'), 'w') as oov_cnts, \
-    #         open(os.path.join(dst_dict_dir, 'oovlist'), 'w') as oov_lst:
-    #     for count, word in counts:
-    #         line = '{} {}\n'.format(count, word)
-    #         unigrams.write(line)
-    #         if word not in isword:
-    #             oov_cnts.write(line)
-    #             if not (set(word) & digits) and count >= mincount:
-    #                 oov_lst.write(word + '\n')
-    # del counts
+    pipe_to(
+        sort(set(cat(os.path.join(src_dict_dir, 'lexicon1_raw_nosil.txt')))),
+        dict_cmu
+    )
 
     pipe_to(
-        dict_get_acronym_prons(
-            os.path.join(dst_dict_dir, 'oovlist'),
-            os.path.join(dict_cmu),
-        ),
-        os.path.join(dst_dict_dir, 'dict.acronyms'),
+        sort(set(
+            x.split()[0]
+            for x in cat(dict_cmu))),
+        os.path.join(dst_dict_dir, 'wordlist.cmu')
     )
-    return
+
+    cleaned_gz = os.path.join(dst_dict_dir, 'cleaned.gz')
+    train_data_root = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
+    assert os.path.isdir(train_data_root)
+    train_data_files = []
+    for subdir in ('87', '88', '89'):
+        train_data_files.extend(
+            glob(os.path.join(train_data_root, subdir), r'*.z'))
+    isword = set(
+        x.strip() for x in cat(os.path.join(dst_dict_dir, 'wordlist.cmu')))
+    with gzip.open(cleaned_gz, 'wt') as out:
+        for train_data_file in train_data_files:
+            with open(train_data_file, 'rb') as in_:
+                compressed = in_.read()
+            decompressed = unlzw(compressed)
+            in_ = io.TextIOWrapper(io.BytesIO(decompressed))
+            for line in in_:
+                if line.startswith('<'):
+                    continue
+                A = line.strip().upper().split(' ')
+                for n, a in enumerate(A):
+                    if a not in isword and len(a) > 1 and a.endswith('.'):
+                        out.write(a[:-1])
+                        if n < len(A) - 1:
+                            out.write("\n")
+                    else:
+                        out.write(a + " ")
+                out.write("\n")
+            del in_, compressed, decompressed
+
+    counts = Counter()
+    with gzip.open(cleaned_gz, 'rt') as cleaned:
+        for line in cleaned:
+            for token in line.strip().split():
+                counts[token] += 1
+    counts = sorted(((v, k) for (k, v) in counts.items()), reverse=True)
+    digits = set(str(x) for x in range(10))
+    oov_counts_path = os.path.join(dst_dict_dir, 'oov.counts')
+    oovlist_path = os.path.join(dst_dict_dir, 'oovlist')
+    with \
+            open(os.path.join(dst_dict_dir, 'unigrams'), 'w') as unigrams, \
+            open(oov_counts_path, 'w') as oov_cnts, \
+            open(oovlist_path, 'w') as oov_lst:
+        for count, word in counts:
+            line = '{} {}\n'.format(count, word)
+            unigrams.write(line)
+            if word not in isword:
+                oov_cnts.write(line)
+                if not (set(word) & digits) and count >= mincount:
+                    oov_lst.write(word + '\n')
+    del counts
+
+    dict_acronyms_path = os.path.join(dst_dict_dir, 'dict.acronyms')
+    pipe_to(
+        dict_get_acronym_prons(oovlist_path, dict_cmu),
+        dict_acronyms_path,
+    )
 
     f_dir = os.path.join(dst_dict_dir, 'f')
     b_dir = os.path.join(dst_dict_dir, 'b')
     mkdir(f_dir, b_dir)
 
-    # banned = set(',;')
-    # pipe_to(
-    #     (x for x in cat(dict_cmu) if not (set(x.split()[0]) & banned)),
-    #     os.path.join(f_dir, 'dict')
-    # )
+    banned = set(',;')
+    pipe_to(
+        (x for x in cat(dict_cmu) if not (set(x.split()[0]) & banned)),
+        os.path.join(f_dir, 'dict')
+    )
 
-    # pipe_to(
-    #     (
-    #         x for x in cat(os.path.join(dst_dict_dir, 'oovlist'))
-    #         if not (set(x.split()[0]) & banned)),
-    #     os.path.join(f_dir, 'oovs')
-    # )
+    pipe_to(
+        (
+            x for x in cat(os.path.join(dst_dict_dir, 'oovlist'))
+            if not (set(x.split()[0]) & banned)),
+        os.path.join(f_dir, 'oovs')
+    )
 
-    # pipe_to(
-    #     (
-    #         ' '.join([w[::-1]] + p.split()[::-1]) for (w, p) in (
-    #             x.split(' ', 1) for x in cat(os.path.join(f_dir, 'dict')))),
-    #     os.path.join(b_dir, 'dict')
-    # )
+    pipe_to(
+        (
+            ' '.join([w[::-1]] + p.split()[::-1]) for (w, p) in (
+                x.split(' ', 1) for x in cat(os.path.join(f_dir, 'dict')))),
+        os.path.join(b_dir, 'dict')
+    )
 
-    # pipe_to(
-    #     (x[::-1] for x in cat(os.path.join(f_dir, 'oovs'))),
-    #     os.path.join(b_dir, 'oovs')
-    # )
+    pipe_to(
+        (x[::-1] for x in cat(os.path.join(f_dir, 'oovs'))),
+        os.path.join(b_dir, 'oovs')
+    )
 
-    # for dir_ in (f_dir, b_dir):
-    #     dict_path = os.path.join(dir_, 'dict')
-    #     rules_path = os.path.join(dir_, 'rules')
-    #     hierarchy_path = os.path.join(dir_, 'hierarchy')
-    #     oovs_path = os.path.join(dir_, 'oovs')
-    #     rule_counts_path = os.path.join(dir_, 'rule.counts')
-    #     rules_with_scores_path = os.path.join(dir_, 'rules.with_scores')
-    #     oov_candidates_path = os.path.join(dir_, 'oovs.candidates')
-    #     pipe_to(dict_get_rules(cat(dict_path)), rules_path)
-    #     pipe_to(dict_get_rule_hierarchy(rules_path), hierarchy_path)
-    #     pipe_to(
-    #         dict_count_rules(dict_score_prons(
-    #             dict_path,
-    #             dict_limit_candidate_prons(
-    #                 hierarchy_path,
-    #                 dict_get_candidate_prons(rules_path, dict_path, dict_path)
-    #             ),
-    #         )),
-    #         rule_counts_path
-    #     )
-    #     pipe_to(
-    #         sorted(
-    #             dict_score_rules(rule_counts_path),
-    #             key=lambda x: (float(x.split(';')[2]), x),
-    #             reverse=True
-    #         ),
-    #         rules_with_scores_path
-    #     )
-    #     pipe_to(
-    #         dict_limit_candidate_prons(
-    #             hierarchy_path,
-    #             dict_get_candidate_prons(
-    #                 rules_with_scores_path, dict_path, oovs_path),
-    #         ),
-    #         oov_candidates_path
-    #     )
+    for dir_ in (f_dir, b_dir):
+        dict_path = os.path.join(dir_, 'dict')
+        rules_path = os.path.join(dir_, 'rules')
+        hierarchy_path = os.path.join(dir_, 'hierarchy')
+        oovs_path = os.path.join(dir_, 'oovs')
+        rule_counts_path = os.path.join(dir_, 'rule.counts')
+        rules_with_scores_path = os.path.join(dir_, 'rules.with_scores')
+        oov_candidates_path = os.path.join(dir_, 'oovs.candidates')
+        pipe_to(dict_get_rules(cat(dict_path)), rules_path)
+        pipe_to(dict_get_rule_hierarchy(rules_path), hierarchy_path)
+        pipe_to(
+            dict_count_rules(dict_score_prons(
+                dict_path,
+                dict_limit_candidate_prons(
+                    hierarchy_path,
+                    dict_get_candidate_prons(rules_path, dict_path, dict_path)
+                ),
+            )),
+            rule_counts_path
+        )
+        pipe_to(
+            sorted(
+                dict_score_rules(rule_counts_path),
+                key=lambda x: (float(x.split(';')[2]), x),
+                reverse=True
+            ),
+            rules_with_scores_path
+        )
+        pipe_to(
+            dict_limit_candidate_prons(
+                hierarchy_path,
+                dict_get_candidate_prons(
+                    rules_with_scores_path, dict_path, oovs_path),
+            ),
+            oov_candidates_path
+        )
 
     oov_candidates_path = os.path.join(dst_dict_dir, 'oovs.candidates')
-    # pipe_to(
-    #     sorted(cat(
-    #         dict_reverse_candidates(os.path.join(b_dir, 'oovs.candidates')),
-    #         os.path.join(f_dir, 'oovs.candidates')
-    #     )),
-    #     oov_candidates_path
-    # )
+    pipe_to(
+        sorted(cat(
+            dict_reverse_candidates(os.path.join(b_dir, 'oovs.candidates')),
+            os.path.join(f_dir, 'oovs.candidates')
+        )),
+        oov_candidates_path
+    )
 
     dict_oovs_path = os.path.join(dst_dict_dir, 'dict.oovs')
     pipe_to(
@@ -1262,6 +1261,78 @@ def wsj_extend_dict(dir_13_32_1, data_root, src_dict_suffix, mincount=2):
         dict_oovs_path
     )
 
+    dict_oovs_merged_path = os.path.join(dst_dict_dir, 'dict.oovs_merged')
+    pipe_to(
+        sorted(set(cat(dict_acronyms_path, dict_oovs_path))),
+        dict_oovs_merged_path,
+    )
+
+    pipe_to(
+        sorted(set(cat(
+            ["!SIL SIL", "<SPOKEN_NOISE> SPN", "<UNK> SPN", "<NOISE> NSN"],
+            dict_cmu, dict_oovs_merged_path
+        ))),
+        os.path.join(dst_dict_dir, 'lexicon.txt')
+    )
+
+
+def wsj_train_lms(data_root, src_dict_suffix, out_dir='local_lm', max_order=4):
+    # Train a language model on WSJ lm training corpus
+    # Here we don't do things the Kaldi way. Kaldi uses its own
+    # derivative-based language modeling. We'll do modified Kneser-Ney
+    # smoothing, which is a little more widespread.
+
+    src_dict_dir = os.path.join(
+        data_root, 'local', 'dict' + src_dict_suffix + '_larger')
+    dst_lm_dir = os.path.join(data_root, 'local', out_dir)
+    mkdir(dst_lm_dir)
+
+    vocab = set(
+        x.split()[0] for x in cat(os.path.join(src_dict_dir, 'lexicon.txt')))
+    vocab.remove('!SIL')
+    pipe_to(
+        sorted(vocab),
+        os.path.join(dst_lm_dir, 'wordlist.txt')
+    )
+
+    with gzip.open(os.path.join(src_dict_dir, 'cleaned.gz'), 'rt') as f:
+        text = f.read()
+
+    sents = ngram_lm.text_to_sents(
+        text, sent_end_expr=r'\n', word_delim_expr=r' +')
+    del text
+
+    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, max_order)
+    ngram_counts[0]['<UNK>'] = 0  # add to vocab
+
+    # find any ngrams that contain words that aren't part of the vocabulary.
+    # we'll prune them. By pruning them we mean completely removing them.
+    # Modified Kneser-Ney can use the frequency statistics before removing
+    # them
+    to_prune = set(ngram_counts[0]) - vocab
+    to_prune.remove('<S>')
+    for i, ngram_count in enumerate(ngram_counts[1:]):
+        if i:
+            to_prune.update(
+                x for x in ngram_count
+                if x[:-1] in to_prune or x[-1] in to_prune)
+        else:
+            to_prune.update(
+                x for x in ngram_count
+                if x[0] in to_prune or x[-1] in to_prune)
+
+    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
+        ngram_counts, sos='<S>', to_prune=to_prune)
+    del ngram_counts
+
+    lm = ngram_lm.BackoffNGramLM(prob_list, sos='<S>', eos='</S>', unk='<UNK>')
+    # "pruning" here means removing the probability mass of the sos token and
+    # redistributing to the other unigrams. "<S>" will remain in the
+    # vocabulary
+    lm.prune_by_name({'<S>'})
+    del prob_list
+
+    print('Corpus PPL:', lm.corpus_perplexity(sents))
 
 
 def wsj_prepare_char_dict(data_root, src_dict_suffix, dst_dict_suffix):
@@ -1331,8 +1402,9 @@ def main(args=None):
 
     # wsj_prepare_dict(options.data_root, '_nosp')
 
-    dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
-    wsj_extend_dict(dir_13_32_1, options.data_root, '_nosp')
+    # dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
+    # wsj_extend_dict(dir_13_32_1, options.data_root, '_nosp')
+    wsj_train_lms(options.data_root, '_nosp')
 
     # do not extend dictionary with potential non-oovs
 

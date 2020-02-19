@@ -142,7 +142,7 @@ def flist2scp(path):
             yield "{} {}".format(id_, line)
 
 
-def find_transcripts(in_stream, dot_flist):
+def find_dot_transcripts(in_stream, dot_flist):
     '''Yields <utt> <transcript> pairs from utts (stream) and transcripts'''
 
     spk2dot = dict()
@@ -184,6 +184,31 @@ def find_transcripts(in_stream, dot_flist):
                     'No transcript for utterance id {} (current dot file is '
                     '{})'.format(uttid, dotfile))
             yield "{} {}".format(uttid, utt2trans[uttid])
+            del utt2trans[uttid]  # no more need for it - free space
+
+
+def find_lsn_transcript(in_stream, lsn_path):
+    '''Yields <utt> <transcript> pairs from utts (stream) and transcripts'''
+
+    # lsn test transcripts all come from the same master file
+    utt2trans = dict()
+    trans_pattern = re.compile(r'^(.+)\((\w{8})\)$')
+    line_no = 0
+    with open(lsn_path) as lsn_file:
+        for uttid in in_stream:
+            while uttid not in utt2trans:
+                line = lsn_file.readline().rstrip()
+                line_no += 1
+                match = trans_pattern.match(line)
+                if match is None:
+                    raise ValueError(
+                        'Bad line {} in lsn file {} (line {})'
+                        ''.format(line, lsn_path, line_no))
+                trans, utt = match.groups()
+                utt = utt.lower()
+                utt2trans[utt] = trans
+            yield "{} {}".format(uttid, utt2trans[uttid])
+            del utt2trans[uttid]
 
 
 def normalize_transcript(in_stream, noiseword):
@@ -229,13 +254,33 @@ def utt2spk_to_spk2utt(in_stream):
 def wsj_data_prep(wsj_subdirs, data_root):
     # this follows part of kaldi/egs/wsj/s5/local/wsj_data_prep.sh, but factors
     # out the language modelling stuff to wsj_word_prep in case we don't care
-    # about words
+    # about words. We also make the following adjustments:
+    # - base eval transcriptions off the gold-standard ones outlined in
+    #   https://catalog.ldc.upenn.edu/docs/LDC93S6B/csrnov92.txt and
+    #   https://catalog.ldc.upenn.edu/docs/LDC94S13A/csrnov93.html
+    # - dev_dt_20 is the exact same set as dev93, *_05 the same as _5k.
+    #   Skip former.
+    # - uses lexical equivalence map in WSJ1 to convert verbal punctuations
+    #   (and a few others) in training data to something within the vocabulary.
+    #   Kaldi just calls these UNKs.
+    # See wiki for more info on the corpus and taks in general
 
     dir_ = os.path.join(data_root, 'local', 'data')
+    train_si84_flist = os.path.join(dir_, 'train_si84.flist')
+    train_si284_flist = os.path.join(dir_, 'train_si284.flist')
+    test_eval92_flist = os.path.join(dir_, 'test_eval92.flist')
+    test_eval92_5k_flist = os.path.join(dir_, 'test_eval92_5k.flist')
+    test_eval93_flist = os.path.join(dir_, 'test_eval93.flist')
+    test_eval93_5k_flist = os.path.join(dir_, 'test_eval93_5k.flist')
+    test_dev93_flist = os.path.join(dir_, 'test_dev93.flist')
+    test_dev93_5k_flist = os.path.join(dir_, 'test_dev93_5k.flist')
+    dir_13_16_1 = find_link_dir(wsj_subdirs, '13-16.1')
+    dot_files_flist = os.path.join(dir_, 'dot_files.flist')
+    spkrinfo = os.path.join(dir_, 'wsj0-train-spkrinfo.txt')
+    spk2gender = os.path.join(dir_, 'spk2gender')
     mkdir(dir_)
 
     wv1_pattern = re.compile(r'\.wv1$', flags=re.I)
-
     for rel_path in {'11-13.1', '13-34.1', '11-2.1'}:
         if find_link_dir(wsj_subdirs, rel_path, required=False) is None:
             raise ValueError('''\
@@ -244,7 +289,6 @@ Command line arguments must be absolute pathnames to WSJ directories
 with names like 11-13.1
 ''')
 
-    train_si84_flist = os.path.join(dir_, 'train_si84.flist')
     pipe_to(
         (
             x for x in sort(ndx2flist(
@@ -262,7 +306,6 @@ with names like 11-13.1
         warnings.warn(
             'expected 7138 lines in train_si84.flist, got {}'.format(nl))
 
-    train_si284_flist = os.path.join(dir_, 'train_si284.flist')
     pipe_to(
         (
             x for x in sort(ndx2flist(
@@ -287,7 +330,6 @@ with names like 11-13.1
         warnings.warn(
             'expected 37416 lines in train_si284.flist, got {}'.format(nl))
 
-    test_eval92_flist = os.path.join(dir_, 'test_eval92.flist')
     pipe_to(
         (
             x + '.wv1' for x in sort(ndx2flist(
@@ -305,7 +347,6 @@ with names like 11-13.1
         warnings.warn(
             'expected 333 lines in test_eval92.flist, got {}'.format(nl))
 
-    test_eval92_5k_flist = os.path.join(dir_, 'test_eval92_5k.flist')
     pipe_to(
         (
             x + '.wv1' for x in sort(ndx2flist(
@@ -323,7 +364,6 @@ with names like 11-13.1
         warnings.warn(
             'expected 330 lines in test_eval92_5k.flist, got {}'.format(nl))
 
-    test_eval93_flist = os.path.join(dir_, 'test_eval93.flist')
     pipe_to(
         sort(ndx2flist(
             (x.replace('13_32_1', '13_33_1') for x in cat(find_link_dir(
@@ -339,7 +379,6 @@ with names like 11-13.1
         warnings.warn(
             'expected 213 lines in test_eval93.flist, got {}'.format(nl))
 
-    test_eval93_5k_flist = os.path.join(dir_, 'test_eval93_5k.flist')
     pipe_to(
         sort(ndx2flist(
             (x.replace('13_32_1', '13_33_1') for x in cat(find_link_dir(
@@ -357,7 +396,6 @@ with names like 11-13.1
         warnings.warn(
             'expected 215 lines in test_eval93_5k.flist, got {}'.format(nl))
 
-    test_dev93_flist = os.path.join(dir_, 'test_dev93.flist')
     pipe_to(
         sort(ndx2flist(
             cat(find_link_dir(
@@ -373,7 +411,6 @@ with names like 11-13.1
         warnings.warn(
             'expected 503 lines in test_dev93.flist, got {}'.format(nl))
 
-    test_dev93_5k_flist = os.path.join(dir_, 'test_dev93_5k.flist')
     pipe_to(
         sort(ndx2flist(
             cat(find_link_dir(
@@ -390,25 +427,6 @@ with names like 11-13.1
         warnings.warn(
             'expected 513 lines in test_dev93_5k.flist, got {}'.format(nl))
 
-    dir_13_16_1 = find_link_dir(wsj_subdirs, '13-16.1')
-    dev_dt_20_flist = os.path.join(dir_, 'dev_dt_20.flist')
-    dev_dt_05_flist = os.path.join(dir_, 'dev_dt_05.flist')
-    pipe_to(
-        sort((
-            x for x in glob(dir_13_16_1, r'???1/??_??_20/**/*')
-            if wv1_pattern.search(x)
-        )),
-        dev_dt_20_flist,
-    )
-    pipe_to(
-        sort((
-            x for x in glob(dir_13_16_1, r'???1/??_??_05/**/*')
-            if wv1_pattern.search(x)
-        )),
-        dev_dt_05_flist,
-    )
-
-    dot_files_flist = os.path.join(dir_, 'dot_files.flist')
     pipe_to(
         itertools.chain(*(
             (
@@ -423,8 +441,7 @@ with names like 11-13.1
     for x in {
             'train_si84', 'train_si284', 'test_eval92',
             'test_eval93', 'test_dev93', 'test_eval92_5k',
-            'test_eval93_5k', 'test_dev93_5k', 'dev_dt_05',
-            'dev_dt_20'}:
+            'test_eval93_5k', 'test_dev93_5k'}:
         src = os.path.join(dir_, x + '.flist')
         sph = os.path.join(dir_, x + '_sph.scp')
         trans1 = os.path.join(dir_, x + '.trans1')
@@ -433,13 +450,27 @@ with names like 11-13.1
         spk2utt = os.path.join(dir_, x + '.spk2utt')
 
         pipe_to(sort(flist2scp(src)), sph)
-        pipe_to(
-            find_transcripts(
-                (x.split()[0] for x in cat(sph)), dot_files_flist),
-            trans1
-        )
 
-        pipe_to(sort(normalize_transcript(cat(trans1), noiseword)), txt)
+        if x in {'test_eval93', 'test_eval93_5k'}:
+            lns_path = find_link_dir(
+                wsj_subdirs, '13-32.1/score/lib/wsj/nov93wsj.ref')
+            pipe_to(
+                find_lsn_transcript(
+                    (x.split()[0] for x in cat(sph)),
+                    lns_path
+                ),
+                trans1
+            )
+            pipe_to(sort(cat(trans1)), txt)
+        else:
+            pipe_to(
+                find_dot_transcripts(
+                    (x.split()[0] for x in cat(sph)),
+                    dot_files_flist
+                ),
+                trans1
+            )
+            pipe_to(sort(normalize_transcript(cat(trans1), noiseword)), txt)
 
         # XXX(sdrobert): don't care about _wav.scp
 
@@ -452,7 +483,6 @@ with names like 11-13.1
 
         pipe_to(utt2spk_to_spk2utt(cat(utt2spk)), spk2utt)
 
-    spkrinfo = os.path.join(dir_, 'wsj0-train-spkrinfo.txt')
     if not os.path.isfile(spkrinfo):
         request.urlretrieve(
             'https://catalog.ldc.upenn.edu/docs/LDC93S6A/'
@@ -460,7 +490,6 @@ with names like 11-13.1
             spkrinfo
         )
 
-    spk2gender = os.path.join(dir_, 'spk2gender')
     pipe_to(
         sort(set(
             ' '.join(x.lower().split()[:2])
@@ -487,8 +516,8 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
     # use.
 
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
-    base_lm_dir = os.path.join(
-        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'base_lm')
+    vocab_dir = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
     lmdir = os.path.join(data_root, 'local', 'word_lm')
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
     train_data_root = os.path.join(
@@ -502,84 +531,92 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
 
     mkdir(lmdir)
 
-    # get 5k open vocabulary from bcb05onp.z
-    # bcb05onp.z is not gzipped, it's lzw zipped.
-    # with open(os.path.join(base_lm_dir, 'bcb05onp.z'), 'rb') as file_:
-    #     compressed = file_.read()
-    # with io.StringIO(unlzw(compressed).decode('utf-8')) as file_:
-    #     prob_list = parse_arpa_lm(file_)
-    # prob_list[0]['<NOISE>'] = 0
-    # vocab_5 = sorted(prob_list[0])
-    # del prob_list
-    # with open(vocab2id_5_txt, 'w') as file_:
-    #     for i, v in enumerate(vocab_5):
-    #         file_.write('{} {}\n'.format(v, i))
-    # vocab_5 = set(vocab_5)
+    # determine 5k closed and 20k open vocabularies. These are the same in
+    # WSJ0 and WSJ1, so we only look at WSJ1. Note Kaldi uses the 5k open
+    # vocabulary. Standard WSJ eval assumes a closed 5k vocab. We'll use the
+    # non-verbalized punctuation vocabulary versions since testing is all
+    # non-verbalized. However, we do *not* replace verbalized punctuation in
+    # the LM training data with lexical equivalents (e.g. ",COMMA -> COMMA")
+    # because they don't exist in natural language.
+    vocab_5 = sorted(
+        x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
+        if x[0] != '#'
+    )
+    # No <UNK> for closed vocab
+    vocab_5.insert(0, '</s>')
+    vocab_5.insert(1, '<NOISE>')
+    vocab_5.insert(2, '<s>')
+    with open(vocab2id_5_txt, 'w') as file_:
+        for i, v in enumerate(vocab_5):
+            file_.write('{} {}\n'.format(v, i))
+    vocab_5 = set(vocab_5)
 
-    # Get 20k open vocabulary from bcb20onp.z.
-    # with open(os.path.join(base_lm_dir, 'bcb20onp.z'), 'rb') as file_:
-    #     compressed = file_.read()
-    # with io.StringIO(unlzw(compressed).decode('utf-8')) as file_:
-    #     prob_list = parse_arpa_lm(file_)
-    # prob_list[0]['<NOISE>'] = 0
-    # vocab_20 = sorted(prob_list[0])
-    # del prob_list
-    # with open(vocab2id_20_txt, 'w') as file_:
-    #     for i, v in enumerate(vocab_20):
-    #         file_.write('{} {}\n'.format(v, i))
-    # vocab_20 = set(vocab_20)
+    vocab_20 = sorted(
+        x for x in cat(os.path.join(vocab_dir, 'wlist20o.nvp'))
+        if x[0] != '#'
+    )
+    vocab_20.insert(0, '</s>')
+    vocab_20.insert(1, '<NOISE>')
+    vocab_20.insert(2, '<UNK>')
+    vocab_20.insert(3, '<s>')
+    with open(vocab2id_20_txt, 'w') as file_:
+        for i, v in enumerate(vocab_20):
+            file_.write('{} {}\n'.format(v, i))
+    vocab_20 = set(vocab_20)
 
     # clean up training data. We do something similar to wsj_extend_dict.sh
-    # assert os.path.isdir(train_data_root)
-    # train_data_files = []
-    # for subdir in ('87', '88', '89'):
-    #     train_data_files.extend(
-    #         glob(os.path.join(train_data_root, subdir), r'*.z'))
-    # isword = vocab_5 | vocab_20
-    # with gzip.open(cleaned_txt_gz, 'wt') as out:
-    #     for train_data_file in train_data_files:
-    #         with open(train_data_file, 'rb') as in_:
-    #             compressed = in_.read()
-    #         decompressed = unlzw(compressed)
-    #         in_ = io.TextIOWrapper(io.BytesIO(decompressed))
-    #         for line in in_:
-    #             if line.startswith('<'):
-    #                 continue
-    #             A = line.strip().upper().split(' ')
-    #             for n, a in enumerate(A):
-    #                 if a not in isword and len(a) > 1 and a.endswith('.'):
-    #                     out.write(a[:-1])
-    #                     if n < len(A) - 1:
-    #                         out.write("\n")
-    #                 else:
-    #                     out.write(a + " ")
-    #             out.write("\n")
-    #         del in_, compressed, decompressed
-    # del isword, train_data_files
+    assert os.path.isdir(train_data_root)
+    train_data_files = []
+    for subdir in ('87', '88', '89'):
+        train_data_files.extend(
+            glob(os.path.join(train_data_root, subdir), r'*.z'))
+    isword = vocab_5 | vocab_20
+    with gzip.open(cleaned_txt_gz, 'wt') as out:
+        for train_data_file in train_data_files:
+            with open(train_data_file, 'rb') as in_:
+                compressed = in_.read()
+            decompressed = unlzw(compressed)
+            in_ = io.TextIOWrapper(io.BytesIO(decompressed))
+            for line in in_:
+                if line.startswith('<'):
+                    continue
+                A = line.strip().upper().split(' ')
+                for n, a in enumerate(A):
+                    if a not in isword and len(a) > 1 and a.endswith('.'):
+                        out.write(a[:-1])
+                        if n < len(A) - 1:
+                            out.write("\n")
+                    else:
+                        out.write(a + " ")
+                out.write("\n")
+            del in_, compressed, decompressed
+    del isword, train_data_files
 
     # convert cleaned data into sentences
-    # with gzip.open(cleaned_txt_gz, 'rt') as file_:
-    #     text = file_.read()
-    # sents = ngram_lm.text_to_sents(
-    #     text, sent_end_expr='\n', word_delim_expr=' ')
-    # del text
+    with gzip.open(cleaned_txt_gz, 'rt') as file_:
+        text = file_.read()
+    sents = ngram_lm.text_to_sents(
+        text, sent_end_expr='\n', word_delim_expr=' ')
+    del text
 
     # count n-grams in sentences
-    # ngram_counts = ngram_lm.sents_to_ngram_counts(
-    #     sents, max_order, sos='<s>', eos='</s>')
+    ngram_counts = ngram_lm.sents_to_ngram_counts(
+        sents, max_order, sos='<s>', eos='</s>')
     # ensure all vocab terms have unigram counts (even if 0) for zeroton
     # interpolation
-    # for v in vocab_5 | vocab_20:
-    #     ngram_counts[0].setdefault(v, 0)
-    # del sents
+    for v in vocab_5 | vocab_20:
+        ngram_counts[0].setdefault(v, 0)
+    del sents
 
-    # with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'wt') as file_:
-    #     for ngram_count in ngram_counts:
-    #         for ngram, count in ngram_count.items():
-    #             if isinstance(ngram, str):
-    #                 file_.write('{} {}\n'.format(ngram, count))
-    #             else:
-    #                 file_.write('{} {}\n'.format(' '.join(ngram), count))
+    with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'wt') as file_:
+        for ngram_count in ngram_counts:
+            for ngram, count in ngram_count.items():
+                if isinstance(ngram, str):
+                    file_.write('{} {}\n'.format(ngram, count))
+                else:
+                    file_.write('{} {}\n'.format(' '.join(ngram), count))
+
+    return
 
     # reread in ngram counts and vocab files (only necessary for line-by-line)
     ngram_counts = [dict() for _ in range(max_order)]
@@ -591,7 +628,6 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
                 ngram_counts[0][toks[0]] = count
             else:
                 ngram_counts[len(toks) - 1][tuple(toks)] = count
-    assert sum(len(c) for c in ngram_counts) == 20306341
     with open(vocab2id_5_txt) as file_:
         vocab_5 = set(l.strip().split(' ')[0] for l in file_)
     with open(vocab2id_20_txt) as file_:
@@ -621,17 +657,18 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
                     if k[0] in to_prune or k[1] in to_prune)
         to_prune |= hapax
         assert not (to_prune & vocab)
-        # with gzip.open(toprune_txt_gz, 'wt') as file_:
-        #     for v in sorted(
-        #             x if isinstance(x, str) else ' '.join(x)
-        #             for x in to_prune):
-        #         file_.write(v)
-        #         file_.write('\n')
+        with gzip.open(toprune_txt_gz, 'wt') as file_:
+            for v in sorted(
+                    x if isinstance(x, str) else ' '.join(x)
+                    for x in to_prune):
+                file_.write(v)
+                file_.write('\n')
         prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
             ngram_counts, sos='<s>', to_prune=to_prune)
         # remove start-of-sequence probability mass
+        # (we don't necessarily have an UNK, so pretend it's something else)
         lm = ngram_lm.BackoffNGramLM(
-            prob_list, sos='<s>', eos='</s>', unk='<UNK>')
+            prob_list, sos='<s>', eos='</s>', unk='<s>')
         lm.prune_by_name({'<s>'})
         prob_list = lm.to_prob_list()
         with gzip.open(lm_arpa_gz, 'wt') as file_:

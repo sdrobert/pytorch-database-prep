@@ -43,6 +43,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import io
 import os
 import sys
 import argparse
@@ -53,7 +54,6 @@ import gzip
 import itertools
 
 from collections import OrderedDict
-from shutil import copyfileobj
 
 import ngram_lm
 
@@ -480,223 +480,364 @@ with names like 11-13.1
     )
 
 
-def wsj_word_prep(wsj_subdirs, data_root):
-    # stuff from wsj_data_prep.sh pertaining directly to words. We factor
-    # out of wsj_data_prep.sh in case we don't want to do it.
+def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
+    # We're doing things differently from Kaldi.
+    # The NIST language model probabilities are really messed up. We train
+    # up our own using Modified Kneser-Ney, but the same vocabulary that they
+    # use.
 
-    lmdir = os.path.join(data_root, 'local', 'nist_lm')
-    mkdir(lmdir)
-
-    # XXX(sdrobert): Here's why I don't copy wfl_64.lst
-    # https://groups.google.com/forum/#!topic/kaldi-developers/Q2TZQMvDvEU
-
-    # bcb20onp.z is not gzipped, it's lzw zipped. Unlike Kaldi, we do an
-    # additional step where we uncompress and recompress as a gzipped file
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
     base_lm_dir = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'base_lm')
+    lmdir = os.path.join(data_root, 'local', 'word_lm')
+    cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
+    train_data_root = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
+    vocab2id_5_txt = os.path.join(lmdir, 'vocab2id_5.txt')
+    vocab2id_20_txt = os.path.join(lmdir, 'vocab2id_20.txt')
+    toprune_5_txt_gz = os.path.join(lmdir, 'toprune_5.txt.gz')
+    toprune_20_txt_gz = os.path.join(lmdir, 'toprune_20.txt.gz')
+    lm_5_arpa_gz = os.path.join(lmdir, 'lm_5.arpa.gz')
+    lm_20_arpa_gz = os.path.join(lmdir, 'lm_20.arpa.gz')
+
+    mkdir(lmdir)
+
+    # get 5k open vocabulary from bcb05onp.z
+    # bcb05onp.z is not gzipped, it's lzw zipped.
+    # with open(os.path.join(base_lm_dir, 'bcb05onp.z'), 'rb') as file_:
+    #     compressed = file_.read()
+    # with io.StringIO(unlzw(compressed).decode('utf-8')) as file_:
+    #     prob_list = parse_arpa_lm(file_)
+    # prob_list[0]['<NOISE>'] = 0
+    # vocab_5 = sorted(prob_list[0])
+    # del prob_list
+    # with open(vocab2id_5_txt, 'w') as file_:
+    #     for i, v in enumerate(vocab_5):
+    #         file_.write('{} {}\n'.format(v, i))
+    # vocab_5 = set(vocab_5)
+
+    # Get 20k open vocabulary from bcb20onp.z.
     # with open(os.path.join(base_lm_dir, 'bcb20onp.z'), 'rb') as file_:
     #     compressed = file_.read()
-    # decompressed = unlzw(compressed)
-    # with gzip.open(os.path.join(lmdir, 'lm_bg.arpa.gz'), 'wb') as file_:
-    #     file_.write(decompressed)
-    # del compressed, decompressed
+    # with io.StringIO(unlzw(compressed).decode('utf-8')) as file_:
+    #     prob_list = parse_arpa_lm(file_)
+    # prob_list[0]['<NOISE>'] = 0
+    # vocab_20 = sorted(prob_list[0])
+    # del prob_list
+    # with open(vocab2id_20_txt, 'w') as file_:
+    #     for i, v in enumerate(vocab_20):
+    #         file_.write('{} {}\n'.format(v, i))
+    # vocab_20 = set(vocab_20)
 
-    # tcb20onp.z is not actually compressed
-    lm_tg_gz = os.path.join(lmdir, 'lm_tg.arpa.gz')
-    # with open(os.path.join(base_lm_dir, 'tcb20onp.z')) as src_, \
-    #         gzip.open(lm_tg_gz, 'wt') as dst_:
-    #     for line in src_:
-    #         if line.startswith('\\data\\'):
-    #             break
-    #     if line.startswith('\\data\\'):
-    #         dst_.write(line)
-    #     copyfileobj(src_, dst_)
+    # clean up training data. We do something similar to wsj_extend_dict.sh
+    # assert os.path.isdir(train_data_root)
+    # train_data_files = []
+    # for subdir in ('87', '88', '89'):
+    #     train_data_files.extend(
+    #         glob(os.path.join(train_data_root, subdir), r'*.z'))
+    # isword = vocab_5 | vocab_20
+    # with gzip.open(cleaned_txt_gz, 'wt') as out:
+    #     for train_data_file in train_data_files:
+    #         with open(train_data_file, 'rb') as in_:
+    #             compressed = in_.read()
+    #         decompressed = unlzw(compressed)
+    #         in_ = io.TextIOWrapper(io.BytesIO(decompressed))
+    #         for line in in_:
+    #             if line.startswith('<'):
+    #                 continue
+    #             A = line.strip().upper().split(' ')
+    #             for n, a in enumerate(A):
+    #                 if a not in isword and len(a) > 1 and a.endswith('.'):
+    #                     out.write(a[:-1])
+    #                     if n < len(A) - 1:
+    #                         out.write("\n")
+    #                 else:
+    #                     out.write(a + " ")
+    #             out.write("\n")
+    #         del in_, compressed, decompressed
+    # del isword, train_data_files
 
-    # the baseline language models are hideously malformed. We're going to
-    # filter most warnings about their probabilities.
-    warnings.filterwarnings('ignore', 'Calculated backoff', UserWarning)
-    # the criterion for pruning is a bit different from IRSTLM. The threshold
-    # was modified to produce roughly the same size model as with IRSTLM at
-    # threshold 1e-7.
-    lm_tgpr_gz = os.path.join(lmdir, 'lm_tgpr.arpa.gz')
-    with gzip.open(lm_tg_gz, 'rt') as file_:
-        prob_list = parse_arpa_lm(file_)
-    prob_list[0]['<s>'] = (-99.999, prob_list[0]['<s>'][0])
-    lm = ngram_lm.BackoffNGramLM(prob_list)
-    lm.renormalize_backoffs()
-    lm.relative_entropy_pruning(15e-8)
+    # convert cleaned data into sentences
+    # with gzip.open(cleaned_txt_gz, 'rt') as file_:
+    #     text = file_.read()
+    # sents = ngram_lm.text_to_sents(
+    #     text, sent_end_expr='\n', word_delim_expr=' ')
+    # del text
+
+    # count n-grams in sentences
+    # ngram_counts = ngram_lm.sents_to_ngram_counts(
+    #     sents, max_order, sos='<s>', eos='</s>')
+    # ensure all vocab terms have unigram counts (even if 0) for zeroton
+    # interpolation
+    # for v in vocab_5 | vocab_20:
+    #     ngram_counts[0].setdefault(v, 0)
+    # del sents
+
+    # with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'wt') as file_:
+    #     for ngram_count in ngram_counts:
+    #         for ngram, count in ngram_count.items():
+    #             if isinstance(ngram, str):
+    #                 file_.write('{} {}\n'.format(ngram, count))
+    #             else:
+    #                 file_.write('{} {}\n'.format(' '.join(ngram), count))
+
+    # reread in ngram counts and vocab files (only necessary for line-by-line)
+    ngram_counts = [dict() for _ in range(max_order)]
+    with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'rt') as file_:
+        for line in file_:
+            toks = line[:-1].split(' ')
+            count = int(toks.pop())
+            if len(toks) == 1:
+                ngram_counts[0][toks[0]] = count
+            else:
+                ngram_counts[len(toks) - 1][tuple(toks)] = count
+    assert sum(len(c) for c in ngram_counts) == 20306341
+    with open(vocab2id_5_txt) as file_:
+        vocab_5 = set(l.strip().split(' ')[0] for l in file_)
+    with open(vocab2id_20_txt) as file_:
+        vocab_20 = set(l.strip().split(' ')[0] for l in file_)
+
+    # determine the higher-order hapax and prune them (we keep the lower-order
+    # hapax so we don't reduce the vocabulary size)
+    hapax = set()
+    for ngram_count in ngram_counts[1:]:
+        hapax |= set(k for (k, v) in ngram_count.items() if v == 1)
+
+    # train and save the language models
+    for vocab, toprune_txt_gz, lm_arpa_gz in (
+            (vocab_5, toprune_5_txt_gz, lm_5_arpa_gz),
+            (vocab_20, toprune_20_txt_gz, lm_20_arpa_gz)):
+        to_prune = set(ngram_counts[0]) - vocab
+        # prune all out-of-vocabulary n-grams
+        for i, ngram_count in enumerate(ngram_counts[1:]):
+            if i:
+                to_prune |= set(
+                    k for k in ngram_count
+                    if k[:-1] in to_prune or k[-1] in to_prune
+                )
+            else:
+                to_prune |= set(
+                    k for k in ngram_count
+                    if k[0] in to_prune or k[1] in to_prune)
+        to_prune |= hapax
+        assert not (to_prune & vocab)
+        # with gzip.open(toprune_txt_gz, 'wt') as file_:
+        #     for v in sorted(
+        #             x if isinstance(x, str) else ' '.join(x)
+        #             for x in to_prune):
+        #         file_.write(v)
+        #         file_.write('\n')
+        prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
+            ngram_counts, sos='<s>', to_prune=to_prune)
+        # remove start-of-sequence probability mass
+        lm = ngram_lm.BackoffNGramLM(
+            prob_list, sos='<s>', eos='</s>', unk='<UNK>')
+        lm.prune_by_name({'<s>'})
+        prob_list = lm.to_prob_list()
+        with gzip.open(lm_arpa_gz, 'wt') as file_:
+            ngram_lm.write_arpa(prob_list, file_)
+        del lm, prob_list, to_prune
+
+
+def wsj_char_prep(wsj_subdirs, data_root, max_order=5):
+    dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
+    lmdir = os.path.join(data_root, 'local', 'char_lm')
+    cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
+    train_data_root = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
+    lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
+
+    mkdir(lmdir)
+
+    # clean up training data. We keep pretty messy though. All we do is convert
+    # to upper case where applicable and replace spaces with underscores
+    # assert os.path.isdir(train_data_root)
+    # train_data_files = []
+    # for subdir in ('87', '88', '89'):
+    #     train_data_files.extend(
+    #         glob(os.path.join(train_data_root, subdir), r'*.z'))
+    # with gzip.open(cleaned_txt_gz, 'wt') as out:
+    #     for train_data_file in train_data_files:
+    #         with open(train_data_file, 'rb') as in_:
+    #             compressed = in_.read()
+    #         decompressed = unlzw(compressed)
+    #         in_ = io.TextIOWrapper(io.BytesIO(decompressed))
+    #         for line in in_:
+    #             if line.startswith('<'):
+    #                 continue
+    #             A = line.strip().upper().replace(' ', '_')
+    #             out.write(A)
+    #             out.write("\n")
+    #         del in_, compressed, decompressed
+    # del train_data_files
+
+    # split data into 'sentences.' This splits on every character
+    with gzip.open(cleaned_txt_gz, 'rt') as file_:
+        text = file_.read()
+    sents = ngram_lm.text_to_sents(
+        text, sent_end_expr='\n', word_delim_expr='')
+    del text
+
+    # count n-grams in sentences
+    # ngram_counts = ngram_lm.sents_to_ngram_counts(
+    #     sents, max_order, sos='<s>', eos='</s>')
+    # del sents
+    # ngram_counts[0]['<UNK>'] = ngram_counts[0]['<NOISE>'] = 0
+    # with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'wt') as file_:
+    #     for ngram_count in ngram_counts:
+    #         for ngram, count in ngram_count.items():
+    #             if isinstance(ngram, str):
+    #                 file_.write('{} {}\n'.format(ngram, count))
+    #             else:
+    #                 file_.write('{} {}\n'.format(' '.join(ngram), count))
+
+    # reread in ngram_counts (only necessary for line-by-line)
+    ngram_counts = [dict() for _ in range(max_order)]
+    with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'rt') as file_:
+        for line in file_:
+            toks = line[:-1].split(' ')
+            count = int(toks.pop())
+            if len(toks) == 1:
+                ngram_counts[0][toks[0]] = count
+            else:
+                ngram_counts[len(toks) - 1][tuple(toks)] = count
+    assert sum(len(c) for c in ngram_counts) == 579971
+
+    # determine the hapax and put them in the list to prune
+    to_prune = set()
+    for ngram_count in ngram_counts:
+        # this will exclude our special count-0 terms
+        to_prune |= set(k for (k, v) in ngram_count.items() if v == 1)
+    with gzip.open(os.path.join(lmdir, 'pruned.txt.gz'), 'wt') as file_:
+        for v in sorted(
+                x if isinstance(x, str) else ' '.join(x) for x in to_prune):
+            file_.write('{}\n'.format(v))
+
+    # train the language model
+    # unigrams and bigrams cannot use default deltas because the count of
+    # counts for two unique contexts is lower than that for 3.
+    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
+        ngram_counts,
+        delta=[(0.5, 1., 1.5)] * max_order,
+        sos='<s>', to_prune=to_prune)
+
+    # determine the vocabulary. We might've pruned some characters so we only
+    # do it here.
+    vocab = sorted(prob_list[0])
+    with open(os.path.join(lmdir, 'vocab2id.txt'), 'w') as file_:
+        for i, v in enumerate(vocab):
+            file_.write('{} {}\n'.format(v, i))
+
+    # remove any unigram probability mass on the start-of-sequence token
+    # (this should be the zeroton mass)
+    lm = ngram_lm.BackoffNGramLM(
+        prob_list, sos='<s>', eos='</s>', unk='<UNK>')
+    del prob_list
+    lm.prune_by_name({'<s>'})
+    print('{} PP: {}'.format(lm_arpa_gz, lm.corpus_perplexity(sents)))
     prob_list = lm.to_prob_list()
-    with gzip.open(lm_tgpr_gz, 'wt') as file_:
+    del lm
+
+    # write to arpa file
+    with gzip.open(lm_arpa_gz, 'wt') as file_:
         ngram_lm.write_arpa(prob_list, file_)
-    del lm, prob_list
-
-    with open(os.path.join(base_lm_dir, 'bcb05onp.z'), 'rb') as file_:
-        compressed = file_.read()
-    decompressed = unlzw(compressed)
-    with gzip.open(os.path.join(lmdir, 'lm_bg_5k.arpa.gz'), 'wb') as file_:
-        file_.write(decompressed)
-    del compressed, decompressed
-
-    # tcb05cnp.z *is* compressed
-    lm_tg_5k_gz = os.path.join(lmdir, 'lm_tg_5k.arpa.gz')
-    with open(os.path.join(base_lm_dir, 'tcb05cnp.z'), 'rb') as file_:
-        compressed = file_.read()
-    decompressed = unlzw(compressed)
-    first_idx = decompressed.find(b'\\data\\')
-    second_idx = decompressed.find(b'\\data\\', first_idx + 1)
-    decompressed = decompressed[second_idx:]
-    with gzip.open(lm_tg_5k_gz, 'wb') as file_:
-        file_.write(decompressed)
-    del compressed, decompressed
-
-    lm_tgpr_5k_gz = os.path.join(lmdir, 'lm_tgpr_5k.arpa.gz')
-    with gzip.open(lm_tg_5k_gz, 'rt') as file_:
-        ngram_list = parse_arpa_lm(file_)
-    lm = ngram_lm.BackoffNGramLM(ngram_list)
-    lm.relative_entropy_pruning(15e-8)
-    ngram_list = lm.to_prob_list()
-    with gzip.open(lm_tgpr_5k_gz, 'wt') as file_:
-        ngram_lm.write_arpa(ngram_list, file_)
-    del lm, ngram_list
 
 
-def wsj_prepare_dict(data_root, dict_suffix=''):
-    dir_ = os.path.join(data_root, 'local', 'dict' + dict_suffix)
-    cmudict = os.path.join(dir_, 'cmudict')
-    mkdir(cmudict)
-
-    # we use the github URL mentioned here
-    # http://www.speech.cs.cmu.edu/cgi-bin/cmudict
-    # to avoid using subversion.
-    url = (
-        'https://raw.githubusercontent.com/Alexir/CMUdict/'
-        '7a37de79f7e650fd6334333b1b5d2bcf0dee8ad3/'
+def build_preamble_parser(subparsers):
+    parser = subparsers.add_parser(
+        'preamble',
+        help='Do all pre-initialization setup. Needs to be done only once.'
     )
-    for x in {'cmudict.0.7a', 'cmudict-0.7b.symbols'}:
-        # 0.7b.symbols the same as 0.7a.symbols
-        path = os.path.join(cmudict, x)
-        if not os.path.exists(path):
-            request.urlretrieve(url + x, path)
-
-    silence_phones_txt = os.path.join(dir_, 'silence_phones.txt')
-    optional_silence_txt = os.path.join(dir_, 'optional_silence.txt')
-    pipe_to(['SIL', 'SPN', 'NSN'], silence_phones_txt)
-    pipe_to(['SIL'], optional_silence_txt)
-
-    nonsilence_phones_txt = os.path.join(dir_, 'nonsilence_phones.txt')
-    phone_pattern = re.compile(r'^(\D+)\d*$')
-    phones_of = dict()
-    for phone in cat(os.path.join(cmudict, 'cmudict-0.7b.symbols')):
-        match = phone_pattern.match(phone)
-        if not match:
-            raise ValueError("Bad phone {}".format(phone))
-        base = match.groups(1)  # no stress
-        phones_of.setdefault(base, []).append(phone)
-    pipe_to(
-        (' '.join(x) for x in phones_of.values()),
-        nonsilence_phones_txt
-    )
-    del phones_of
-
-    # skip extra_questions.txt
-
-    # there were a few updates to 0.7.a that make the resulting lexicon
-    # slightly different from Kaldi's
-    lexicon_raw_nosil_txt = os.path.join(dir_, 'lexicon1_raw_nosil.txt')
-    entry_pattern = re.compile(r'^(\S+)\(\d+\) (.*)$')
-    lexicon_raw_nosil_lines = []
-    for line in cat(os.path.join(cmudict, 'cmudict.0.7a')):
-        if line.startswith(';;;'):
-            continue
-        match = entry_pattern.match(line)
-        if match is None:
-            lexicon_raw_nosil_lines.append(line)
-        else:
-            lexicon_raw_nosil_lines.append(
-                ' '.join([match.group(1), match.group(2)]))
-    pipe_to(lexicon_raw_nosil_lines, lexicon_raw_nosil_txt)
-    del lexicon_raw_nosil_lines
-
-    lexicon_txt = os.path.join(dir_, 'lexicon.txt')
-    pipe_to(
-        sort(set(cat(
-            ['!SIL  SIL', '<SPOKEN_NOISE>  SPN', '<UNK>  SPN', '<NOISE>  NSN'],
-            lexicon_raw_nosil_txt
-        ))),
-        lexicon_txt
-    )
-
-
-def wsj_prepare_char_dict(data_root, src_dict_suffix, dst_dict_suffix):
-    phone_dir = os.path.join(data_root, 'local', 'dict' + src_dict_suffix)
-    dir_ = os.path.join(data_root, 'local', 'dict' + dst_dict_suffix)
-    mkdir(dir_)
-
-    lexicon1_raw_nosil_txt = os.path.join(phone_dir, 'lexicon1_raw_nosil.txt')
-    phn_lexicon2_raw_nosil_txt = os.path.join(
-        phone_dir, 'lexicon2_raw_nosil.txt')
-    unique = OrderedDict()
-    for entry in cat(lexicon1_raw_nosil_txt):
-        unique.setdefault(entry.split(' ')[0], entry)
-    pipe_to(unique.values(), phn_lexicon2_raw_nosil_txt)
-
-    char_lexicon2_raw_nosil_txt = os.path.join(dir_, 'lexicon2_raw_nosil.txt')
-    bad_chars = set("!~@#$%^&*()+=/\",;:?_{}-")
-    pipe_to(
-        (
-            ' '.join([x] + [y for y in x if y not in bad_chars])
-            for x in unique.keys()
-        ),
-        char_lexicon2_raw_nosil_txt
-    )
-    del unique
-
-    pipe_to(['SIL', 'SPN', 'NSN'], os.path.join(dir_, 'silence_phones.txt'))
-    pipe_to(['SIL'], os.path.join(dir_, 'optional_silence.txt'))
-
-    pipe_to(
-        sort(set(cat(
-            ['!SIL  SIL', '<SPOKEN_NOISE>  SPN', '<NOISE>  NSN'],
-            char_lexicon2_raw_nosil_txt,
-        ))),
-        os.path.join(dir_, 'lexicon.txt')
-    )
-
-    pipe_to(
-        sort(set(cat(*(
-            x.split(' ')[1:] for x in cat(char_lexicon2_raw_nosil_txt))))),
-        os.path.join(dir_, 'nonsilence_phones.txt'),
-    )
-
-
-def main(args=None):
-    '''Prepare WSJ data for end-to-end pytorch training'''
-
-    parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
         'wsj_roots', nargs='+', type=os.path.abspath,
         help='Location of WSJ data directories, corresponding to WSJ0 '
         '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
     )
+
+
+def build_init_word_parser(subparsers):
+    parser = subparsers.add_parser(
+        'init_word',
+        help='Perform setup common to all word-based parsing. '
+        'Needs to be done only once. Preceded by "preamble" command.'
+    )
+    parser.add_argument(
+        'wsj_roots', nargs='+', type=os.path.abspath,
+        help='Location of WSJ data directories, corresponding to WSJ0 '
+        '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
+    )
+
+
+def build_init_char_parser(subparsers):
+    parser = subparsers.add_parser(
+        'init_char',
+        help='Perform setup common to all character-based parsing. '
+        'Needs to be done only once. Preceded by "preamble" command.'
+    )
+    parser.add_argument(
+        'wsj_roots', nargs='+', type=os.path.abspath,
+        help='Location of WSJ data directories, corresponding to WSJ0 '
+        '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
+    )
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
         'data_root', type=os.path.abspath,
         help='The root directory under which to store data. Typically '
         '``data/``'
     )
-    options = parser.parse_args(args)
+    subparsers = parser.add_subparsers(
+        title='commands', required=True, dest='command')
+    build_preamble_parser(subparsers)
+    build_init_word_parser(subparsers)
+    build_init_char_parser(subparsers)
+    return parser
+
+
+def preamble(options):
 
     wsj_subdirs = []
     for wsj_root in options.wsj_roots:
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    # wsj_data_prep(wsj_subdirs, options.data_root)
+    wsj_data_prep(wsj_subdirs, options.data_root)
+
+
+def init_word(options):
+
+    wsj_subdirs = []
+    for wsj_root in options.wsj_roots:
+        wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
+        wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
+
     wsj_word_prep(wsj_subdirs, options.data_root)
 
-    wsj_prepare_dict(options.data_root, '_nosp')
 
-    wsj_prepare_char_dict(options.data_root, '_nosp', '_char')
+def init_char(options):
+
+    wsj_subdirs = []
+    for wsj_root in options.wsj_roots:
+        wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
+        wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
+
+    wsj_char_prep(wsj_subdirs, options.data_root)
+
+
+def main(args=None):
+    '''Prepare WSJ data for end-to-end pytorch training'''
+
+    parser = build_parser()
+    options = parser.parse_args(args)
+
+    if options.command == 'preamble':
+        preamble(options)
+    elif options.command == 'init_word':
+        init_word(options)
+    elif options.command == 'init_char':
+        init_char(options)
 
 
 if __name__ == '__main__':

@@ -32,7 +32,7 @@ import re
 import io
 import gzip
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from shutil import copytree, rmtree
 from itertools import chain
 
@@ -45,6 +45,121 @@ __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"
 __license__ = "Apache 2.0"
 __copyright__ = "Copyright 2019 Sean Robertson"
+
+
+try:
+    import urllib.request as request
+except ImportError:
+    import urllib2 as request
+
+
+def wsj_prepare_dict(data_root, dict_suffix=''):
+    dir_ = os.path.join(data_root, 'local', 'dict' + dict_suffix)
+    cmudict = os.path.join(dir_, 'cmudict')
+    mkdir(cmudict)
+
+    # we use the github URL mentioned here
+    # http://www.speech.cs.cmu.edu/cgi-bin/cmudict
+    # to avoid using subversion.
+    url = (
+        'https://raw.githubusercontent.com/Alexir/CMUdict/'
+        '7a37de79f7e650fd6334333b1b5d2bcf0dee8ad3/'
+    )
+    for x in {'cmudict.0.7a', 'cmudict-0.7b.symbols'}:
+        # 0.7b.symbols the same as 0.7a.symbols
+        path = os.path.join(cmudict, x)
+        if not os.path.exists(path):
+            request.urlretrieve(url + x, path)
+
+    silence_phones_txt = os.path.join(dir_, 'silence_phones.txt')
+    optional_silence_txt = os.path.join(dir_, 'optional_silence.txt')
+    pipe_to(['SIL', 'SPN', 'NSN'], silence_phones_txt)
+    pipe_to(['SIL'], optional_silence_txt)
+
+    nonsilence_phones_txt = os.path.join(dir_, 'nonsilence_phones.txt')
+    phone_pattern = re.compile(r'^(\D+)\d*$')
+    phones_of = dict()
+    for phone in cat(os.path.join(cmudict, 'cmudict-0.7b.symbols')):
+        match = phone_pattern.match(phone)
+        if not match:
+            raise ValueError("Bad phone {}".format(phone))
+        base = match.groups(1)  # no stress
+        phones_of.setdefault(base, []).append(phone)
+    pipe_to(
+        (' '.join(x) for x in phones_of.values()),
+        nonsilence_phones_txt
+    )
+    del phones_of
+
+    # skip extra_questions.txt
+
+    # there were a few updates to 0.7.a that make the resulting lexicon
+    # slightly different from Kaldi's
+    lexicon_raw_nosil_txt = os.path.join(dir_, 'lexicon1_raw_nosil.txt')
+    entry_pattern = re.compile(r'^(\S+)\(\d+\) (.*)$')
+    lexicon_raw_nosil_lines = []
+    for line in cat(os.path.join(cmudict, 'cmudict.0.7a')):
+        if line.startswith(';;;'):
+            continue
+        match = entry_pattern.match(line)
+        if match is None:
+            lexicon_raw_nosil_lines.append(line)
+        else:
+            lexicon_raw_nosil_lines.append(
+                ' '.join([match.group(1), match.group(2)]))
+    pipe_to(lexicon_raw_nosil_lines, lexicon_raw_nosil_txt)
+    del lexicon_raw_nosil_lines
+
+    lexicon_txt = os.path.join(dir_, 'lexicon.txt')
+    pipe_to(
+        sort(set(cat(
+            ['!SIL  SIL', '<SPOKEN_NOISE>  SPN', '<UNK>  SPN', '<NOISE>  NSN'],
+            lexicon_raw_nosil_txt
+        ))),
+        lexicon_txt
+    )
+
+
+def wsj_prepare_char_dict(data_root, src_dict_suffix, dst_dict_suffix):
+    phone_dir = os.path.join(data_root, 'local', 'dict' + src_dict_suffix)
+    dir_ = os.path.join(data_root, 'local', 'dict' + dst_dict_suffix)
+    mkdir(dir_)
+
+    lexicon1_raw_nosil_txt = os.path.join(phone_dir, 'lexicon1_raw_nosil.txt')
+    phn_lexicon2_raw_nosil_txt = os.path.join(
+        phone_dir, 'lexicon2_raw_nosil.txt')
+    unique = OrderedDict()
+    for entry in cat(lexicon1_raw_nosil_txt):
+        unique.setdefault(entry.split(' ')[0], entry)
+    pipe_to(unique.values(), phn_lexicon2_raw_nosil_txt)
+
+    char_lexicon2_raw_nosil_txt = os.path.join(dir_, 'lexicon2_raw_nosil.txt')
+    bad_chars = set("!~@#$%^&*()+=/\",;:?_{}-")
+    pipe_to(
+        (
+            ' '.join([x] + [y for y in x if y not in bad_chars])
+            for x in unique.keys()
+        ),
+        char_lexicon2_raw_nosil_txt
+    )
+    del unique
+
+    pipe_to(['SIL', 'SPN', 'NSN'], os.path.join(dir_, 'silence_phones.txt'))
+    pipe_to(['SIL'], os.path.join(dir_, 'optional_silence.txt'))
+
+    pipe_to(
+        sort(set(cat(
+            ['!SIL  SIL', '<SPOKEN_NOISE>  SPN', '<NOISE>  NSN'],
+            char_lexicon2_raw_nosil_txt,
+        ))),
+        os.path.join(dir_, 'lexicon.txt')
+    )
+
+    pipe_to(
+        sort(set(cat(*(
+            x.split(' ')[1:] for x in cat(char_lexicon2_raw_nosil_txt))))),
+        os.path.join(dir_, 'nonsilence_phones.txt'),
+    )
 
 
 def dict_get_acronym_prons(oovlist, dict_):

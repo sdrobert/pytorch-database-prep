@@ -102,7 +102,7 @@ class BackoffNGramLM(object):
             raise ValueError(
                 'start-of-sequence symbol "{}" does not have unigram '
                 'entry.'.format(sos))
-        self.eos = self.trie.sos = sos
+        self.sos = self.trie.sos = sos
         if eos is None:
             if '</S>' in self.vocab:
                 eos = '</S>'
@@ -220,19 +220,21 @@ class BackoffNGramLM(object):
                     assert child.lprob is not None
                     num -= 10. ** child.lprob
                     denom -= 10. ** self.conditional(h[1:] + (w,))
+                # these values may be ridiculously close to 1, but still valid.
                 if num < -1.:
                     raise ValueError(
                         'Too much probability mass {} on children of n-gram {}'
                         ''.format(-num, h))
-                elif np.isclose(num, -1.0):
-                    if node.bo > -10:
-                        warnings.warn(
-                            'Found a non-negligible backoff for n-gram {} '
-                            'when no backoff mass should exist'.format(h))
-                    continue
-                if np.isclose(denom, -1.0):
+                elif denom <= -1.0:
                     # We'll never back off. By convention, this is 0. (Pr(1.))
                     new_bo = 0.0
+                elif num == -1.0:
+                    if node.bo > -10:
+                        warnings.warn(
+                            'Found a non-negligible backoff {} for n-gram {} '
+                            'when no backoff mass should exist'.format(
+                                node.bo, h))
+                    continue
                 else:
                     new_bo = (np.log1p(num) - np.log1p(denom)) / base_10
                 node.bo = new_bo
@@ -658,7 +660,7 @@ def write_arpa(prob_list, out=sys.stdout):
         out.write('ngram {}={}\n'.format(idx + 1, len(entries_by_order[idx])))
     out.write('\n')
     for idx, entries in enumerate(entries_by_order):
-        out.write('{}-grams:\n'.format(idx + 1))
+        out.write('\\{}-grams:\n'.format(idx + 1))
         if idx == len(entries_by_order) - 1:
             for entry in entries:
                 out.write('{} {}\n'.format(' '.join(entry[0]), entry[1]))
@@ -1307,11 +1309,17 @@ def _optimal_deltas(counts, y):
             'Your dataset is too small to use the default discount '
             '(or maybe you removed the hapax before estimating probs?)')
     Y = N_r[1] / (N_r[1] + 2 * N_r[2])
-    return [r - (r + 1) * Y * N_r[r + 1] / N_r[r] for r in range(1, y + 1)]
+    deltas = [r - (r + 1) * Y * N_r[r + 1] / N_r[r] for r in range(1, y + 1)]
+    if any(d <= 0. for d in deltas):
+        raise ValueError(
+            'Your dataset is too small to use the default discount '
+            '(or maybe you removed the hapax before estimating probs?)'
+        )
+    return deltas
 
 
 def _absolute_discounting(ngram_counts, deltas, to_prune):
-    V = len(set(ngram_counts[0]))
+    V = len(set(ngram_counts[0]) - to_prune)
     prob_list = [{tuple(): (-np.log10(V), 0.)}]
     max_order = len(ngram_counts) - 1
     for order, counts, delta in zip(
@@ -1321,9 +1329,11 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
         d_counts = dict()
         pr2bin = dict()
         for ngram, count in counts.items():
+            in_prune = ngram in to_prune
             if not order:
                 ngram = (ngram,)
-                n_counts.setdefault(ngram, 0)
+                if not in_prune:
+                    n_counts.setdefault(ngram, 0)
             if not count:
                 continue
             bin_ = min(count - 1, len(delta) - 1)
@@ -1332,20 +1342,18 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
             prefix = ngram[:-1]
             d_counts[prefix] = d_counts.get(prefix, 0) + count
             prefix_bins = pr2bin.setdefault(prefix, np.zeros(len(delta) + 1))
-            if ngram in to_prune:
+            if in_prune:
                 prefix_bins[-1] += count
             else:
                 prefix_bins[bin_] += 1
                 n_counts[ngram] = count - d
         for prefix, prefix_bins in pr2bin.items():
-            if prefix in to_prune:
+            if (order == 1 and prefix[0] in to_prune) or prefix in to_prune:
                 continue
             with np.errstate(divide='ignore'):
                 prefix_bins = np.log10(prefix_bins)
                 prefix_bins[:-1] += np.log10(delta)
             gamma = _log10sumexp(prefix_bins)
-            if prefix == ('introduction',):
-                print(prefix_bins, 10 ** prefix_bins, d_counts[prefix])
             gamma -= np.log10(d_counts[prefix])
             lprob, bo = prob_list[-1][prefix]
             prob_list[-1][prefix] = (lprob, gamma)

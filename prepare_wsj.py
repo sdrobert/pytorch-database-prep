@@ -34,10 +34,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# some relevant files to the setup:
-# https://catalog.ldc.upenn.edu/docs/LDC93S6A/readme.txt
-# https://catalog.ldc.upenn.edu/docs/LDC94S13A/wsj1.txt
-
+# typo fixes taken from wav2letter/recipes/data/wsj/utils.py, which is
+# BSD-Licensed:
+#
+# Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -100,8 +100,6 @@ def find_link_dir(wsj_subdirs, rel_path, required=True):
 
 
 def ndx2flist(in_stream, wsj_subdirs):
-    '''yields absolute file names from .ndx files'''
-
     dir_pattern = re.compile(r'.+/([0-9.-]+)/?$')
     disk2fn = dict()
     for fn in wsj_subdirs:
@@ -130,7 +128,6 @@ def ndx2flist(in_stream, wsj_subdirs):
 
 
 def flist2scp(path):
-    '''Yields <utt> <path> pairs from list of files'''
     line_pattern = re.compile(r'^\S+/(\w+)\.[wW][vV]1$')
     with open(path) as f:
         for line in f:
@@ -142,23 +139,21 @@ def flist2scp(path):
             yield "{} {}".format(id_, line)
 
 
-def find_dot_transcripts(in_stream, dot_flist):
-    '''Yields <utt> <transcript> pairs from utts (stream) and transcripts'''
-
+def find_transcripts_many(in_stream, flist, flipped=False):
     spk2dot = dict()
-    dot_pattern = re.compile(r'^\S+/(\w{6})00\.dot')
-    with open(dot_flist) as f:
+    file_pattern = re.compile(r'^\S+/(\w{6})00\.(dot|lsn)')
+    with open(flist) as f:
         for line in f:
             line = line.rstrip()
-            match = dot_pattern.match(line)
+            match = file_pattern.match(line)
             if match is None:
-                raise ValueError('Bad line in dot file list {}'.format(line))
-            spk = match.group(1)
+                continue
+            spk = match.group(1).lower()
             spk2dot[spk] = line
 
     utt_pattern = re.compile(r'^(\w{6})\w\w$')
     trans_pattern = re.compile(r'^(.+)\((\w{8})\)$')
-    curspk = dotfile = None
+    curspk = file_ = None
     for uttid in in_stream:
         match = utt_pattern.match(uttid)
         if match is None:
@@ -167,27 +162,29 @@ def find_dot_transcripts(in_stream, dot_flist):
         if spk != curspk:
             utt2trans = dict()
             if spk not in spk2dot:
-                raise ValueError('No dot file for speaker {}'.format(spk))
-            dotfile = spk2dot[spk]
-            with open(dotfile) as f:
+                raise ValueError('No file for speaker {}'.format(spk))
+            file_ = spk2dot[spk]
+            with open(file_) as f:
                 for line_no, line in enumerate(f):
                     line = line.rstrip()
                     match = trans_pattern.match(line)
                     if match is None:
                         raise ValueError(
-                            'Bad line {} in dot file {} (line {})'
-                            ''.format(line, dotfile, line_no + 1))
+                            'Bad line {} in file {} (line {})'
+                            ''.format(line, file_, line_no + 1))
                     trans, utt = match.groups()
-                    utt2trans[utt] = trans
+                    if flipped:
+                        utt = utt[:4] + utt[5] + utt[4] + utt[6:]
+                    utt2trans[utt.lower()] = trans
             if uttid not in utt2trans:
-                warnings.error(
-                    'No transcript for utterance id {} (current dot file is '
-                    '{})'.format(uttid, dotfile))
+                raise ValueError(
+                    'No transcript for utterance id {} (current file is '
+                    '{})'.format(uttid, file_))
             yield "{} {}".format(uttid, utt2trans[uttid])
             del utt2trans[uttid]  # no more need for it - free space
 
 
-def find_lsn_transcript(in_stream, lsn_path):
+def find_transcripts_one(in_stream, lsn_path):
     '''Yields <utt> <transcript> pairs from utts (stream) and transcripts'''
 
     # lsn test transcripts all come from the same master file
@@ -223,7 +220,11 @@ def normalize_transcript(in_stream, noiseword, lexical_equivs):
             raise ValueError("Bad line {}".format(line))
         out, trans = match.groups()
         for w in trans.split(' '):
-            w = w.upper().replace('\\', '')
+            # typo fixes from wav2letter
+            w = (
+                w.upper().replace('\\', '').replace("Corp;", "Corp")
+                .replace('`', "'")
+                .replace("(IN-PARENTHESIS", "(IN-PARENTHESES"))
             if w in lexical_equivs:
                 w = lexical_equivs[w]
             elif del_pattern.match(w):
@@ -234,6 +235,7 @@ def normalize_transcript(in_stream, noiseword, lexical_equivs):
                 match = verbdel_pattern.match(w)
                 if match:
                     w = match.group(1)
+            w = w.replace(':', '').replace("!", '')
             out += " " + w
         yield out
 
@@ -278,6 +280,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
     test_dev93_flist = os.path.join(dir_, 'test_dev93.flist')
     test_dev93_5k_flist = os.path.join(dir_, 'test_dev93_5k.flist')
     dot_files_flist = os.path.join(dir_, 'dot_files.flist')
+    lsn_files_flist = os.path.join(dir_, 'lsn_files.flist')
     spkrinfo = os.path.join(dir_, 'wsj0-train-spkrinfo.txt')
     spk2gender = os.path.join(dir_, 'spk2gender')
     lex_equivs_txt = os.path.join(dir_, 'lex_equivs.csv')
@@ -302,6 +305,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
         for key, value in sorted(lexical_equivs.items()):
             file_.write('{},{}\n'.format(key, value))
 
+    # 11.2.1/si_tr_s/401 doesn't exist, which is why we filter it out
     pipe_to(
         (
             x for x in sort(ndx2flist(
@@ -450,6 +454,22 @@ def wsj_data_prep(wsj_subdirs, data_root):
         dot_files_flist,
     )
 
+    # My copy of WSJ0 does not have the appropriate score/ directory - it seems
+    # to be a copy of WSJ1's. Fortunately, it looks like the NIST SCORE
+    # package (https://www.nist.gov/document/score3-6-2tgz)
+    # has the WSJ0 transcripts in all.snr, and those match the ones lying
+    # around the wsj0 directories. So we scour them.
+
+    pipe_to(
+        itertools.chain(*(
+            (
+                y for y in glob(x, '**/*')
+                if re.search(r'\.lsn$', y, flags=re.I)
+            ) for x in wsj_subdirs
+        )),
+        lsn_files_flist,
+    )
+
     noiseword = "<NOISE>"
     for x in {
             'train_si84', 'train_si284', 'test_eval92',
@@ -468,16 +488,26 @@ def wsj_data_prep(wsj_subdirs, data_root):
             lns_path = find_link_dir(
                 wsj_subdirs, '13-32.1/score/lib/wsj/nov93wsj.ref')
             pipe_to(
-                find_lsn_transcript(
+                find_transcripts_one(
                     (x.split()[0] for x in cat(sph)),
                     lns_path
                 ),
                 trans1
             )
             pipe_to(sort(cat(trans1)), txt)
+        elif x in {'test_eval92', 'test_eval92_5k'}:
+            pipe_to(
+                find_transcripts_many(
+                    (x.split()[0] for x in cat(sph)),
+                    lsn_files_flist,
+                    flipped=True
+                ),
+                trans1
+            )
+            pipe_to(sort(cat(trans1)), txt)
         else:
             pipe_to(
-                find_dot_transcripts(
+                find_transcripts_many(
                     (x.split()[0] for x in cat(sph)),
                     dot_files_flist
                 ),

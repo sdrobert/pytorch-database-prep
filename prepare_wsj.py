@@ -211,7 +211,7 @@ def find_lsn_transcript(in_stream, lsn_path):
             del utt2trans[uttid]
 
 
-def normalize_transcript(in_stream, noiseword):
+def normalize_transcript(in_stream, noiseword, lexical_equivs):
     '''Sanitize in_stream transcripts'''
     line_pattern = re.compile(r'^(\S+) (.+)$')
     del_pattern = re.compile(r'^([.~]|\[[</]\w+\]|\[\w+[>/]\])$')
@@ -224,14 +224,10 @@ def normalize_transcript(in_stream, noiseword):
         out, trans = match.groups()
         for w in trans.split(' '):
             w = w.upper().replace('\\', '')
-            if del_pattern.match(w):
+            if w in lexical_equivs:
+                w = lexical_equivs[w]
+            elif del_pattern.match(w):
                 continue
-            elif w == '%PERCENT':
-                w = 'PERCENT'
-            elif w == '.POINT':
-                w = 'POINT'
-            elif w == '--DASH':
-                w = '-DASH'
             elif noise_pattern.match(w):
                 w = noiseword
             else:
@@ -263,7 +259,14 @@ def wsj_data_prep(wsj_subdirs, data_root):
     # - uses lexical equivalence map in WSJ1 to convert verbal punctuations
     #   (and a few others) in training data to something within the vocabulary.
     #   Kaldi just calls these UNKs.
-    # See wiki for more info on the corpus and taks in general
+    # See wiki for more info on the corpus and tasks in general
+
+    for rel_path in {'11-13.1', '13-34.1', '11-2.1'}:
+        if find_link_dir(wsj_subdirs, rel_path, required=False) is None:
+            raise ValueError(
+                'wsj_data_prep: Spot check of command line arguments failed. '
+                'Command line arguments must be absolute pathnames to WSJ '
+                'directories with names like 11-13.1')
 
     dir_ = os.path.join(data_root, 'local', 'data')
     train_si84_flist = os.path.join(dir_, 'train_si84.flist')
@@ -274,20 +277,30 @@ def wsj_data_prep(wsj_subdirs, data_root):
     test_eval93_5k_flist = os.path.join(dir_, 'test_eval93_5k.flist')
     test_dev93_flist = os.path.join(dir_, 'test_dev93.flist')
     test_dev93_5k_flist = os.path.join(dir_, 'test_dev93_5k.flist')
-    dir_13_16_1 = find_link_dir(wsj_subdirs, '13-16.1')
     dot_files_flist = os.path.join(dir_, 'dot_files.flist')
     spkrinfo = os.path.join(dir_, 'wsj0-train-spkrinfo.txt')
     spk2gender = os.path.join(dir_, 'spk2gender')
+    lex_equivs_txt = os.path.join(dir_, 'lex_equivs.csv')
+
     mkdir(dir_)
 
-    wv1_pattern = re.compile(r'\.wv1$', flags=re.I)
-    for rel_path in {'11-13.1', '13-34.1', '11-2.1'}:
-        if find_link_dir(wsj_subdirs, rel_path, required=False) is None:
-            raise ValueError('''\
-wsj_data_prep: Spot check of command line arguments failed
-Command line arguments must be absolute pathnames to WSJ directories
-with names like 11-13.1
-''')
+    lexical_equivs = dict()
+    lex_equiv_pattern = re.compile(r'^\s*([^=]+)\s*=>\s*(.*)$')
+    with open(find_link_dir(wsj_subdirs, '13-32.1/tranfilt/93map1.rls')) as f:
+        for line in f:
+            match = lex_equiv_pattern.match(line)
+            if match is None:
+                continue
+            key, value = match.groups()
+            lexical_equivs[key.strip()] = value.strip()
+    # a problem with 93map1.rls is it maps "BUYOUT" to "BUY BACK".
+    # it should be fixed in 93map1x.rls, as mentioned in tranfilt/readme.doc,
+    # buit I'm not sure how widely distributed this is, so I just make the
+    # change here
+    lexical_equivs["BUYOUT"] = "BUY OUT"
+    with open(lex_equivs_txt, 'w') as file_:
+        for key, value in sorted(lexical_equivs.items()):
+            file_.write('{},{}\n'.format(key, value))
 
     pipe_to(
         (
@@ -470,7 +483,11 @@ with names like 11-13.1
                 ),
                 trans1
             )
-            pipe_to(sort(normalize_transcript(cat(trans1), noiseword)), txt)
+            pipe_to(
+                sort(normalize_transcript(
+                    cat(trans1), noiseword, lexical_equivs)),
+                txt
+            )
 
         # XXX(sdrobert): don't care about _wav.scp
 

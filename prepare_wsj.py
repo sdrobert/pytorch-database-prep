@@ -202,6 +202,10 @@ def find_transcripts_one(in_stream, lsn_path):
                         'Bad line {} in lsn file {} (line {})'
                         ''.format(line, lsn_path, line_no))
                 trans, utt = match.groups()
+                if utt == '4ODC0207':
+                    # I listened to this recording. It's clearly "BUY OUT",
+                    # not "BUY BACK"
+                    trans = trans.replace('BUY BACK', 'BUY OUT')
                 utt = utt.lower()
                 utt2trans[utt] = trans
             yield "{} {}".format(uttid, utt2trans[uttid])
@@ -283,7 +287,8 @@ def wsj_data_prep(wsj_subdirs, data_root):
     lsn_files_flist = os.path.join(dir_, 'lsn_files.flist')
     spkrinfo = os.path.join(dir_, 'wsj0-train-spkrinfo.txt')
     spk2gender = os.path.join(dir_, 'spk2gender')
-    lex_equivs_txt = os.path.join(dir_, 'lex_equivs.csv')
+    lexical_equivs_csv = os.path.join(dir_, 'lex_equivs.csv')
+    vp_lexical_equivs_csv = os.path.join(dir_, 'vp_lexical_equivs.csv')
 
     mkdir(dir_)
 
@@ -301,8 +306,20 @@ def wsj_data_prep(wsj_subdirs, data_root):
     # buit I'm not sure how widely distributed this is, so I just make the
     # change here
     lexical_equivs["BUYOUT"] = "BUY OUT"
-    with open(lex_equivs_txt, 'w') as file_:
+    with open(lexical_equivs_csv, 'w') as file_:
         for key, value in sorted(lexical_equivs.items()):
+            file_.write('{},{}\n'.format(key, value))
+
+    # determine which lexical equivalences are verbal punctuation. These are
+    # the only terms we'll replace in the training data. The rest are fair
+    # game in natural language
+    alpha = set(chr(x) for x in range(ord('A'), ord('Z') + 1))
+    vp_lexical_equivs = dict(
+        (k, v) for (k, v) in lexical_equivs.items()
+        if k[0] not in alpha
+    )
+    with open(vp_lexical_equivs_csv, 'w') as file_:
+        for key, value in sorted(vp_lexical_equivs.items()):
             file_.write('{},{}\n'.format(key, value))
 
     # 11.2.1/si_tr_s/401 doesn't exist, which is why we filter it out
@@ -515,7 +532,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
             )
             pipe_to(
                 sort(normalize_transcript(
-                    cat(trans1), noiseword, lexical_equivs)),
+                    cat(trans1), noiseword, vp_lexical_equivs)),
                 txt
             )
 
@@ -556,6 +573,41 @@ def wsj_data_prep(wsj_subdirs, data_root):
     )
 
 
+def wsj_train_lm(
+        vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz,
+        deltas=None):
+    to_prune = set(ngram_counts[0]) - vocab
+    # prune all out-of-vocabulary n-grams and hapax
+    for i, ngram_count in enumerate(ngram_counts[1:]):
+        if i:
+            to_prune |= set(
+                k for (k, v) in ngram_count.items()
+                if k[:-1] in to_prune or k[-1] in to_prune or v == 1
+            )
+        else:
+            to_prune |= set(
+                k for (k, v) in ngram_count.items()
+                if k[0] in to_prune or k[1] in to_prune or v == 1
+            )
+    assert not (to_prune & vocab)
+    with gzip.open(toprune_txt_gz, 'wt') as file_:
+        for v in sorted(
+                x if isinstance(x, str) else ' '.join(x)
+                for x in to_prune):
+            file_.write(v)
+            file_.write('\n')
+    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
+        ngram_counts, sos='<s>', to_prune=to_prune, delta=deltas)
+    # remove start-of-sequence probability mass
+    # (we don't necessarily have an UNK, so pretend it's something else)
+    lm = ngram_lm.BackoffNGramLM(
+        prob_list, sos='<s>', eos='</s>', unk='<s>')
+    lm.prune_by_name({'<s>'})
+    prob_list = lm.to_prob_list()
+    with gzip.open(lm_arpa_gz, 'wt') as file_:
+        ngram_lm.write_arpa(prob_list, file_)
+
+
 def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
     # We're doing things differently from Kaldi.
     # The NIST language model probabilities are really messed up. We train
@@ -573,6 +625,7 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
     vocab2id_20_txt = os.path.join(lmdir, 'vocab2id_20.txt')
     toprune_5_txt_gz = os.path.join(lmdir, 'toprune_5.txt.gz')
     toprune_20_txt_gz = os.path.join(lmdir, 'toprune_20.txt.gz')
+    vp_txt = os.path.join(lmdir, 'vp.txt')
     lm_5_arpa_gz = os.path.join(lmdir, 'lm_5.arpa.gz')
     lm_20_arpa_gz = os.path.join(lmdir, 'lm_20.arpa.gz')
 
@@ -582,9 +635,8 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
     # WSJ0 and WSJ1, so we only look at WSJ1. Note Kaldi uses the 5k open
     # vocabulary. Standard WSJ eval assumes a closed 5k vocab. We'll use the
     # non-verbalized punctuation vocabulary versions since testing is all
-    # non-verbalized. However, we do *not* replace verbalized punctuation in
-    # the LM training data with lexical equivalents (e.g. ",COMMA -> COMMA")
-    # because they don't exist in natural language.
+    # non-verbalized. We are safe to remove verbalized punctuation from the
+    # training data since there is no corresponding audio to worry about
     vocab_5 = sorted(
         x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
         if x[0] != '#'
@@ -611,6 +663,13 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
             file_.write('{} {}\n'.format(v, i))
     vocab_20 = set(vocab_20)
 
+    vocab_5_vp = set(
+        x for x in cat(os.path.join(vocab_dir, 'wlist5c.vp'))
+        if x[0] != '#'
+    )
+    vp = vocab_5_vp - vocab_5
+    pipe_to(sorted(vp), vp_txt)
+
     # clean up training data. We do something similar to wsj_extend_dict.sh
     assert os.path.isdir(train_data_root)
     train_data_files = []
@@ -629,6 +688,8 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
                     continue
                 A = line.strip().upper().split(' ')
                 for n, a in enumerate(A):
+                    if a in vp:
+                        continue
                     if a not in isword and len(a) > 1 and a.endswith('.'):
                         out.write(a[:-1])
                         if n < len(A) - 1:
@@ -663,64 +724,12 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
                 else:
                     file_.write('{} {}\n'.format(' '.join(ngram), count))
 
-    return
-
-    # reread in ngram counts and vocab files (only necessary for line-by-line)
-    ngram_counts = [dict() for _ in range(max_order)]
-    with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'rt') as file_:
-        for line in file_:
-            toks = line[:-1].split(' ')
-            count = int(toks.pop())
-            if len(toks) == 1:
-                ngram_counts[0][toks[0]] = count
-            else:
-                ngram_counts[len(toks) - 1][tuple(toks)] = count
-    with open(vocab2id_5_txt) as file_:
-        vocab_5 = set(l.strip().split(' ')[0] for l in file_)
-    with open(vocab2id_20_txt) as file_:
-        vocab_20 = set(l.strip().split(' ')[0] for l in file_)
-
-    # determine the higher-order hapax and prune them (we keep the lower-order
-    # hapax so we don't reduce the vocabulary size)
-    hapax = set()
-    for ngram_count in ngram_counts[1:]:
-        hapax |= set(k for (k, v) in ngram_count.items() if v == 1)
-
     # train and save the language models
     for vocab, toprune_txt_gz, lm_arpa_gz in (
             (vocab_5, toprune_5_txt_gz, lm_5_arpa_gz),
             (vocab_20, toprune_20_txt_gz, lm_20_arpa_gz)):
-        to_prune = set(ngram_counts[0]) - vocab
-        # prune all out-of-vocabulary n-grams
-        for i, ngram_count in enumerate(ngram_counts[1:]):
-            if i:
-                to_prune |= set(
-                    k for k in ngram_count
-                    if k[:-1] in to_prune or k[-1] in to_prune
-                )
-            else:
-                to_prune |= set(
-                    k for k in ngram_count
-                    if k[0] in to_prune or k[1] in to_prune)
-        to_prune |= hapax
-        assert not (to_prune & vocab)
-        with gzip.open(toprune_txt_gz, 'wt') as file_:
-            for v in sorted(
-                    x if isinstance(x, str) else ' '.join(x)
-                    for x in to_prune):
-                file_.write(v)
-                file_.write('\n')
-        prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-            ngram_counts, sos='<s>', to_prune=to_prune)
-        # remove start-of-sequence probability mass
-        # (we don't necessarily have an UNK, so pretend it's something else)
-        lm = ngram_lm.BackoffNGramLM(
-            prob_list, sos='<s>', eos='</s>', unk='<s>')
-        lm.prune_by_name({'<s>'})
-        prob_list = lm.to_prob_list()
-        with gzip.open(lm_arpa_gz, 'wt') as file_:
-            ngram_lm.write_arpa(prob_list, file_)
-        del lm, prob_list, to_prune
+        wsj_train_lm(
+            vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz)
 
 
 def wsj_char_prep(wsj_subdirs, data_root, max_order=5):
@@ -729,31 +738,82 @@ def wsj_char_prep(wsj_subdirs, data_root, max_order=5):
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
     train_data_root = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
+    words_5_txt = os.path.join(lmdir, 'words_5.txt')
+    words_20_txt = os.path.join(lmdir, 'words_20.txt')
+    vp_txt = os.path.join(lmdir, 'vp.txt')
+    vocab2id_txt = os.path.join(lmdir, 'vocab2id.txt')
     lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
+    vocab_dir = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
+    toprune_txt_gz = os.path.join(lmdir, 'toprune.txt.gz')
 
     mkdir(lmdir)
 
-    # clean up training data. We keep pretty messy though. All we do is convert
-    # to upper case where applicable and replace spaces with underscores
-    # assert os.path.isdir(train_data_root)
-    # train_data_files = []
-    # for subdir in ('87', '88', '89'):
-    #     train_data_files.extend(
-    #         glob(os.path.join(train_data_root, subdir), r'*.z'))
-    # with gzip.open(cleaned_txt_gz, 'wt') as out:
-    #     for train_data_file in train_data_files:
-    #         with open(train_data_file, 'rb') as in_:
-    #             compressed = in_.read()
-    #         decompressed = unlzw(compressed)
-    #         in_ = io.TextIOWrapper(io.BytesIO(decompressed))
-    #         for line in in_:
-    #             if line.startswith('<'):
-    #                 continue
-    #             A = line.strip().upper().replace(' ', '_')
-    #             out.write(A)
-    #             out.write("\n")
-    #         del in_, compressed, decompressed
-    # del train_data_files
+    # we determine word-level vocabularies for a few reasons. First, to
+    # allow us to convert characters back to words via spellchecking later.
+    # Second, we can determine *our* vocabulary via what characters are
+    # used. Third, we determine the verbal productions which we're filtering
+    # out. Fourth, we can use the word-level sentence split hack on the cleaned
+    # data.
+    vocab_5 = set(
+        x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
+        if x[0] != '#'
+    )
+    pipe_to(sorted(vocab_5), words_5_txt)
+    vocab_20 = set(
+        x for x in cat(os.path.join(vocab_dir, 'wlist20o.nvp'))
+        if x[0] != '#'
+    )
+    pipe_to(sorted(vocab_20), words_20_txt)
+    vocab_5_vp = set(
+        x for x in cat(os.path.join(vocab_dir, 'wlist5c.vp'))
+        if x[0] != '#'
+    )
+    vp = vocab_5 - vocab_5_vp
+    pipe_to(sorted(vp), vp_txt)
+    isword = vocab_20 | vocab_5
+    vocab = sorted(set('_'.join(vocab_5 | vocab_20)))
+    vocab.insert(0, '</s>')
+    vocab.insert(1, '<NOISE>')
+    vocab.insert(2, '<UNK>')
+    vocab.insert(3, '<s>')
+    with open(vocab2id_txt, 'w') as file_:
+        for i, v in enumerate(vocab):
+            file_.write('{} {}\n'.format(v, i))
+    vocab = set(vocab)
+    del vocab_5, vocab_20
+
+    # clean up training data. We pretty much do the same thing as word-level,
+    # but replace spaces with underscores
+    assert os.path.isdir(train_data_root)
+    train_data_files = []
+    for subdir in ('87', '88', '89'):
+        train_data_files.extend(
+            glob(os.path.join(train_data_root, subdir), r'*.z'))
+    with gzip.open(cleaned_txt_gz, 'wt') as out:
+        for train_data_file in train_data_files:
+            with open(train_data_file, 'rb') as in_:
+                compressed = in_.read()
+            decompressed = unlzw(compressed)
+            in_ = io.TextIOWrapper(io.BytesIO(decompressed))
+            for line in in_:
+                if line.startswith('<'):
+                    continue
+                A = line.strip().upper().split(' ')
+                for n, a in enumerate(A):
+                    if a in vp:
+                        continue
+                    if a not in isword and len(a) > 1 and a.endswith('.'):
+                        out.write(a[:-1])
+                        if n < len(A) - 1:
+                            out.write("\n")
+                    else:
+                        out.write(a)
+                        if n < len(A) - 1:
+                            out.write("_")
+                out.write("\n")
+            del in_, compressed, decompressed
+    del isword, train_data_files
 
     # split data into 'sentences.' This splits on every character
     with gzip.open(cleaned_txt_gz, 'rt') as file_:
@@ -763,68 +823,29 @@ def wsj_char_prep(wsj_subdirs, data_root, max_order=5):
     del text
 
     # count n-grams in sentences
-    # ngram_counts = ngram_lm.sents_to_ngram_counts(
-    #     sents, max_order, sos='<s>', eos='</s>')
-    # del sents
-    # ngram_counts[0]['<UNK>'] = ngram_counts[0]['<NOISE>'] = 0
-    # with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'wt') as file_:
-    #     for ngram_count in ngram_counts:
-    #         for ngram, count in ngram_count.items():
-    #             if isinstance(ngram, str):
-    #                 file_.write('{} {}\n'.format(ngram, count))
-    #             else:
-    #                 file_.write('{} {}\n'.format(' '.join(ngram), count))
+    ngram_counts = ngram_lm.sents_to_ngram_counts(
+        sents, max_order, sos='<s>', eos='</s>')
+    del sents
+    # ensure all vocab terms have unigram counts (even if 0) for zeroton
+    # interpolation
+    for v in vocab:
+        ngram_counts[0].setdefault(v, 0)
+    with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'wt') as file_:
+        for ngram_count in ngram_counts:
+            for ngram, count in ngram_count.items():
+                if isinstance(ngram, str):
+                    file_.write('{} {}\n'.format(ngram, count))
+                else:
+                    file_.write('{} {}\n'.format(' '.join(ngram), count))
 
-    # reread in ngram_counts (only necessary for line-by-line)
-    ngram_counts = [dict() for _ in range(max_order)]
-    with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'rt') as file_:
-        for line in file_:
-            toks = line[:-1].split(' ')
-            count = int(toks.pop())
-            if len(toks) == 1:
-                ngram_counts[0][toks[0]] = count
-            else:
-                ngram_counts[len(toks) - 1][tuple(toks)] = count
-    assert sum(len(c) for c in ngram_counts) == 579971
-
-    # determine the hapax and put them in the list to prune
-    to_prune = set()
-    for ngram_count in ngram_counts:
-        # this will exclude our special count-0 terms
-        to_prune |= set(k for (k, v) in ngram_count.items() if v == 1)
-    with gzip.open(os.path.join(lmdir, 'pruned.txt.gz'), 'wt') as file_:
-        for v in sorted(
-                x if isinstance(x, str) else ' '.join(x) for x in to_prune):
-            file_.write('{}\n'.format(v))
-
-    # train the language model
-    # unigrams and bigrams cannot use default deltas because the count of
-    # counts for two unique contexts is lower than that for 3.
-    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-        ngram_counts,
-        delta=[(0.5, 1., 1.5)] * max_order,
-        sos='<s>', to_prune=to_prune)
-
-    # determine the vocabulary. We might've pruned some characters so we only
-    # do it here.
-    vocab = sorted(prob_list[0])
-    with open(os.path.join(lmdir, 'vocab2id.txt'), 'w') as file_:
-        for i, v in enumerate(vocab):
-            file_.write('{} {}\n'.format(v, i))
-
-    # remove any unigram probability mass on the start-of-sequence token
-    # (this should be the zeroton mass)
-    lm = ngram_lm.BackoffNGramLM(
-        prob_list, sos='<s>', eos='</s>', unk='<UNK>')
-    del prob_list
-    lm.prune_by_name({'<s>'})
-    print('{} PP: {}'.format(lm_arpa_gz, lm.corpus_perplexity(sents)))
-    prob_list = lm.to_prob_list()
-    del lm
-
-    # write to arpa file
-    with gzip.open(lm_arpa_gz, 'wt') as file_:
-        ngram_lm.write_arpa(prob_list, file_)
+    # learned deltas don't work for lower-order n-grams of characters because
+    # the count of count 2 unigrams/bigrams is lower than that of the 3-count.
+    # The higher-order deltas seem to be converging to 0.5, 1.0, 1.5, however,
+    # so we use that here.
+    wsj_train_lm(
+        vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz,
+        [(0.5, 1.0, 1.5)] * max_order
+    )
 
 
 def build_preamble_parser(subparsers):

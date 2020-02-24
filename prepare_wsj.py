@@ -58,7 +58,6 @@ from collections import OrderedDict
 import ngram_lm
 
 from common import glob, mkdir, sort, cat, pipe_to, wc_l
-from pydrobert.torch.util import parse_arpa_lm
 
 try:
     import urllib.request as request
@@ -255,7 +254,7 @@ def utt2spk_to_spk2utt(in_stream):
 
 def wsj_data_prep(wsj_subdirs, data_root):
     # this follows part of kaldi/egs/wsj/s5/local/wsj_data_prep.sh, but factors
-    # out the language modelling stuff to wsj_word_prep in case we don't care
+    # out the language modelling stuff to wsj_word_lm in case we don't care
     # about words. We also make the following adjustments:
     # - base eval transcriptions off the gold-standard ones outlined in
     #   https://catalog.ldc.upenn.edu/docs/LDC93S6B/csrnov92.txt and
@@ -496,6 +495,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
         sph = os.path.join(dir_, x + '_sph.scp')
         trans1 = os.path.join(dir_, x + '.trans1')
         txt = os.path.join(dir_, x + '.txt')
+        trn = os.path.join(dir_, x + '.trn')
         utt2spk = os.path.join(dir_, x + '.utt2spk')
         spk2utt = os.path.join(dir_, x + '.spk2utt')
 
@@ -535,6 +535,12 @@ def wsj_data_prep(wsj_subdirs, data_root):
                     cat(trans1), noiseword, vp_lexical_equivs)),
                 txt
             )
+
+        # write to trn
+        pipe_to(
+            ('{1} ({0})'.format(*x.split(maxsplit=1)) for x in cat(txt)),
+            trn
+        )
 
         # XXX(sdrobert): don't care about _wav.scp
 
@@ -608,7 +614,7 @@ def wsj_train_lm(
         ngram_lm.write_arpa(prob_list, file_)
 
 
-def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
+def wsj_word_lm(wsj_subdirs, data_root, max_order=3):
     # We're doing things differently from Kaldi.
     # The NIST language model probabilities are really messed up. We train
     # up our own using Modified Kneser-Ney, but the same vocabulary that they
@@ -732,7 +738,7 @@ def wsj_word_prep(wsj_subdirs, data_root, max_order=3):
             vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz)
 
 
-def wsj_char_prep(wsj_subdirs, data_root, max_order=5):
+def wsj_char_lm(wsj_subdirs, data_root, max_order=5):
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
     lmdir = os.path.join(data_root, 'local', 'char_lm')
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
@@ -848,6 +854,28 @@ def wsj_char_prep(wsj_subdirs, data_root, max_order=5):
     )
 
 
+def wsj_word_trn_to_char_trn(data_root):
+    dir_ = os.path.join(data_root, 'local', 'data')
+    char_token_pattern = re.compile(r'[^<]|<[^>]+>')
+
+    for x in {
+            'train_si84', 'train_si284', 'test_eval92',
+            'test_eval93', 'test_dev93', 'test_eval92_5k',
+            'test_eval93_5k', 'test_dev93_5k'}:
+        trn_word = os.path.join(dir_, x + '.trn')
+        trn_char = os.path.join(dir_, x + '.char.trn')
+
+        with open(trn_word) as in_, open(trn_char, 'w') as out:
+            for line in in_:
+                trans, utt = line.strip().rsplit(maxsplit=1)
+                trans = trans.replace(' ', '_')
+                trans = ' '.join(char_token_pattern.findall(trans))
+                out.write(trans)
+                out.write(' ')
+                out.write(utt)
+                out.write('\n')
+
+
 def build_preamble_parser(subparsers):
     parser = subparsers.add_parser(
         'preamble',
@@ -918,7 +946,7 @@ def init_word(options):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    wsj_word_prep(wsj_subdirs, options.data_root)
+    wsj_word_lm(wsj_subdirs, options.data_root)
 
 
 def init_char(options):
@@ -928,7 +956,8 @@ def init_char(options):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    wsj_char_prep(wsj_subdirs, options.data_root)
+    wsj_word_trn_to_char_trn(options.data_root)
+    wsj_char_lm(wsj_subdirs, options.data_root)
 
 
 def main(args=None):

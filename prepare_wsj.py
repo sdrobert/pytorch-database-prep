@@ -12,16 +12,6 @@
 #
 # Copyright 2010-2011 Microsoft Corporation
 #
-# and kaldi/egs/wsj/s5/local/wsj_prepare_dict.sh:
-#
-# Copyright 2010-2012 Microsoft Corporation
-#           2012-2014 Johns Hopkins University (Author: Daniel Povey)
-#                2015 Guoguo Chen
-#
-# and kaldi/egs/wsj/s5/local/wsj_prepare_char_dict.sh
-#
-# Copyright 2017  Hossein Hadian
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -33,11 +23,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+#
 # typo fixes taken from wav2letter/recipes/data/wsj/utils.py, which is
 # BSD-Licensed:
 #
 # Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
+
+'''Command-line interface to prepare the WSJ CSR corpus for end to end ASR'''
 
 from __future__ import absolute_import
 from __future__ import division
@@ -56,15 +48,13 @@ import itertools
 from collections import OrderedDict
 
 import ngram_lm
-
+from unlzw import unlzw
 from common import glob, mkdir, sort, cat, pipe_to, wc_l
 
 try:
     import urllib.request as request
 except ImportError:
     import urllib2 as request
-
-from unlzw import unlzw
 
 __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"
@@ -73,6 +63,9 @@ __copyright__ = "Copyright 2020 Sean Robertson"
 
 
 locale.setlocale(locale.LC_ALL, 'C')
+
+
+ALPHA = set(chr(x) for x in range(ord('A'), ord('Z') + 1))
 
 
 def find_link_dir(wsj_subdirs, rel_path, required=True):
@@ -312,10 +305,9 @@ def wsj_data_prep(wsj_subdirs, data_root):
     # determine which lexical equivalences are verbal punctuation. These are
     # the only terms we'll replace in the training data. The rest are fair
     # game in natural language
-    alpha = set(chr(x) for x in range(ord('A'), ord('Z') + 1))
     vp_lexical_equivs = dict(
         (k, v) for (k, v) in lexical_equivs.items()
-        if k[0] not in alpha
+        if k[0] not in ALPHA
     )
     with open(vp_lexical_equivs_csv, 'w') as file_:
         for key, value in sorted(vp_lexical_equivs.items()):
@@ -579,6 +571,85 @@ def wsj_data_prep(wsj_subdirs, data_root):
     )
 
 
+def wsj_init_word_subdir(wsj_subdirs, data_root, subdir, vocab_size):
+    local_data_dir = os.path.join(data_root, 'local', 'data')
+    token2id_txt = os.path.join(subdir, 'token2id.txt')
+    id2token_txt = os.path.join(subdir, 'id2token.txt')
+    dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
+    vocab_dir = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
+
+    mkdir(subdir)
+
+    # determine the vocabulary based on whether we're in the 5k closed,
+    # 20k open, or 64k closed condition. Note Kaldi uses the 5k open
+    # vocabulary. Standard WSJ eval assumes a closed vocab @ 5k. We use
+    # non-verbalized punctuation vocabulary versions since testing is all
+    # non-verbalized. We are safe to remove verbalized punctuation from the
+    # training data since there is no corresponding audio to worry about
+
+    if vocab_size == 5:
+        # though the test set vocabulary is closed, the training set will still
+        # contain OOV words. We add the <UNK>
+        vocab = ['</s>', '<NOISE>', '<UNK>', '<s>'] + sorted(
+            x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
+            if x[0] != '#'
+        )
+    elif vocab_size == 20:
+        vocab = ['</s>', '<NOISE>', '<UNK>', '<s>'] + sorted(
+            x for x in cat(os.path.join(vocab_dir, 'wlist20o.nvp'))
+            if x[0] != '#'
+        )
+    else:
+        # we're allowed to use the full 64k vocabulary list to generate the
+        # vocabulary, but not for language modelling:
+        # 13-32.1\wsj1\doc\lng_modl\vocab\readme.txt
+        vocab = ['</s>', '<NOISE>', '<s>'] + sorted(
+            x.split()[1] for x in cat(os.path.join(vocab_dir, 'wfl_64.lst'))
+            if x[0] != '#' and x.split()[1][0] in ALPHA
+        )
+
+    with open(token2id_txt, 'w') as t2id, open(id2token_txt, 'w') as id2t:
+        for i, v in enumerate(vocab):
+            t2id.write('{} {}\n'.format(v, i))
+            id2t.write('{} {}\n'.format(i, v))
+
+    # get the appropriate files for the vocabulary
+    for x in {
+            'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
+            'train_si84.trn', 'train_si84_sph.scp',
+            'train_si84.utt2spk', 'train_si84.spk2utt',
+            'train_si284.trn', 'train_si284_sph.scp',
+            'train_si284.utt2spk', 'train_si284.spk2utt'}:
+        pipe_to(cat(os.path.join(local_data_dir, x)), os.path.join(subdir, x))
+
+    for dest in {'test_dev93', 'test_eval92', 'test_eval93'}:
+        src = dest + '_5k' if vocab_size == 5 else dest
+        for suff in {'.trn', '_sph.scp', '.utt2spk', '.spk2utt'}:
+            pipe_to(
+                cat(os.path.join(local_data_dir, src + suff)),
+                os.path.join(subdir, dest + suff)
+            )
+
+
+def write_cmu_vocab_to_path(path):
+    url = (
+        'https://raw.githubusercontent.com/Alexir/CMUdict/'
+        '7a37de79f7e650fd6334333b1b5d2bcf0dee8ad3/cmudict-0.7b'
+    )
+    dict_path, _ = request.urlretrieve(url)
+    with open(dict_path) as in_, open(path, 'w') as out:
+        for line in in_:
+            line = line.strip()
+            if not line or line[0] not in ALPHA:
+                continue
+            word = line.split(' ', maxsplit=1)[0]
+            if word.endswith(')'):  # multiple pronunciations. Skip
+                continue
+            out.write(word)
+            out.write('\n')
+
+
 def wsj_train_lm(
         vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz,
         deltas=None):
@@ -614,75 +685,39 @@ def wsj_train_lm(
         ngram_lm.write_arpa(prob_list, file_)
 
 
-def wsj_word_lm(wsj_subdirs, data_root, max_order=3):
+def wsj_word_lm(wsj_subdirs, subdir, max_order):
     # We're doing things differently from Kaldi.
     # The NIST language model probabilities are really messed up. We train
     # up our own using Modified Kneser-Ney, but the same vocabulary that they
     # use.
 
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
-    vocab_dir = os.path.join(
-        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
-    lmdir = os.path.join(data_root, 'local', 'word_lm')
+    lmdir = os.path.join(subdir, 'lm')
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
     train_data_root = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
-    vocab2id_5_txt = os.path.join(lmdir, 'vocab2id_5.txt')
-    vocab2id_20_txt = os.path.join(lmdir, 'vocab2id_20.txt')
-    toprune_5_txt_gz = os.path.join(lmdir, 'toprune_5.txt.gz')
-    toprune_20_txt_gz = os.path.join(lmdir, 'toprune_20.txt.gz')
-    vp_txt = os.path.join(lmdir, 'vp.txt')
-    lm_5_arpa_gz = os.path.join(lmdir, 'lm_5.arpa.gz')
-    lm_20_arpa_gz = os.path.join(lmdir, 'lm_20.arpa.gz')
+    wordlist_txt = os.path.join(lmdir, 'wordlist.txt')
+    vp_lexical_equivs_csv = os.path.join(subdir, 'vp_lexical_equivs.csv')
+    token2id_txt = os.path.join(subdir, 'token2id.txt')
+    toprune_txt_gz = os.path.join(lmdir, 'toprune.txt.gz')
+    lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
 
     mkdir(lmdir)
 
-    # determine 5k closed and 20k open vocabularies. These are the same in
-    # WSJ0 and WSJ1, so we only look at WSJ1. Note Kaldi uses the 5k open
-    # vocabulary. Standard WSJ eval assumes a closed 5k vocab. We'll use the
-    # non-verbalized punctuation vocabulary versions since testing is all
-    # non-verbalized. We are safe to remove verbalized punctuation from the
-    # training data since there is no corresponding audio to worry about
-    vocab_5 = sorted(
-        x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
-        if x[0] != '#'
-    )
-    # No <UNK> for closed vocab
-    vocab_5.insert(0, '</s>')
-    vocab_5.insert(1, '<NOISE>')
-    vocab_5.insert(2, '<s>')
-    with open(vocab2id_5_txt, 'w') as file_:
-        for i, v in enumerate(vocab_5):
-            file_.write('{} {}\n'.format(v, i))
-    vocab_5 = set(vocab_5)
+    write_cmu_vocab_to_path(wordlist_txt)
 
-    vocab_20 = sorted(
-        x for x in cat(os.path.join(vocab_dir, 'wlist20o.nvp'))
-        if x[0] != '#'
-    )
-    vocab_20.insert(0, '</s>')
-    vocab_20.insert(1, '<NOISE>')
-    vocab_20.insert(2, '<UNK>')
-    vocab_20.insert(3, '<s>')
-    with open(vocab2id_20_txt, 'w') as file_:
-        for i, v in enumerate(vocab_20):
-            file_.write('{} {}\n'.format(v, i))
-    vocab_20 = set(vocab_20)
-
-    vocab_5_vp = set(
-        x for x in cat(os.path.join(vocab_dir, 'wlist5c.vp'))
-        if x[0] != '#'
-    )
-    vp = vocab_5_vp - vocab_5
-    pipe_to(sorted(vp), vp_txt)
+    isword = set(cat(wordlist_txt))
+    vp = set(x.split()[0] for x in cat(vp_lexical_equivs_csv))
+    vocab = set(x.split()[0] for x in cat(token2id_txt))
 
     # clean up training data. We do something similar to wsj_extend_dict.sh
+    # we are safe to remove verbalized punctuation because that'll match the
+    # non-verbalized punctuation sentences afterwards.
     assert os.path.isdir(train_data_root)
     train_data_files = []
-    for subdir in ('87', '88', '89'):
+    for subdir_ in ('87', '88', '89'):
         train_data_files.extend(
-            glob(os.path.join(train_data_root, subdir), r'*.z'))
-    isword = vocab_5 | vocab_20
+            glob(os.path.join(train_data_root, subdir_), r'*.z'))
     with gzip.open(cleaned_txt_gz, 'wt') as out:
         for train_data_file in train_data_files:
             with open(train_data_file, 'rb') as in_:
@@ -718,7 +753,7 @@ def wsj_word_lm(wsj_subdirs, data_root, max_order=3):
         sents, max_order, sos='<s>', eos='</s>')
     # ensure all vocab terms have unigram counts (even if 0) for zeroton
     # interpolation
-    for v in vocab_5 | vocab_20:
+    for v in vocab:
         ngram_counts[0].setdefault(v, 0)
     del sents
 
@@ -730,72 +765,99 @@ def wsj_word_lm(wsj_subdirs, data_root, max_order=3):
                 else:
                     file_.write('{} {}\n'.format(' '.join(ngram), count))
 
-    # train and save the language models
-    for vocab, toprune_txt_gz, lm_arpa_gz in (
-            (vocab_5, toprune_5_txt_gz, lm_5_arpa_gz),
-            (vocab_20, toprune_20_txt_gz, lm_20_arpa_gz)):
-        wsj_train_lm(
-            vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz)
+    wsj_train_lm(vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz)
 
 
-def wsj_char_lm(wsj_subdirs, data_root, max_order=5):
+def wsj_init_char_subdir(wsj_subdirs, data_root, subdir, eval_vocab_size):
+    local_data_dir = os.path.join(data_root, 'local', 'data')
+    token2id_txt = os.path.join(subdir, 'token2id.txt')
+    id2token_txt = os.path.join(subdir, 'id2token.txt')
+    words_txt = os.path.join(subdir, 'words.txt')
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
-    lmdir = os.path.join(data_root, 'local', 'char_lm')
+    vocab_dir = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
+
+    mkdir(subdir)
+
+    # we save the (closed) list of words from the eval set in case anyone
+    # cares to spellcheck. The primary purpose is to determine what characters
+    # are inside this list
+    if eval_vocab_size == 5:
+        words = set(
+            x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
+            if x[0] != '#'
+        )
+    else:
+        # we're allowed to use the full 64k vocabulary list to generate the
+        # vocabulary, but not for language modelling:
+        # 13-32.1\wsj1\doc\lng_modl\vocab\readme.txt
+        words = set(
+            x.split()[1] for x in cat(os.path.join(vocab_dir, 'wfl_64.lst'))
+            if x[0] != '#' and x.split()[1][0] in ALPHA
+        )
+    pipe_to(sorted(words), words_txt)
+
+    # note the character vocabulary is always closed if we take all the
+    # characters from a closed word-level vocabulary
+    vocab = ['</s>', '<NOISE>', '<s>'] + sorted(set('_'.join(words)))
+    with open(token2id_txt, 'w') as t2id, open(id2token_txt, 'w') as id2t:
+        for i, v in enumerate(vocab):
+            t2id.write('{} {}\n'.format(v, i))
+            id2t.write('{} {}\n'.format(i, v))
+
+    for x in {
+            'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
+            'train_si84.trn', 'train_si84_sph.scp',
+            'train_si84.utt2spk', 'train_si84.spk2utt',
+            'train_si284.trn', 'train_si284_sph.scp',
+            'train_si284.utt2spk', 'train_si284.spk2utt'}:
+        src = os.path.join(local_data_dir, x)
+        dest = os.path.join(subdir, x)
+        if x.endswith('.trn'):
+            word_trn_to_char_trn(src, dest)
+        else:
+            pipe_to(cat(src), dest)
+
+    for dest in {'test_dev93', 'test_eval92', 'test_eval93'}:
+        src = dest + '_5k' if eval_vocab_size == 5 else dest
+        word_trn_to_char_trn(
+            os.path.join(local_data_dir, src + '.trn'),
+            os.path.join(subdir, dest + '.trn')
+        )
+        for suff in {'_sph.scp', '.utt2spk', '.spk2utt'}:
+            pipe_to(
+                cat(os.path.join(local_data_dir, src + suff)),
+                os.path.join(subdir, dest + suff)
+            )
+
+
+def wsj_char_lm(wsj_subdirs, subdir, max_order):
+    dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
+    lmdir = os.path.join(subdir, 'lm')
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
     train_data_root = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
-    words_5_txt = os.path.join(lmdir, 'words_5.txt')
-    words_20_txt = os.path.join(lmdir, 'words_20.txt')
-    vp_txt = os.path.join(lmdir, 'vp.txt')
-    vocab2id_txt = os.path.join(lmdir, 'vocab2id.txt')
-    lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
-    vocab_dir = os.path.join(
-        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
+    wordlist_txt = os.path.join(lmdir, 'wordlist.txt')
+    vp_lexical_equivs_csv = os.path.join(subdir, 'vp_lexical_equivs.csv')
+    token2id_txt = os.path.join(subdir, 'token2id.txt')
     toprune_txt_gz = os.path.join(lmdir, 'toprune.txt.gz')
+    lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
 
     mkdir(lmdir)
 
-    # we determine word-level vocabularies for a few reasons. First, to
-    # allow us to convert characters back to words via spellchecking later.
-    # Second, we can determine *our* vocabulary via what characters are
-    # used. Third, we determine the verbal productions which we're filtering
-    # out. Fourth, we can use the word-level sentence split hack on the cleaned
-    # data.
-    vocab_5 = set(
-        x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
-        if x[0] != '#'
-    )
-    pipe_to(sorted(vocab_5), words_5_txt)
-    vocab_20 = set(
-        x for x in cat(os.path.join(vocab_dir, 'wlist20o.nvp'))
-        if x[0] != '#'
-    )
-    pipe_to(sorted(vocab_20), words_20_txt)
-    vocab_5_vp = set(
-        x for x in cat(os.path.join(vocab_dir, 'wlist5c.vp'))
-        if x[0] != '#'
-    )
-    vp = vocab_5 - vocab_5_vp
-    pipe_to(sorted(vp), vp_txt)
-    isword = vocab_20 | vocab_5
-    vocab = sorted(set('_'.join(vocab_5 | vocab_20)))
-    vocab.insert(0, '</s>')
-    vocab.insert(1, '<NOISE>')
-    vocab.insert(2, '<UNK>')
-    vocab.insert(3, '<s>')
-    with open(vocab2id_txt, 'w') as file_:
-        for i, v in enumerate(vocab):
-            file_.write('{} {}\n'.format(v, i))
-    vocab = set(vocab)
-    del vocab_5, vocab_20
+    write_cmu_vocab_to_path(wordlist_txt)
+
+    isword = set(cat(wordlist_txt))
+    vp = set(x.split()[0] for x in cat(vp_lexical_equivs_csv))
+    vocab = set(x.split()[0] for x in cat(token2id_txt))
 
     # clean up training data. We pretty much do the same thing as word-level,
     # but replace spaces with underscores
     assert os.path.isdir(train_data_root)
     train_data_files = []
-    for subdir in ('87', '88', '89'):
+    for subdir_ in ('87', '88', '89'):
         train_data_files.extend(
-            glob(os.path.join(train_data_root, subdir), r'*.z'))
+            glob(os.path.join(train_data_root, subdir_), r'*.z'))
     with gzip.open(cleaned_txt_gz, 'wt') as out:
         for train_data_file in train_data_files:
             with open(train_data_file, 'rb') as in_:
@@ -848,32 +910,249 @@ def wsj_char_lm(wsj_subdirs, data_root, max_order=5):
     # the count of count 2 unigrams/bigrams is lower than that of the 3-count.
     # The higher-order deltas seem to be converging to 0.5, 1.0, 1.5, however,
     # so we use that here.
+    # It turns out that 0.5, 1.0, 1.5 are the default fallbacks in KenLM, and
+    # other character-based lms seem to be using that switch. Cool.
     wsj_train_lm(
         vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz,
         [(0.5, 1.0, 1.5)] * max_order
     )
 
 
-def wsj_word_trn_to_char_trn(data_root):
-    dir_ = os.path.join(data_root, 'local', 'data')
+def word_trn_to_char_trn(trn_word, trn_char):
     char_token_pattern = re.compile(r'[^<]|<[^>]+>')
+    with open(trn_word) as in_, open(trn_char, 'w') as out:
+        for line in in_:
+            trans, utt = line.strip().rsplit(maxsplit=1)
+            trans = trans.replace(' ', '_')
+            trans = ' '.join(char_token_pattern.findall(trans))
+            out.write(trans)
+            out.write(' ')
+            out.write(utt)
+            out.write('\n')
 
-    for x in {
-            'train_si84', 'train_si284', 'test_eval92',
-            'test_eval93', 'test_dev93', 'test_eval92_5k',
-            'test_eval93_5k', 'test_dev93_5k'}:
-        trn_word = os.path.join(dir_, x + '.trn')
-        trn_char = os.path.join(dir_, x + '.char.trn')
 
-        with open(trn_word) as in_, open(trn_char, 'w') as out:
+def wsj_init_subword_subdir(
+        wsj_subdirs, data_root, subdir, subword_vocab_size, eval_vocab_size,
+        algorithm):
+    local_data_dir = os.path.join(data_root, 'local', 'data')
+    token2id_txt = os.path.join(subdir, 'token2id.txt')
+    id2token_txt = os.path.join(subdir, 'id2token.txt')
+    words_txt = os.path.join(subdir, 'words.txt')
+    chars_txt = os.path.join(subdir, 'chars.txt')
+    dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
+    vocab_dir = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
+    subword_dir = os.path.join(subdir, 'subword')
+    train_data_root = os.path.join(
+        dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
+    wordlist_txt = os.path.join(subword_dir, 'wordlist.txt')
+    vp_lexical_equivs_csv = os.path.join(
+        local_data_dir, 'vp_lexical_equivs.csv')
+    cleaned_txt = os.path.join(subword_dir, 'cleaned.txt')
+    spm_prefix = os.path.join(subword_dir, 'spm')
+
+    import sentencepiece as spm
+
+    mkdir(subdir, subword_dir)
+
+    # we save the (closed) list of words from the eval set in case anyone
+    # cares to spellcheck. The primary purpose is to determine what characters
+    # are inside this list
+    if eval_vocab_size == 5:
+        words = set(
+            x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
+            if x[0] != '#'
+        )
+    else:
+        # we're allowed to use the full 64k vocabulary list to generate the
+        # vocabulary, but not for language modelling:
+        # 13-32.1\wsj1\doc\lng_modl\vocab\readme.txt
+        words = set(
+            x.split()[1] for x in cat(os.path.join(vocab_dir, 'wfl_64.lst'))
+            if x[0] != '#' and x.split()[1][0] in ALPHA
+        )
+    pipe_to(sorted(words), words_txt)
+
+    chars = set(' '.join(words))
+    pipe_to(sorted(chars), chars_txt)
+
+    write_cmu_vocab_to_path(wordlist_txt)
+
+    isword = set(cat(wordlist_txt))
+    vp = set(x.split()[0] for x in cat(vp_lexical_equivs_csv))
+    invalid_char_pattern = re.compile(r'[^' + re.escape(''.join(chars)) + r']')
+
+    # build our training data. It's pretty much the same as what we'd
+    # do for language modelling, but we have to save it in plain text for
+    # sentencepiece. We skip any words that have characters outside of our
+    # vocabulary.
+    # XXX(sdrobert): we're double-dipping on the training data for both LM
+    # and subword selection. Will this be a problem?
+    assert os.path.isdir(train_data_root)
+    train_data_files = []
+    for subdir_ in ('87', '88', '89'):
+        train_data_files.extend(
+            glob(os.path.join(train_data_root, subdir_), r'*.z'))
+    with open(cleaned_txt, 'w') as out:
+        for train_data_file in train_data_files:
+            with open(train_data_file, 'rb') as in_:
+                compressed = in_.read()
+            decompressed = unlzw(compressed)
+            in_ = io.TextIOWrapper(io.BytesIO(decompressed))
             for line in in_:
-                trans, utt = line.strip().rsplit(maxsplit=1)
-                trans = trans.replace(' ', '_')
-                trans = ' '.join(char_token_pattern.findall(trans))
-                out.write(trans)
-                out.write(' ')
-                out.write(utt)
-                out.write('\n')
+                if line.startswith('<'):
+                    continue
+                A = line.strip().upper().split(' ')
+                for n, a in enumerate(A):
+                    if a in vp or invalid_char_pattern.match(a):
+                        continue
+                    if a not in isword and len(a) > 1 and a.endswith('.'):
+                        out.write(a[:-1])
+                        if n < len(A) - 1:
+                            out.write("\n")
+                    else:
+                        out.write(a + " ")
+                out.write("\n")
+            del in_, compressed, decompressed
+    del isword, train_data_files
+
+    spm.SentencePieceTrainer.Train(
+        '--input={} --model_prefix={} --vocab_size={} --model_type={}'.format(
+            cleaned_txt, spm_prefix, subword_vocab_size, algorithm
+        )
+    )
+
+    # convert the sentencepiece vocabulary into our vocabulary. There should
+    # be no <unk> terms (closed vocabulary), so we map <unk> in sentencepiece
+    # to <NOISE> in our vocab
+    with \
+            open(token2id_txt, 'w') as t2id, \
+            open(id2token_txt, 'w') as id2t, \
+            open(spm_prefix + '.vocab', encoding='utf-8') as spm_vocab:
+        for i, line in enumerate(spm_vocab):
+            word, _ = line.strip().split()
+            # replace the control character that sentencepiece uses with an
+            # underscore
+            word = word.replace(u'\u2581', '_')
+            if word == '<unk>':
+                word = '<NOISE>'
+            t2id.write('{} {}\n'.format(word, i))
+            id2t.write('{} {}\n'.format(i, word))
+
+    id2token = (x.strip().split() for x in cat(id2token_txt))
+    id2token = dict((int(k), v) for (k, v) in id2token)
+    sp = spm.SentencePieceProcessor()
+    sp.load(spm_prefix + '.model')
+
+    # similar to char stuff, but we write subwords intstead of characters
+    for x in {
+            'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
+            'train_si84.trn', 'train_si84_sph.scp',
+            'train_si84.utt2spk', 'train_si84.spk2utt',
+            'train_si284.trn', 'train_si284_sph.scp',
+            'train_si284.utt2spk', 'train_si284.spk2utt'}:
+        src = os.path.join(local_data_dir, x)
+        dest = os.path.join(subdir, x)
+        if x.endswith('.trn'):
+            word_trn_to_subword_trn(src, dest, sp, id2token)
+        else:
+            pipe_to(cat(src), dest)
+
+    for dest in {'test_dev93', 'test_eval92', 'test_eval93'}:
+        src = dest + '_5k' if eval_vocab_size == 5 else dest
+        word_trn_to_subword_trn(
+            os.path.join(local_data_dir, src + '.trn'),
+            os.path.join(subdir, dest + '.trn'),
+            sp, id2token
+        )
+        for suff in {'_sph.scp', '.utt2spk', '.spk2utt'}:
+            pipe_to(
+                cat(os.path.join(local_data_dir, src + suff)),
+                os.path.join(subdir, dest + suff)
+            )
+
+
+def wsj_subword_lm(wsj_subdirs, subdir, max_order):
+    lmdir = os.path.join(subdir, 'lm')
+    subword_dir = os.path.join(subdir, 'subword')
+    cleaned_txt = os.path.join(subword_dir, 'cleaned.txt')
+    cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
+    id2token_txt = os.path.join(subdir, 'id2token.txt')
+    toprune_txt_gz = os.path.join(lmdir, 'toprune.txt.gz')
+    lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
+    spm_model = os.path.join(subword_dir, 'spm.model')
+
+    import sentencepiece as spm
+
+    mkdir(lmdir)
+
+    id2token = (x.strip().split() for x in cat(id2token_txt))
+    id2token = dict((int(k), v) for (k, v) in id2token)
+    vocab = set(id2token.values())
+    sp = spm.SentencePieceProcessor()
+    sp.load(spm_model)
+
+    # we've already cleaned up the LM training data in subword/cleaned.txt. Now
+    # we have to convert it into subwords
+    with open(cleaned_txt) as in_, gzip.open(cleaned_txt_gz, 'wt') as out:
+        for line in in_:
+            line = line.strip()
+            line = sp.encode_as_ids(line)
+            line = ' '.join(id2token[id_] for id_ in line)
+            out.write(line)
+            out.write('\n')
+
+    # the rest proceeds in the same way as the word-level lm
+    with gzip.open(cleaned_txt_gz, 'rt') as file_:
+        text = file_.read()
+    sents = ngram_lm.text_to_sents(
+        text, sent_end_expr='\n', word_delim_expr=' ')
+    del text
+
+    ngram_counts = ngram_lm.sents_to_ngram_counts(
+        sents, max_order, sos='<s>', eos='</s>')
+    for v in vocab:
+        ngram_counts[0].setdefault(v, 0)
+    del sents
+
+    with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'wt') as file_:
+        for ngram_count in ngram_counts:
+            for ngram, count in ngram_count.items():
+                if isinstance(ngram, str):
+                    file_.write('{} {}\n'.format(ngram, count))
+                else:
+                    file_.write('{} {}\n'.format(' '.join(ngram), count))
+
+    ngram_counts = [dict() for _ in range(max_order)]
+    with gzip.open(os.path.join(lmdir, 'counts.txt.gz'), 'rt') as file_:
+        for line in file_:
+            line = line.strip().split(' ')
+            count = int(line.pop())
+            if len(line) == 1:
+                ngram_counts[0][line[0]] = count
+            else:
+                ngram_counts[len(line) - 1][tuple(line)] = count
+
+    # unless the subword vocabulary is really large, we'll have the same
+    # problem inferring deltas as in the character LM case.
+    wsj_train_lm(
+        vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz,
+        [(0.5, 1.0, 1.5)] * max_order)
+
+
+def word_trn_to_subword_trn(trn_word, trn_subword, sp, id2token):
+    with open(trn_word) as in_, open(trn_subword, 'w') as out:
+        for line in in_:
+            trans, utt = line.strip().rsplit(maxsplit=1)
+            # ensure <NOISE> gets mapped to <unk> in sentencepiece, which
+            # gets mapped back to <NOISE> in id2token
+            trans = trans.replace('<NOISE>', '_')
+            trans = sp.encode_as_ids(trans)
+            trans = ' '.join(id2token[id_] for id_ in trans)
+            out.write(trans)
+            out.write(' ')
+            out.write(utt)
+            out.write('\n')
 
 
 def build_preamble_parser(subparsers):
@@ -892,12 +1171,36 @@ def build_init_word_parser(subparsers):
     parser = subparsers.add_parser(
         'init_word',
         help='Perform setup common to all word-based parsing. '
-        'Needs to be done only once. Preceded by "preamble" command.'
+        'Needs to be done only once for a specific vocabulary size. '
+        'Preceded by "preamble" command.'
     )
     parser.add_argument(
         'wsj_roots', nargs='+', type=os.path.abspath,
         help='Location of WSJ data directories, corresponding to WSJ0 '
         '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
+    )
+    parser.add_argument(
+        '--sub-dir', default=None,
+        help='Name of sub directory in data/local/ under which to store '
+        'setup specific to this vocabulary size. Defaults to '
+        '``word<vocab_size>k``'
+    )
+    parser.add_argument(
+        '--vocab-size', default=64, type=int, choices=[64, 20, 5],
+        help='The size of the vocabulary, in thousands. One of: the 5k closed '
+        'set (with corresponding closed vocab test and dev sets), the 20k '
+        'open set (with 64k closed vocab test and dev sets), or the 64k '
+        'closed set. The standard is either the 20k or 64k set.'
+    )
+    parser.add_argument(
+        '--lm', action='store_true', default=False,
+        help='If set, will train a language model with Modified Kneser-Ney '
+        'smoothing on the WSJ lm training data.'
+    )
+    parser.add_argument(
+        '--lm-max-order', type=int, default=3,
+        help='The maximum n-gram order to train the LM with when the --lm '
+        'flag is set'
     )
 
 
@@ -911,6 +1214,73 @@ def build_init_char_parser(subparsers):
         'wsj_roots', nargs='+', type=os.path.abspath,
         help='Location of WSJ data directories, corresponding to WSJ0 '
         '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
+    )
+    parser.add_argument(
+        '--sub-dir', default=None,
+        help='Name of sub directory in data/local/ under which to store '
+        'setup specific to this vocabulary size. Defaults to '
+        '``char<eval_vocab_size>k``'
+    )
+    parser.add_argument(
+        '--eval-vocab-size', default=64, type=int, choices=[5, 64],
+        help='The size of the eval set (dev and test) vocabulary, in '
+        'thousands of words. Choose between the 5k closed condition or the '
+        '64k closed condition'
+    )
+    parser.add_argument(
+        '--lm', action='store_true', default=False,
+        help='If set, will train a language model with Modified Kneser-Ney '
+        'smoothing on the WSJ lm training data. Character-level.'
+    )
+    parser.add_argument(
+        '--lm-max-order', type=int, default=5,
+        help='The maximum n-gram order to train the LM with when the --lm '
+        'flag is set. Character-level.'
+    )
+
+
+def build_init_subword_parser(subparsers):
+    parser = subparsers.add_parser(
+        'init_subword',
+        help='Perform setup common to all subword-based parsing. '
+        'Needs to be done once for a specific vocabulary size and subword '
+        'algorithm pairing. Preceded by "preamble" command.'
+    )
+    parser.add_argument(
+        'wsj_roots', nargs='+', type=os.path.abspath,
+        help='Location of WSJ data directories, corresponding to WSJ0 '
+        '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
+    )
+    parser.add_argument(
+        '--sub-dir', default=None,
+        help='Name of sub directory in data/local/ under which to store '
+        'setup specific to this algorithm and vocabulary size. Defaults to '
+        '``<algorithm><subword_vocab_size>_<eval_vocab_size>k``'
+    )
+    parser.add_argument(
+        '--subword-vocab-size', type=int, default=108,
+        help='Total subword vocabulary size. Defaults to 108 (from '
+        'https://arxiv.org/pdf/1811.04284.pdf)'
+    )
+    parser.add_argument(
+        '--algorithm', choices=['bpe', 'unigram'], default='bpe',
+        help='What algorithm to use to determine subwords'
+    )
+    parser.add_argument(
+        '--eval-vocab-size', default=64, type=int, choices=[5, 64],
+        help='The size of the eval set (dev and test) vocabulary, in '
+        'thousands of words. Choose between the 5k closed condition or the '
+        '64k closed condition'
+    )
+    parser.add_argument(
+        '--lm', action='store_true', default=False,
+        help='If set, will train a language model with Modified Kneser-Ney '
+        'smoothing on the WSJ lm training data. Subword-level.'
+    )
+    parser.add_argument(
+        '--lm-max-order', type=int, default=4,
+        help='The maximum n-gram order to train the LM with when the --lm '
+        'flag is set. Subword-level.'
     )
 
 
@@ -926,6 +1296,7 @@ def build_parser():
     build_preamble_parser(subparsers)
     build_init_word_parser(subparsers)
     build_init_char_parser(subparsers)
+    build_init_subword_parser(subparsers)
     return parser
 
 
@@ -946,7 +1317,17 @@ def init_word(options):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    wsj_word_lm(wsj_subdirs, options.data_root)
+    if options.sub_dir is None:
+        subdir = os.path.join(
+            options.data_root, 'local', 'word{}k'.format(options.vocab_size))
+    else:
+        subdir = os.path.join(options.data_root, 'local', options.sub_dir)
+
+    wsj_init_word_subdir(
+        wsj_subdirs, options.data_root, subdir, options.vocab_size)
+
+    if options.lm:
+        wsj_word_lm(wsj_subdirs, subdir, options.lm_max_order)
 
 
 def init_char(options):
@@ -956,8 +1337,43 @@ def init_char(options):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    wsj_word_trn_to_char_trn(options.data_root)
-    wsj_char_lm(wsj_subdirs, options.data_root)
+    if options.sub_dir is None:
+        subdir = os.path.join(
+            options.data_root, 'local',
+            'char{}k'.format(options.eval_vocab_size))
+    else:
+        subdir = os.path.join(options.data_root, 'local', options.sub_dir)
+
+    wsj_init_char_subdir(
+        wsj_subdirs, options.data_root, subdir, options.eval_vocab_size)
+
+    if options.lm:
+        wsj_char_lm(wsj_subdirs, subdir, options.lm_max_order)
+
+
+def init_subword(options):
+
+    wsj_subdirs = []
+    for wsj_root in options.wsj_roots:
+        wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
+        wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
+
+    if options.sub_dir is None:
+        subdir = os.path.join(
+            options.data_root, 'local',
+            '{}{}_{}k'.format(
+                options.algorithm,
+                options.subword_vocab_size,
+                options.eval_vocab_size))
+    else:
+        subdir = os.path.join(options.data_root, 'local', options.sub_dir)
+
+    wsj_init_subword_subdir(
+        wsj_subdirs, options.data_root, subdir, options.subword_vocab_size,
+        options.eval_vocab_size, options.algorithm)
+
+    if options.lm:
+        wsj_subword_lm(wsj_subdirs, subdir, options.lm_max_order)
 
 
 def main(args=None):
@@ -972,6 +1388,8 @@ def main(args=None):
         init_word(options)
     elif options.command == 'init_char':
         init_char(options)
+    elif options.command == 'init_subword':
+        init_subword(options)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,15 @@
 # Copyright 2020 Sean Robertson
 #
+# Adapted from kaldi/egs/wsj/s5/local/wsj_prepare_dict.sh:
+#
+# Copyright 2010-2012 Microsoft Corporation
+#           2012-2014 Johns Hopkins University (Author: Daniel Povey)
+#                2015 Guoguo Chen
+#
+# and kaldi/egs/wsj/s5/local/wsj_prepare_char_dict.sh
+#
+# Copyright 2017  Hossein Hadian
+#
 # at the time of writing, kaldi/egs/wsj/s5/local/wsj_extend_dict.sh, as well
 # as the files from kaldi/egs/wsj/s5/local/dict, don't have copyright info.
 # I think they're probably written by Daniel Povey.

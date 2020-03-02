@@ -44,10 +44,15 @@ import warnings
 import locale
 import gzip
 import itertools
+import torch
 
 from collections import OrderedDict
+from shutil import copy as copy_paths
 
 import ngram_lm
+import pydrobert.speech.command_line as speech_cmd
+import pydrobert.torch.command_line as torch_cmd
+
 from unlzw import unlzw
 from common import glob, mkdir, sort, cat, pipe_to, wc_l
 
@@ -204,33 +209,58 @@ def find_transcripts_one(in_stream, lsn_path):
             del utt2trans[uttid]
 
 
-def normalize_transcript(in_stream, noiseword, lexical_equivs):
+def normalize_transcript(in_stream, nsn, spn, lexical_equivs):
     '''Sanitize in_stream transcripts'''
+    # in addition to some typo fixes, we do a few things different from
+    # Kaldi. We distinguish between vocalized/speech noise and non-vocalized
+    # noise, for one. We also handle word fragments by removing the missing
+    # part of the fragment (it is not vocalized)
     line_pattern = re.compile(r'^(\S+) (.+)$')
     del_pattern = re.compile(r'^([.~]|\[[</]\w+\]|\[\w+[>/]\])$')
     noise_pattern = re.compile(r'^\[\w+\]$')
     verbdel_pattern = re.compile(r"^<([\w']+)>$")
+    missing_fragment_pattern = re.compile(r'^(.*)\([^)]+\)(.*)$')
+    spoken_noise_tokens = {
+        '[AH]', '[UH]', '[UM]', '[EH]', '[CROSS_TALK]', '[UNINTELLIGIBLE]',
+        '<AH>',
+    }
+    skippable = {'.', '~'}
     for line in in_stream:
         match = line_pattern.match(line)
         if match is None:
             raise ValueError("Bad line {}".format(line))
         out, trans = match.groups()
+        if trans == '~~':
+            # are 'null waveforms', and should be ignored
+            continue
         for w in trans.split(' '):
-            # typo fixes from wav2letter
+            # typo fixes from wav2letter. The "(IN-PARENTHESIS" example isn't
+            # a typo... the guy is saying "IN PARENTHESIS"
             w = (
-                w.upper().replace('\\', '').replace("Corp;", "Corp")
-                .replace('`', "'")
-                .replace("(IN-PARENTHESIS", "(IN-PARENTHESES"))
+                w.upper().replace('\\', '').replace("CORP;", "CORP.")
+                .replace('`', "'"))
+            # a few of my own. We also remove emphasis ('*') here because there
+            # isn't a lexical equivalence for it, but it interferes with some
+            # of the other rules here
+            w = (
+                w.replace('*', '').replace(")CLOSE_PAREN", ")CLOSE-PAREN")
+                .replace(".PERCENT", "%PERCENT").replace('<MR.>', 'MI-'))
             if w in lexical_equivs:
                 w = lexical_equivs[w]
-            elif del_pattern.match(w):
+            elif del_pattern.match(w) or w in skippable:
                 continue
+            elif w in spoken_noise_tokens:
+                w = spn
             elif noise_pattern.match(w):
-                w = noiseword
+                w = nsn
             else:
                 match = verbdel_pattern.match(w)
                 if match:
+                    # verbal deletions are often actually said, then repeated
                     w = match.group(1)
+                match = missing_fragment_pattern.match(w)
+                if match:
+                    w = ''.join(match.groups())
             w = w.replace(':', '').replace("!", '')
             out += " " + w
         yield out
@@ -257,6 +287,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
     # - uses lexical equivalence map in WSJ1 to convert verbal punctuations
     #   (and a few others) in training data to something within the vocabulary.
     #   Kaldi just calls these UNKs.
+    # - handle
     # See wiki for more info on the corpus and tasks in general
 
     for rel_path in {'11-13.1', '13-34.1', '11-2.1'}:
@@ -298,6 +329,21 @@ def wsj_data_prep(wsj_subdirs, data_root):
     # buit I'm not sure how widely distributed this is, so I just make the
     # change here
     lexical_equivs["BUYOUT"] = "BUY OUT"
+    # Here are some additional lexical equivalents that I found looking at
+    # the training transcripts. Since we don't include VPs in our vocabulary,
+    # it won't hurt to include these here
+    lexical_equivs.update({
+        "(PARENTHESES": "PARENTHESES", ")UN-PARENTHESES": "UN PARENTHESES",
+        "(PAREN": "PAREN", ")PAREN": "PAREN",
+        ")END-THE-PAREN": "END THE PAREN", ")CLOSE-PAREN": "CLOSE PAREN",
+        "(BRACE": "BRACE", ")CLOSE-BRACE": "CLOSE BRACE",
+        "(BEGIN-PARENS": "BEGIN PARENS", ")END-PARENS": "END PARENS",
+        "(IN-PARENTHESES": "IN PARENTHESES",
+        '(PARENTHETICALLY': "PARENTHETICALLY",
+        ")END-OF-PAREN": "END OF PAREN", '"END-OF-QUOTE': "END OF QUOTE",
+        '"IN-QUOTES': "IN QUOTES", "(IN-PARENTHESIS": "IN PARENTHESIS",
+        '...ELLIPSIS': "ELLIPSIS", ".DOT": "DOT",
+    })
     with open(lexical_equivs_csv, 'w') as file_:
         for key, value in sorted(lexical_equivs.items()):
             file_.write('{},{}\n'.format(key, value))
@@ -314,6 +360,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
             file_.write('{},{}\n'.format(key, value))
 
     # 11.2.1/si_tr_s/401 doesn't exist, which is why we filter it out
+    missing_pattern = re.compile(r'11-2.1/wsj0/si_tr_s/401', flags=re.I)
     pipe_to(
         (
             x for x in sort(ndx2flist(
@@ -322,7 +369,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
                 )),
                 wsj_subdirs,
             ))
-            if re.search(r'11-2.1/wsj0/si_tr_s/401', x, flags=re.I) is None
+            if missing_pattern.search(x) is None
         ),
         train_si84_flist,
     )
@@ -331,6 +378,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
         warnings.warn(
             'expected 7138 lines in train_si84.flist, got {}'.format(nl))
 
+    # we also filter 47hc0418.wv1 and 46uc030b.wv1 because they're empty
     pipe_to(
         (
             x for x in sort(ndx2flist(
@@ -346,14 +394,17 @@ def wsj_data_prep(wsj_subdirs, data_root):
                 ),
                 wsj_subdirs,
             ))
-            if re.search(r'11-2.1/wsj0/si_tr_s/401', x, flags=re.I) is None
+            if (
+                missing_pattern.search(x) is None
+                and not x.endswith('47hc0418.wv1')
+                and not x.endswith('46uc030b.wv1'))
         ),
         train_si284_flist,
     )
     nl = wc_l(cat(train_si284_flist))
-    if nl != 37416:
+    if nl != 37414:  # two less than kaldi b/c of empty audio
         warnings.warn(
-            'expected 37416 lines in train_si284.flist, got {}'.format(nl))
+            'expected 37414 lines in train_si284.flist, got {}'.format(nl))
 
     pipe_to(
         (
@@ -478,68 +529,93 @@ def wsj_data_prep(wsj_subdirs, data_root):
         lsn_files_flist,
     )
 
-    noiseword = "<NOISE>"
+    spn, nsn = "<SPOKEN_NOISE>", "<NOISE>"
     for x in {
             'train_si84', 'train_si284', 'test_eval92',
             'test_eval93', 'test_dev93', 'test_eval92_5k',
             'test_eval93_5k', 'test_dev93_5k'}:
         src = os.path.join(dir_, x + '.flist')
         sph = os.path.join(dir_, x + '_sph.scp')
-        trans1 = os.path.join(dir_, x + '.trans1')
-        txt = os.path.join(dir_, x + '.txt')
-        trn = os.path.join(dir_, x + '.trn')
+        raw = os.path.join(dir_, x + '.raw.txt')
+        fragments = os.path.join(dir_, x + '.fragments.txt')
+        cleaned = os.path.join(dir_, x + '.cleaned.txt')
         utt2spk = os.path.join(dir_, x + '.utt2spk')
         spk2utt = os.path.join(dir_, x + '.spk2utt')
 
         pipe_to(sort(flist2scp(src)), sph)
 
         if x in {'test_eval93', 'test_eval93_5k'}:
+            pipe_to(
+                find_transcripts_many(
+                    (x.split()[0] for x in cat(sph)),
+                    dot_files_flist
+                ),
+                raw
+            )
+            pipe_to(
+                sort(normalize_transcript(
+                    cat(raw), nsn, spn, vp_lexical_equivs)),
+                fragments
+            )
+            # use standard reference transcriptions for clean version
             lns_path = find_link_dir(
                 wsj_subdirs, '13-32.1/score/lib/wsj/nov93wsj.ref')
             pipe_to(
-                find_transcripts_one(
+                sort(find_transcripts_one(
                     (x.split()[0] for x in cat(sph)),
                     lns_path
-                ),
-                trans1
+                )),
+                cleaned
             )
-            pipe_to(sort(cat(trans1)), txt)
         elif x in {'test_eval92', 'test_eval92_5k'}:
             pipe_to(
                 find_transcripts_many(
                     (x.split()[0] for x in cat(sph)),
+                    dot_files_flist
+                ),
+                raw
+            )
+            pipe_to(
+                sort(normalize_transcript(
+                    cat(raw), nsn, spn, vp_lexical_equivs)),
+                fragments
+            )
+            pipe_to(
+                sort(find_transcripts_many(
+                    (x.split()[0] for x in cat(sph)),
                     lsn_files_flist,
                     flipped=True
-                ),
-                trans1
+                )),
+                cleaned
             )
-            pipe_to(sort(cat(trans1)), txt)
         else:
             pipe_to(
                 find_transcripts_many(
                     (x.split()[0] for x in cat(sph)),
                     dot_files_flist
                 ),
-                trans1
+                raw
             )
             pipe_to(
                 sort(normalize_transcript(
-                    cat(trans1), noiseword, vp_lexical_equivs)),
-                txt
+                    cat(raw), nsn, spn, vp_lexical_equivs)),
+                fragments
             )
-
-        # write to trn
-        pipe_to(
-            ('{1} ({0})'.format(*x.split(maxsplit=1)) for x in cat(txt)),
-            trn
-        )
+            pipe_to(
+                (
+                    ' '.join(
+                        spn if (w[0] == '-' or w[-1] == '-') else w
+                        for w in line.split())
+                    for line in cat(fragments)),
+                cleaned
+            )
 
         # XXX(sdrobert): don't care about _wav.scp
 
         pipe_to(
             (
                 '{} {}'.format(y, y[:3])
-                for y in (x.split()[0] for x in cat(trans1))),
+                for y in (x.split()[0] for x in cat(raw))),
             utt2spk
         )
 
@@ -571,32 +647,37 @@ def wsj_data_prep(wsj_subdirs, data_root):
     )
 
 
-def wsj_init_word_subdir(wsj_subdirs, data_root, subdir, vocab_size):
+def wsj_init_word_config(wsj_subdirs, data_root, config_dir, vocab_size):
     local_data_dir = os.path.join(data_root, 'local', 'data')
-    token2id_txt = os.path.join(subdir, 'token2id.txt')
-    id2token_txt = os.path.join(subdir, 'id2token.txt')
+    token2id_txt = os.path.join(config_dir, 'token2id.txt')
+    id2token_txt = os.path.join(config_dir, 'id2token.txt')
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
     vocab_dir = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
 
-    mkdir(subdir)
+    mkdir(config_dir)
 
     # determine the vocabulary based on whether we're in the 5k closed,
     # 20k open, or 64k closed condition. Note Kaldi uses the 5k open
     # vocabulary. Standard WSJ eval assumes a closed vocab @ 5k. We use
     # non-verbalized punctuation vocabulary versions since testing is all
     # non-verbalized. We are safe to remove verbalized punctuation from the
-    # training data since there is no corresponding audio to worry about
+    # training data since there is no corresponding audio to worry about.
 
+    # note that even though the 64k and 5k vocabularies are closed w.r.t the
+    # test set, there are words outside of both in the training set. That's
+    # why we always have to include the <UNK> character
+
+    vocab = ['</s>', '<SPOKEN_NOISE>', '<NOISE>', '<UNK>', '<s>']
     if vocab_size == 5:
         # though the test set vocabulary is closed, the training set will still
         # contain OOV words. We add the <UNK>
-        vocab = ['</s>', '<NOISE>', '<UNK>', '<s>'] + sorted(
+        vocab += sorted(
             x for x in cat(os.path.join(vocab_dir, 'wlist5c.nvp'))
             if x[0] != '#'
         )
     elif vocab_size == 20:
-        vocab = ['</s>', '<NOISE>', '<UNK>', '<s>'] + sorted(
+        vocab += sorted(
             x for x in cat(os.path.join(vocab_dir, 'wlist20o.nvp'))
             if x[0] != '#'
         )
@@ -604,7 +685,7 @@ def wsj_init_word_subdir(wsj_subdirs, data_root, subdir, vocab_size):
         # we're allowed to use the full 64k vocabulary list to generate the
         # vocabulary, but not for language modelling:
         # 13-32.1\wsj1\doc\lng_modl\vocab\readme.txt
-        vocab = ['</s>', '<NOISE>', '<s>'] + sorted(
+        vocab += sorted(
             x.split()[1] for x in cat(os.path.join(vocab_dir, 'wfl_64.lst'))
             if x[0] != '#' and x.split()[1][0] in ALPHA
         )
@@ -615,21 +696,45 @@ def wsj_init_word_subdir(wsj_subdirs, data_root, subdir, vocab_size):
             id2t.write('{} {}\n'.format(i, v))
 
     # get the appropriate files for the vocabulary
-    for x in {
-            'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
-            'train_si84.trn', 'train_si84_sph.scp',
-            'train_si84.utt2spk', 'train_si84.spk2utt',
-            'train_si284.trn', 'train_si284_sph.scp',
-            'train_si284.utt2spk', 'train_si284.spk2utt'}:
-        pipe_to(cat(os.path.join(local_data_dir, x)), os.path.join(subdir, x))
-
-    for dest in {'test_dev93', 'test_eval92', 'test_eval93'}:
-        src = dest + '_5k' if vocab_size == 5 else dest
-        for suff in {'.trn', '_sph.scp', '.utt2spk', '.spk2utt'}:
+    to_copy = {
+        'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
+        'train_si84.trn', 'train_si84_sph.scp',
+        'train_si84.utt2spk', 'train_si84.spk2utt',
+        'train_si284.trn', 'train_si284_sph.scp',
+        'train_si284.utt2spk', 'train_si284.spk2utt',
+        'test_dev93_5k.trn', 'test_dev93_5k_sph.scp', 'test_dev93_5k.utt2spk',
+        'test_eval92_5k.trn', 'test_eval92_5k_sph.scp',
+        'test_eval92_5k.utt2spk', 'test_eval93_5k.trn',
+        'test_eval93_5k_sph.scp', 'test_eval93_5k.utt2spk',
+    }
+    for x in to_copy:
+        if vocab_size != 5:
+            x = x.replace('_5k', '')
+        if x.endswith('.trn'):
             pipe_to(
-                cat(os.path.join(local_data_dir, src + suff)),
-                os.path.join(subdir, dest + suff)
+                (
+                    '{1} ({0})'.format(*y.split(maxsplit=1))
+                    for y in cat(
+                        os.path.join(local_data_dir, x[:-4] + '.cleaned.txt'))
+                ),
+                os.path.join(config_dir, x.replace('_5k', ''))
             )
+        else:
+            copy_paths(
+                os.path.join(local_data_dir, x),
+                os.path.join(config_dir, x.replace('_5k', ''))
+            )
+
+    # determine the OOVs in the training partition. Primarily for diagnostic
+    # purposes
+    vocab = set(vocab)
+    oovs = set()
+    with open(os.path.join(config_dir, 'train_si284.trn')) as file_:
+        for line in file_:
+            trans = line.strip().split()
+            trans.pop()
+            oovs.update(set(trans) - vocab)
+    pipe_to(sorted(oovs), os.path.join(config_dir, 'train_oovs.txt'))
 
 
 def write_cmu_vocab_to_path(path):
@@ -685,20 +790,20 @@ def wsj_train_lm(
         ngram_lm.write_arpa(prob_list, file_)
 
 
-def wsj_word_lm(wsj_subdirs, subdir, max_order):
+def wsj_word_lm(wsj_subdirs, config_dir, max_order):
     # We're doing things differently from Kaldi.
     # The NIST language model probabilities are really messed up. We train
     # up our own using Modified Kneser-Ney, but the same vocabulary that they
     # use.
 
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
-    lmdir = os.path.join(subdir, 'lm')
+    lmdir = os.path.join(config_dir, 'lm')
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
     train_data_root = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
     wordlist_txt = os.path.join(lmdir, 'wordlist.txt')
-    vp_lexical_equivs_csv = os.path.join(subdir, 'vp_lexical_equivs.csv')
-    token2id_txt = os.path.join(subdir, 'token2id.txt')
+    vp_lexical_equivs_csv = os.path.join(config_dir, 'vp_lexical_equivs.csv')
+    token2id_txt = os.path.join(config_dir, 'token2id.txt')
     toprune_txt_gz = os.path.join(lmdir, 'toprune.txt.gz')
     lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
 
@@ -715,9 +820,9 @@ def wsj_word_lm(wsj_subdirs, subdir, max_order):
     # non-verbalized punctuation sentences afterwards.
     assert os.path.isdir(train_data_root)
     train_data_files = []
-    for subdir_ in ('87', '88', '89'):
+    for subdir in ('87', '88', '89'):
         train_data_files.extend(
-            glob(os.path.join(train_data_root, subdir_), r'*.z'))
+            glob(os.path.join(train_data_root, subdir), r'*.z'))
     with gzip.open(cleaned_txt_gz, 'wt') as out:
         for train_data_file in train_data_files:
             with open(train_data_file, 'rb') as in_:
@@ -768,16 +873,16 @@ def wsj_word_lm(wsj_subdirs, subdir, max_order):
     wsj_train_lm(vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz)
 
 
-def wsj_init_char_subdir(wsj_subdirs, data_root, subdir, eval_vocab_size):
+def wsj_init_char_config(wsj_subdirs, data_root, config_dir, eval_vocab_size):
     local_data_dir = os.path.join(data_root, 'local', 'data')
-    token2id_txt = os.path.join(subdir, 'token2id.txt')
-    id2token_txt = os.path.join(subdir, 'id2token.txt')
-    words_txt = os.path.join(subdir, 'words.txt')
+    token2id_txt = os.path.join(config_dir, 'token2id.txt')
+    id2token_txt = os.path.join(config_dir, 'id2token.txt')
+    words_txt = os.path.join(config_dir, 'words.txt')
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
     vocab_dir = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
 
-    mkdir(subdir)
+    mkdir(config_dir)
 
     # we save the (closed) list of words from the eval set in case anyone
     # cares to spellcheck. The primary purpose is to determine what characters
@@ -798,48 +903,51 @@ def wsj_init_char_subdir(wsj_subdirs, data_root, subdir, eval_vocab_size):
     pipe_to(sorted(words), words_txt)
 
     # note the character vocabulary is always closed if we take all the
-    # characters from a closed word-level vocabulary
-    vocab = ['</s>', '<NOISE>', '<s>'] + sorted(set('_'.join(words)))
+    # characters from a closed word-level vocabulary.
+    vocab = ['</s>', '<SPOKEN_NOISE>', '<NOISE>', '<s>']
+    vocab += sorted(set('_'.join(words)))
     with open(token2id_txt, 'w') as t2id, open(id2token_txt, 'w') as id2t:
         for i, v in enumerate(vocab):
             t2id.write('{} {}\n'.format(v, i))
             id2t.write('{} {}\n'.format(i, v))
 
-    for x in {
-            'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
-            'train_si84.trn', 'train_si84_sph.scp',
-            'train_si84.utt2spk', 'train_si84.spk2utt',
-            'train_si284.trn', 'train_si284_sph.scp',
-            'train_si284.utt2spk', 'train_si284.spk2utt'}:
-        src = os.path.join(local_data_dir, x)
-        dest = os.path.join(subdir, x)
+    to_copy = {
+        'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
+        'train_si84.trn', 'train_si84_sph.scp',
+        'train_si84.utt2spk', 'train_si84.spk2utt',
+        'train_si284.trn', 'train_si284_sph.scp',
+        'train_si284.utt2spk', 'train_si284.spk2utt',
+        'test_dev93_5k.trn', 'test_dev93_5k_sph.scp', 'test_dev93_5k.utt2spk',
+        'test_eval92_5k.trn', 'test_eval92_5k_sph.scp',
+        'test_eval92_5k.utt2spk', 'test_eval93_5k.trn',
+        'test_eval93_5k_sph.scp', 'test_eval93_5k.utt2spk',
+    }
+    for x in to_copy:
+        if eval_vocab_size != 5:
+            x = x.replace('_5k', '')
         if x.endswith('.trn'):
-            word_trn_to_char_trn(src, dest)
+            y = x[:-4]
+            y += '.cleaned.txt' if x.startswith('test_') else '.fragments.txt'
+            word_txt_to_char_trn(
+                os.path.join(local_data_dir, y),
+                os.path.join(config_dir, x.replace('_5k', ''))
+            )
         else:
-            pipe_to(cat(src), dest)
-
-    for dest in {'test_dev93', 'test_eval92', 'test_eval93'}:
-        src = dest + '_5k' if eval_vocab_size == 5 else dest
-        word_trn_to_char_trn(
-            os.path.join(local_data_dir, src + '.trn'),
-            os.path.join(subdir, dest + '.trn')
-        )
-        for suff in {'_sph.scp', '.utt2spk', '.spk2utt'}:
-            pipe_to(
-                cat(os.path.join(local_data_dir, src + suff)),
-                os.path.join(subdir, dest + suff)
+            copy_paths(
+                os.path.join(local_data_dir, x),
+                os.path.join(config_dir, x.replace('_5k', ''))
             )
 
 
-def wsj_char_lm(wsj_subdirs, subdir, max_order):
+def wsj_char_lm(wsj_subdirs, config_dir, max_order):
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
-    lmdir = os.path.join(subdir, 'lm')
+    lmdir = os.path.join(config_dir, 'lm')
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
     train_data_root = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
     wordlist_txt = os.path.join(lmdir, 'wordlist.txt')
-    vp_lexical_equivs_csv = os.path.join(subdir, 'vp_lexical_equivs.csv')
-    token2id_txt = os.path.join(subdir, 'token2id.txt')
+    vp_lexical_equivs_csv = os.path.join(config_dir, 'vp_lexical_equivs.csv')
+    token2id_txt = os.path.join(config_dir, 'token2id.txt')
     toprune_txt_gz = os.path.join(lmdir, 'toprune.txt.gz')
     lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
 
@@ -855,9 +963,9 @@ def wsj_char_lm(wsj_subdirs, subdir, max_order):
     # but replace spaces with underscores
     assert os.path.isdir(train_data_root)
     train_data_files = []
-    for subdir_ in ('87', '88', '89'):
+    for subdir in ('87', '88', '89'):
         train_data_files.extend(
-            glob(os.path.join(train_data_root, subdir_), r'*.z'))
+            glob(os.path.join(train_data_root, subdir), r'*.z'))
     with gzip.open(cleaned_txt_gz, 'wt') as out:
         for train_data_file in train_data_files:
             with open(train_data_file, 'rb') as in_:
@@ -918,31 +1026,34 @@ def wsj_char_lm(wsj_subdirs, subdir, max_order):
     )
 
 
-def word_trn_to_char_trn(trn_word, trn_char):
+def word_txt_to_char_trn(txt, trn):
     char_token_pattern = re.compile(r'[^<]|<[^>]+>')
-    with open(trn_word) as in_, open(trn_char, 'w') as out:
+    with open(txt) as in_, open(trn, 'w') as out:
         for line in in_:
-            trans, utt = line.strip().rsplit(maxsplit=1)
-            trans = trans.replace(' ', '_')
+            utt, trans = line.strip().split(maxsplit=1)
+            # replace spaces with underscores to model spaces. Also, remove
+            # '-' which indicates a word fragment. A subword speech
+            # recognizer should be able to spell out the fragment
+            trans = trans.replace(' ', '_').replace('-', '')
             trans = ' '.join(char_token_pattern.findall(trans))
             out.write(trans)
-            out.write(' ')
+            out.write(' (')
             out.write(utt)
-            out.write('\n')
+            out.write(')\n')
 
 
-def wsj_init_subword_subdir(
-        wsj_subdirs, data_root, subdir, subword_vocab_size, eval_vocab_size,
-        algorithm):
+def wsj_init_subword_config(
+        wsj_subdirs, data_root, config_dir, subword_vocab_size,
+        eval_vocab_size, algorithm):
     local_data_dir = os.path.join(data_root, 'local', 'data')
-    token2id_txt = os.path.join(subdir, 'token2id.txt')
-    id2token_txt = os.path.join(subdir, 'id2token.txt')
-    words_txt = os.path.join(subdir, 'words.txt')
-    chars_txt = os.path.join(subdir, 'chars.txt')
+    token2id_txt = os.path.join(config_dir, 'token2id.txt')
+    id2token_txt = os.path.join(config_dir, 'id2token.txt')
+    words_txt = os.path.join(config_dir, 'words.txt')
+    chars_txt = os.path.join(config_dir, 'chars.txt')
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
     vocab_dir = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'vocab')
-    subword_dir = os.path.join(subdir, 'subword')
+    subword_dir = os.path.join(config_dir, 'subword')
     train_data_root = os.path.join(
         dir_13_32_1, 'wsj1', 'doc', 'lng_modl', 'lm_train', 'np_data')
     wordlist_txt = os.path.join(subword_dir, 'wordlist.txt')
@@ -953,7 +1064,7 @@ def wsj_init_subword_subdir(
 
     import sentencepiece as spm
 
-    mkdir(subdir, subword_dir)
+    mkdir(subword_dir)
 
     # we save the (closed) list of words from the eval set in case anyone
     # cares to spellcheck. The primary purpose is to determine what characters
@@ -990,9 +1101,9 @@ def wsj_init_subword_subdir(
     # and subword selection. Will this be a problem?
     assert os.path.isdir(train_data_root)
     train_data_files = []
-    for subdir_ in ('87', '88', '89'):
+    for subdir in ('87', '88', '89'):
         train_data_files.extend(
-            glob(os.path.join(train_data_root, subdir_), r'*.z'))
+            glob(os.path.join(train_data_root, subdir), r'*.z'))
     with open(cleaned_txt, 'w') as out:
         for train_data_file in train_data_files:
             with open(train_data_file, 'rb') as in_:
@@ -1052,7 +1163,7 @@ def wsj_init_subword_subdir(
             'train_si284.trn', 'train_si284_sph.scp',
             'train_si284.utt2spk', 'train_si284.spk2utt'}:
         src = os.path.join(local_data_dir, x)
-        dest = os.path.join(subdir, x)
+        dest = os.path.join(config_dir, x)
         if x.endswith('.trn'):
             word_trn_to_subword_trn(src, dest, sp, id2token)
         else:
@@ -1062,22 +1173,22 @@ def wsj_init_subword_subdir(
         src = dest + '_5k' if eval_vocab_size == 5 else dest
         word_trn_to_subword_trn(
             os.path.join(local_data_dir, src + '.trn'),
-            os.path.join(subdir, dest + '.trn'),
+            os.path.join(config_dir, dest + '.trn'),
             sp, id2token
         )
         for suff in {'_sph.scp', '.utt2spk', '.spk2utt'}:
             pipe_to(
                 cat(os.path.join(local_data_dir, src + suff)),
-                os.path.join(subdir, dest + suff)
+                os.path.join(config_dir, dest + suff)
             )
 
 
-def wsj_subword_lm(wsj_subdirs, subdir, max_order):
-    lmdir = os.path.join(subdir, 'lm')
-    subword_dir = os.path.join(subdir, 'subword')
+def wsj_subword_lm(wsj_subdirs, config_dir, max_order):
+    lmdir = os.path.join(config_dir, 'lm')
+    subword_dir = os.path.join(config_dir, 'subword')
     cleaned_txt = os.path.join(subword_dir, 'cleaned.txt')
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
-    id2token_txt = os.path.join(subdir, 'id2token.txt')
+    id2token_txt = os.path.join(config_dir, 'id2token.txt')
     toprune_txt_gz = os.path.join(lmdir, 'toprune.txt.gz')
     lm_arpa_gz = os.path.join(lmdir, 'lm.arpa.gz')
     spm_model = os.path.join(subword_dir, 'spm.model')
@@ -1180,7 +1291,7 @@ def build_init_word_parser(subparsers):
         '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
     )
     parser.add_argument(
-        '--sub-dir', default=None,
+        '--config-subdir', default=None,
         help='Name of sub directory in data/local/ under which to store '
         'setup specific to this vocabulary size. Defaults to '
         '``word<vocab_size>k``'
@@ -1216,7 +1327,7 @@ def build_init_char_parser(subparsers):
         '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
     )
     parser.add_argument(
-        '--sub-dir', default=None,
+        '--config-subdir', default=None,
         help='Name of sub directory in data/local/ under which to store '
         'setup specific to this vocabulary size. Defaults to '
         '``char<eval_vocab_size>k``'
@@ -1252,7 +1363,7 @@ def build_init_subword_parser(subparsers):
         '(LDC93S6A or LDC93S6B) and WSJ1 (LDC94S13A or LDC94S13B)'
     )
     parser.add_argument(
-        '--sub-dir', default=None,
+        '--config-subdir', default=None,
         help='Name of sub directory in data/local/ under which to store '
         'setup specific to this algorithm and vocabulary size. Defaults to '
         '``<algorithm><subword_vocab_size>_<eval_vocab_size>k``'
@@ -1284,6 +1395,79 @@ def build_init_subword_parser(subparsers):
     )
 
 
+def build_torch_dir_parser(subparsers):
+    parser = subparsers.add_parser(
+        'torch_dir',
+        help='Write training, test, and extra data to subdirectories. Some '
+        '"init_*" command must have been called. If more than one "init_*" '
+        'call has been made, the next positional argument must be specified.'
+    )
+    parser.add_argument(
+        'config_subdir', nargs='?', default=None,
+        help='The configuration in data/local/ which to build the directories '
+        'from. If "init_*" was called only once, it can be inferred from the '
+        'contents fo data/local'
+    )
+    parser.add_argument(
+        'data_subdir', nargs='?', default='.',
+        help='What subdirectory in data/ to store training, test, and extra '
+        'data subdirectories to. Defaults to directly in data/'
+    )
+    parser.add_argument(
+        '--preprocess',  default='[]',
+        help='JSON list of configurations for '
+        '``pydrobert.speech.pre.PreProcessor`` objects. Audio will be '
+        'preprocessed in the same order as the list'
+    )
+    parser.add_argument(
+        '--postprocess', default='[]',
+        help='JSON List of configurations for '
+        '``pydrobert.speech.post.PostProcessor`` objects. Features will be '
+        'postprocessed in the same order as the list'
+    )
+    parser.add_argument(
+        '--seed', type=int, default=None,
+        help='A random seed used for determinism. This affects operations '
+        'like dithering. If unset, a seed will be generated at the moment'
+    )
+    parser.add_argument(
+        '--si84', action='store_true', default=False,
+        help='If set, will only train on the SI-84 (WSJ0) data rather than '
+        'on both WSJ0 and WSJ1'
+    )
+
+    test_group = parser.add_mutually_exclusive_group()
+    test_group.add_argument(
+        '--eval93', action='store_true', default=False,
+        help="If this flag is set, write the '93 eval set instead of the "
+        "'92 eval set."
+    )
+    test_group.add_argument(
+        '--both-evals', action='store_true', default=False,
+        help="If this flag is set, write *both* the '92 and '93 eval sets"
+    )
+
+    fbank_41_config = os.path.join(
+        os.path.dirname(__file__), 'conf', 'feats', 'fbank_41.json')
+    feat_group = parser.add_mutually_exclusive_group()
+    feat_group.add_argument(
+        '--computer-json', default=fbank_41_config,
+        help='Path to JSON configuration of a feature computer for '
+        'pydrobert-speech. Defaults to a 40-dimensional Mel-scaled triangular '
+        'overlapping filter bank + 1 energy coefficient every 10ms.'
+    )
+    feat_group.add_argument(
+        '--raw', action='store_true', default=False,
+        help='If specified, tensors of raw audio of shape (S, 1) will be '
+        'written instead of filter bank coefficients.'
+    )
+    feat_group.add_argument(
+        '--feats-from', default=None,
+        help='If specified, rather than computing features, will copy the '
+        'feature folders from this subdirectory of data/'
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
@@ -1297,6 +1481,7 @@ def build_parser():
     build_init_word_parser(subparsers)
     build_init_char_parser(subparsers)
     build_init_subword_parser(subparsers)
+    build_torch_dir_parser(subparsers)
     return parser
 
 
@@ -1317,17 +1502,18 @@ def init_word(options):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    if options.sub_dir is None:
-        subdir = os.path.join(
+    if options.config_subdir is None:
+        config_dir = os.path.join(
             options.data_root, 'local', 'word{}k'.format(options.vocab_size))
     else:
-        subdir = os.path.join(options.data_root, 'local', options.sub_dir)
+        config_dir = os.path.join(
+            options.data_root, 'local', options.config_subdir)
 
-    wsj_init_word_subdir(
-        wsj_subdirs, options.data_root, subdir, options.vocab_size)
+    wsj_init_word_config(
+        wsj_subdirs, options.data_root, config_dir, options.vocab_size)
 
     if options.lm:
-        wsj_word_lm(wsj_subdirs, subdir, options.lm_max_order)
+        wsj_word_lm(wsj_subdirs, config_dir, options.lm_max_order)
 
 
 def init_char(options):
@@ -1337,18 +1523,19 @@ def init_char(options):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    if options.sub_dir is None:
-        subdir = os.path.join(
+    if options.config_subdir is None:
+        config_dir = os.path.join(
             options.data_root, 'local',
             'char{}k'.format(options.eval_vocab_size))
     else:
-        subdir = os.path.join(options.data_root, 'local', options.sub_dir)
+        config_dir = os.path.join(
+            options.data_root, 'local', options.config_subdir)
 
-    wsj_init_char_subdir(
-        wsj_subdirs, options.data_root, subdir, options.eval_vocab_size)
+    wsj_init_char_config(
+        wsj_subdirs, options.data_root, config_dir, options.eval_vocab_size)
 
     if options.lm:
-        wsj_char_lm(wsj_subdirs, subdir, options.lm_max_order)
+        wsj_char_lm(wsj_subdirs, config_dir, options.lm_max_order)
 
 
 def init_subword(options):
@@ -1358,22 +1545,120 @@ def init_subword(options):
         wsj_subdirs.extend(glob(wsj_root, r'??-?.?'))
         wsj_subdirs.extend(glob(wsj_root, r'??-??.?'))
 
-    if options.sub_dir is None:
-        subdir = os.path.join(
+    if options.config_subdir is None:
+        config_dir = os.path.join(
             options.data_root, 'local',
             '{}{}_{}k'.format(
                 options.algorithm,
                 options.subword_vocab_size,
                 options.eval_vocab_size))
     else:
-        subdir = os.path.join(options.data_root, 'local', options.sub_dir)
+        config_dir = os.path.join(
+            options.data_root, 'local', options.config_subdir)
 
-    wsj_init_subword_subdir(
-        wsj_subdirs, options.data_root, subdir, options.subword_vocab_size,
-        options.eval_vocab_size, options.algorithm)
+    wsj_init_subword_config(
+        wsj_subdirs, options.data_root, config_dir,
+        options.subword_vocab_size, options.eval_vocab_size, options.algorithm)
 
     if options.lm:
-        wsj_subword_lm(wsj_subdirs, subdir, options.lm_max_order)
+        wsj_subword_lm(wsj_subdirs, config_dir, options.lm_max_order)
+
+
+def torch_dir(options):
+
+    local_dir = os.path.join(options.data_root, 'local')
+    if options.config_subdir is None:
+        dirs = os.listdir(local_dir)
+        try:
+            dirs.remove('data')
+        except ValueError:
+            pass
+        if len(dirs) == 1:
+            config_dir = os.path.join(local_dir, dirs[0])
+        else:
+            raise ValueError(
+                'More than one directory ({}) besides "data" exists in "{}". '
+                'Cannot infer configuration. Please specify as a positional '
+                'argument'.format(', '.join(dirs), local_dir))
+    else:
+        config_dir = os.path.join(local_dir, options.config_subdir)
+        if not os.path.isdir(config_dir):
+            raise ValueError('"{}" is not a directory'.format(config_dir))
+
+    dir_ = os.path.join(options.data_root, options.data_subdir)
+    ext = os.path.join(dir_, 'ext')
+    mkdir(ext)
+
+    for x in {'spk2gender', 'id2token.txt', 'token2id.txt'}:
+        copy_paths(os.path.join(config_dir, x), ext)
+
+    lm_arpa_gz = os.path.join(config_dir, 'lm', 'lm.arpa.gz')
+    if os.path.exists(lm_arpa_gz):
+        copy_paths(lm_arpa_gz, ext)
+
+    train = 'si84' if options.si84 else 'si284'
+    dev = 'dev93'
+    if options.both_evals:
+        tests = ('eval92', 'eval93')
+    elif options.eval93:
+        tests = ('eval93',)
+    else:
+        tests = ('eval92',)
+
+    feat_optional_args = [
+        '--channel', '-1',
+        '--num-workers', str(torch.multiprocessing.cpu_count()),
+        '--force-as', 'sph',
+        '--preprocess', options.preprocess,
+        '--postprocess', options.postprocess,
+    ]
+    if options.seed is not None:
+        feat_optional_args.extend(['--seed', str(options.seed)])
+
+    token2id_txt = os.path.join(config_dir, 'token2id.txt')
+    unk = None
+    with open(token2id_txt) as file_:
+        for line in file_:
+            token = line.strip().split()[0]
+            if token.upper() == '<UNK>':
+                unk = token
+                break
+
+    for is_test, partition in enumerate((train, dev) + tests):
+        prefix = 'test_' if is_test else 'train_'
+        trn_src = os.path.join(config_dir, prefix + partition + '.trn')
+        trn_dest = os.path.join(ext, partition + '.ref.trn')
+        map_path = os.path.join(config_dir, prefix + partition + '_sph.scp')
+        part_dir = os.path.join(dir_, partition)
+        feat_dir = os.path.join(part_dir, 'feat')
+        ref_dir = os.path.join(part_dir, 'ref')
+
+        copy_paths(trn_src, trn_dest)
+
+        mkdir(feat_dir)
+
+        if options.feats_from is None:
+            args = [map_path, feat_dir] + feat_optional_args
+            if not options.raw:
+                args.insert(1, options.computer_json)
+            speech_cmd.signals_to_torch_feat_dir(args)
+        else:
+            feat_src = os.path.join(
+                options.data_root, options.feats_from, partition, 'feat')
+            if not os.path.isdir(feat_src):
+                raise ValueError(
+                    'Specified --feats-from, but "{}" is not a directory'
+                    ''.format(feat_src))
+            for filename in os.listdir(feat_src):
+                src = os.path.join(feat_src, filename)
+                dest = os.path.join(feat_dir, filename)
+                copy_paths(src, dest)
+
+        if not is_test:
+            args = [trn_src, token2id_txt, ref_dir]
+            if unk is not None:
+                args += ['--unk-symbol', unk]
+            torch_cmd.trn_to_torch_token_data_dir(args)
 
 
 def main(args=None):
@@ -1390,6 +1675,8 @@ def main(args=None):
         init_char(options)
     elif options.command == 'init_subword':
         init_subword(options)
+    elif options.command == 'torch_dir':
+        torch_dir(options)
 
 
 if __name__ == '__main__':

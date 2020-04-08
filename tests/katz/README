@@ -1,0 +1,50 @@
+We're comparing our Katz implementation against the CMU-Cambridge Statistical
+Language Modelling Toolkit v2.
+
+http://www.speech.cs.cmu.edu/SLM/toolkit_documentation.html
+
+We extracted Plato's Republic from Project Gutenberg:
+(https://www.gutenberg.org/cache/epub/1497/pg1497.txt). The license can be
+found at the end of the file.
+
+We preprocess the text using
+
+awk '
+BEGIN {begun=0}
+/INTRODUCTION AND ANALYSIS/ {begun=1}
+/End of the Project Guten/ {begun=0}
+begun {print}' pg1497.txt | \
+  tr '\n' ' ' | \
+  tr --delete '\r[\200-\377]' | \
+  tr '[:upper:]' '[:lower:]' | \
+  sed 's/([^)]*)//g' | \
+  tr '"'"'"';,:/\-=+*)(' ' ' | \
+  tr '?!' '.' | \
+  sed 's/\.\.*/\./g' | \
+  sed 's/\. /\n/g' | \
+  sed 's/\.+/\./g' | \
+  tr -s '[:blank:]' | \
+  sed 's/^ *//g' > republic.txt
+
+We then extract a vocabulary using
+
+export LC_ALL=C
+bin/text2wfreq < republic.txt | bin/wfreq2vocab -top 5000 | sort > republic.vocab
+
+We convert to a trigram ARPA LM w/ Katz backoff as follows:
+
+bin/text2idngram -vocab republic.vocab -write_ascii < republic.txt > republic.idngram
+bin/idngram2lm -zeroton_fraction 0. -vocab republic.vocab -idngram republic.idngram -ascii_input -arpa republic.arpa
+
+To get the n-grams w/ OOVs replaced with "<UNK>" in text format:
+
+awk '
+BEGIN {W=1; words[0]="<UNK>"}
+NR==FNR && $1 != "##" {words[W]=$1; W++}
+NR!=FNR {
+    for (i=1; i <= 3; i++) {
+        printf("%s ", words[$i]);
+    }
+    printf("%s\n", $4);
+}
+' republic.vocab republic.idngram > republic.wngram

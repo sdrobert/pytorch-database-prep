@@ -287,7 +287,6 @@ def wsj_data_prep(wsj_subdirs, data_root):
     # - uses lexical equivalence map in WSJ1 to convert verbal punctuations
     #   (and a few others) in training data to something within the vocabulary.
     #   Kaldi just calls these UNKs.
-    # - handle
     # See wiki for more info on the corpus and tasks in general
 
     for rel_path in {'11-13.1', '13-34.1', '11-2.1'}:
@@ -873,7 +872,8 @@ def wsj_word_lm(wsj_subdirs, config_dir, max_order):
     wsj_train_lm(vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz)
 
 
-def wsj_init_char_config(wsj_subdirs, data_root, config_dir, eval_vocab_size):
+def wsj_init_char_config(
+        wsj_subdirs, data_root, config_dir, eval_vocab_size, ngraph_order):
     local_data_dir = os.path.join(data_root, 'local', 'data')
     token2id_txt = os.path.join(config_dir, 'token2id.txt')
     id2token_txt = os.path.join(config_dir, 'id2token.txt')
@@ -902,10 +902,15 @@ def wsj_init_char_config(wsj_subdirs, data_root, config_dir, eval_vocab_size):
         )
     pipe_to(sorted(words), words_txt)
 
+    chars = set('_'.join(words))
+
     # note the character vocabulary is always closed if we take all the
     # characters from a closed word-level vocabulary.
     vocab = ['</s>', '<SPOKEN_NOISE>', '<NOISE>', '<s>']
-    vocab += sorted(set('_'.join(words)))
+    vocab += sorted(
+        ''.join(ngraph)
+        for ngraph in itertools.product(chars, repeat=ngraph_order)
+    )
     with open(token2id_txt, 'w') as t2id, open(id2token_txt, 'w') as id2t:
         for i, v in enumerate(vocab):
             t2id.write('{} {}\n'.format(v, i))
@@ -930,7 +935,8 @@ def wsj_init_char_config(wsj_subdirs, data_root, config_dir, eval_vocab_size):
             y += '.cleaned.txt' if x.startswith('test_') else '.fragments.txt'
             word_txt_to_char_trn(
                 os.path.join(local_data_dir, y),
-                os.path.join(config_dir, x.replace('_5k', ''))
+                os.path.join(config_dir, x.replace('_5k', '')),
+                ngraph_order
             )
         else:
             copy_paths(
@@ -939,7 +945,7 @@ def wsj_init_char_config(wsj_subdirs, data_root, config_dir, eval_vocab_size):
             )
 
 
-def wsj_char_lm(wsj_subdirs, config_dir, max_order):
+def wsj_char_lm(wsj_subdirs, config_dir, max_order, ngraph_order):
     dir_13_32_1 = find_link_dir(wsj_subdirs, '13-32.1')
     lmdir = os.path.join(config_dir, 'lm')
     cleaned_txt_gz = os.path.join(lmdir, 'cleaned.txt.gz')
@@ -959,8 +965,16 @@ def wsj_char_lm(wsj_subdirs, config_dir, max_order):
     vp = set(x.split()[0] for x in cat(vp_lexical_equivs_csv))
     vocab = set(x.split()[0] for x in cat(token2id_txt))
 
+    def empty_buff(buff):
+        for i in range(0, len(buff), ngraph_order):
+            ngraph = buff[i:i + ngraph_order]
+            ngraph += '_' * (ngraph_order - len(ngraph))
+            out.write(ngraph)
+            out.write(' ' if i + ngraph_order < len(buff) else '\n')
+
     # clean up training data. We pretty much do the same thing as word-level,
-    # but replace spaces with underscores
+    # but replace spaces with underscores and split on ngraph order,
+    # post-pending with spaces if necessary
     assert os.path.isdir(train_data_root)
     train_data_files = []
     for subdir in ('87', '88', '89'):
@@ -976,26 +990,28 @@ def wsj_char_lm(wsj_subdirs, config_dir, max_order):
                 if line.startswith('<'):
                     continue
                 A = line.strip().upper().split(' ')
+                buff = ''
                 for n, a in enumerate(A):
                     if a in vp:
                         continue
                     if a not in isword and len(a) > 1 and a.endswith('.'):
-                        out.write(a[:-1])
+                        buff += a[:-1]
                         if n < len(A) - 1:
-                            out.write("\n")
+                            empty_buff(buff)
+                            buff = ''
                     else:
-                        out.write(a)
+                        buff += a
                         if n < len(A) - 1:
-                            out.write("_")
-                out.write("\n")
+                            buff += '_'
+                empty_buff(buff)
             del in_, compressed, decompressed
     del isword, train_data_files
 
-    # split data into 'sentences.' This splits on every character
+    # split data into 'sentences'
     with gzip.open(cleaned_txt_gz, 'rt') as file_:
         text = file_.read()
     sents = ngram_lm.text_to_sents(
-        text, sent_end_expr='\n', word_delim_expr='')
+        text, sent_end_expr='\n', word_delim_expr=' ')
     del text
 
     # count n-grams in sentences
@@ -1026,7 +1042,7 @@ def wsj_char_lm(wsj_subdirs, config_dir, max_order):
     )
 
 
-def word_txt_to_char_trn(txt, trn):
+def word_txt_to_char_trn(txt, trn, ngraph_order):
     char_token_pattern = re.compile(r'[^<]|<[^>]+>')
     with open(txt) as in_, open(trn, 'w') as out:
         for line in in_:
@@ -1035,9 +1051,31 @@ def word_txt_to_char_trn(txt, trn):
             # '-' which indicates a word fragment. A subword speech
             # recognizer should be able to spell out the fragment
             trans = trans.replace(' ', '_').replace('-', '')
-            trans = ' '.join(char_token_pattern.findall(trans))
-            out.write(trans)
-            out.write(' (')
+            chars = char_token_pattern.findall(trans)
+            ngraph = ''
+            # we can't just go writing n-graphs willy-nilly. If we run into
+            # a control character (e.g. <NOISE>, <SPOKEN_NOISE>), that's its
+            # on thing.
+            while chars:
+                next_ = chars.pop(0)
+                if next_[0] == '<':
+                    if ngraph:
+                        out.write(ngraph + '_' * (ngraph_order - len(ngraph)))
+                        out.write(' ')
+                        ngraph = ''
+                    out.write(next_)
+                    out.write(' ')
+                else:
+                    ngraph += next_
+                    if len(ngraph) == ngraph_order:
+                        out.write(ngraph)
+                        out.write(' ')
+                        ngraph = ''
+            if ngraph:
+                ngraph += '_' * (ngraph_order - len(ngraph))
+                out.write(ngraph)
+                out.write(' ')
+            out.write('(')
             out.write(utt)
             out.write(')\n')
 
@@ -1091,14 +1129,14 @@ def wsj_init_subword_config(
 
     isword = set(cat(wordlist_txt))
     vp = set(x.split()[0] for x in cat(vp_lexical_equivs_csv))
-    invalid_char_pattern = re.compile(r'[^' + re.escape(''.join(chars)) + r']')
 
-    # build our training data. It's pretty much the same as what we'd
-    # do for language modelling, but we have to save it in plain text for
+    # build our training data. It's pretty much the same as what we'd do for
+    # word-level language modelling, but we have to save it in plain text for
     # sentencepiece. We skip any words that have characters outside of our
     # vocabulary.
-    # XXX(sdrobert): we're double-dipping on the training data for both LM
-    # and subword selection. Will this be a problem?
+    #
+    # XXX(sdrobert): we're double-dipping on the training data for
+    # both LM and subword selection. Will this be a problem?
     assert os.path.isdir(train_data_root)
     train_data_files = []
     for subdir in ('87', '88', '89'):
@@ -1115,7 +1153,7 @@ def wsj_init_subword_config(
                     continue
                 A = line.strip().upper().split(' ')
                 for n, a in enumerate(A):
-                    if a in vp or invalid_char_pattern.match(a):
+                    if a in vp or any(c not in chars for c in a):
                         continue
                     if a not in isword and len(a) > 1 and a.endswith('.'):
                         out.write(a[:-1])
@@ -1127,9 +1165,13 @@ def wsj_init_subword_config(
             del in_, compressed, decompressed
     del isword, train_data_files
 
+    unk_id = subword_vocab_size
     spm.SentencePieceTrainer.Train(
-        '--input={} --model_prefix={} --vocab_size={} --model_type={}'.format(
-            cleaned_txt, spm_prefix, subword_vocab_size, algorithm
+        '--input={} --model_prefix={} --vocab_size={} --model_type={} '
+        '--user_defined_symbols=<NOISE>,<SPOKEN_NOISE> --unk_id={}'.format(
+            cleaned_txt, spm_prefix,
+            subword_vocab_size + 1,  # add unk_id (we'll remove later)
+            algorithm, unk_id
         )
     )
 
@@ -1146,7 +1188,7 @@ def wsj_init_subword_config(
             # underscore
             word = word.replace(u'\u2581', '_')
             if word == '<unk>':
-                word = '<NOISE>'
+                break  # last word, but don't use it
             t2id.write('{} {}\n'.format(word, i))
             id2t.write('{} {}\n'.format(i, word))
 
@@ -1156,30 +1198,32 @@ def wsj_init_subword_config(
     sp.load(spm_prefix + '.model')
 
     # similar to char stuff, but we write subwords intstead of characters
-    for x in {
-            'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
-            'train_si84.trn', 'train_si84_sph.scp',
-            'train_si84.utt2spk', 'train_si84.spk2utt',
-            'train_si284.trn', 'train_si284_sph.scp',
-            'train_si284.utt2spk', 'train_si284.spk2utt'}:
-        src = os.path.join(local_data_dir, x)
-        dest = os.path.join(config_dir, x)
+    to_copy = {
+        'lex_equivs.csv', 'spk2gender', 'vp_lexical_equivs.csv',
+        'train_si84.trn', 'train_si84_sph.scp',
+        'train_si84.utt2spk', 'train_si84.spk2utt',
+        'train_si284.trn', 'train_si284_sph.scp',
+        'train_si284.utt2spk', 'train_si284.spk2utt',
+        'test_dev93_5k.trn', 'test_dev93_5k_sph.scp', 'test_dev93_5k.utt2spk',
+        'test_eval92_5k.trn', 'test_eval92_5k_sph.scp',
+        'test_eval92_5k.utt2spk', 'test_eval93_5k.trn',
+        'test_eval93_5k_sph.scp', 'test_eval93_5k.utt2spk',
+    }
+    for x in to_copy:
+        if eval_vocab_size != 5:
+            x = x.replace('_5k', '')
         if x.endswith('.trn'):
-            word_trn_to_subword_trn(src, dest, sp, id2token)
+            y = x[:-4]
+            y += '.cleaned.txt' if x.startswith('test_') else '.fragments.txt'
+            word_txt_to_subword_trn(
+                os.path.join(local_data_dir, y),
+                os.path.join(config_dir, x.replace('_5k', '')),
+                sp, id2token
+            )
         else:
-            pipe_to(cat(src), dest)
-
-    for dest in {'test_dev93', 'test_eval92', 'test_eval93'}:
-        src = dest + '_5k' if eval_vocab_size == 5 else dest
-        word_trn_to_subword_trn(
-            os.path.join(local_data_dir, src + '.trn'),
-            os.path.join(config_dir, dest + '.trn'),
-            sp, id2token
-        )
-        for suff in {'_sph.scp', '.utt2spk', '.spk2utt'}:
-            pipe_to(
-                cat(os.path.join(local_data_dir, src + suff)),
-                os.path.join(config_dir, dest + suff)
+            copy_paths(
+                os.path.join(local_data_dir, x),
+                os.path.join(config_dir, x.replace('_5k', ''))
             )
 
 
@@ -1208,9 +1252,9 @@ def wsj_subword_lm(wsj_subdirs, config_dir, max_order):
     with open(cleaned_txt) as in_, gzip.open(cleaned_txt_gz, 'wt') as out:
         for line in in_:
             line = line.strip()
-            line = sp.encode_as_ids(line)
-            line = ' '.join(id2token[id_] for id_ in line)
-            out.write(line)
+            ids = sp.encode_as_ids(line)
+            ids = ' '.join(id2token[id_] for id_ in ids)
+            out.write(ids)
             out.write('\n')
 
     # the rest proceeds in the same way as the word-level lm
@@ -1251,19 +1295,17 @@ def wsj_subword_lm(wsj_subdirs, config_dir, max_order):
         [(0.5, 1.0, 1.5)] * max_order)
 
 
-def word_trn_to_subword_trn(trn_word, trn_subword, sp, id2token):
-    with open(trn_word) as in_, open(trn_subword, 'w') as out:
+def word_txt_to_subword_trn(txt, trn, sp, id2token):
+    with open(txt) as in_, open(trn, 'w') as out:
         for line in in_:
-            trans, utt = line.strip().rsplit(maxsplit=1)
-            # ensure <NOISE> gets mapped to <unk> in sentencepiece, which
-            # gets mapped back to <NOISE> in id2token
-            trans = trans.replace('<NOISE>', '_')
+            utt, trans = line.strip().split(maxsplit=1)
+            trans = trans.replace('-', '')
             trans = sp.encode_as_ids(trans)
             trans = ' '.join(id2token[id_] for id_ in trans)
             out.write(trans)
-            out.write(' ')
+            out.write(' (')
             out.write(utt)
-            out.write('\n')
+            out.write(')\n')
 
 
 def build_preamble_parser(subparsers):
@@ -1330,7 +1372,11 @@ def build_init_char_parser(subparsers):
         '--config-subdir', default=None,
         help='Name of sub directory in data/local/ under which to store '
         'setup specific to this vocabulary size. Defaults to '
-        '``char<eval_vocab_size>k``'
+        '``char<ngraph_order>_<eval_vocab_size>k``'
+    )
+    parser.add_argument(
+        '--ngraph-order', default=1, type=int,
+        help='How many characters to consider in a token'
     )
     parser.add_argument(
         '--eval-vocab-size', default=64, type=int, choices=[5, 64],
@@ -1468,6 +1514,22 @@ def build_torch_dir_parser(subparsers):
     )
 
 
+def build_filter_parser(subparsers):
+    parser = subparsers.add_parser(
+        'filter',
+        help='Filter an input word-level hypothesis trn of special characters '
+        'and apply allowed utterance- and word-level equivalences'
+    )
+    parser.add_argument(
+        'raw_trn', type=argparse.FileType('r'),
+        help='The input (unfiltered) trn file'
+    )
+    parser.add_argument(
+        'filt_trn', type=argparse.FileType('w'),
+        help='The output (filtered) trn file'
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
@@ -1482,6 +1544,7 @@ def build_parser():
     build_init_char_parser(subparsers)
     build_init_subword_parser(subparsers)
     build_torch_dir_parser(subparsers)
+    build_filter_parser(subparsers)
     return parser
 
 
@@ -1526,16 +1589,19 @@ def init_char(options):
     if options.config_subdir is None:
         config_dir = os.path.join(
             options.data_root, 'local',
-            'char{}k'.format(options.eval_vocab_size))
+            'char{}_{}k'.format(options.ngraph_order, options.eval_vocab_size))
     else:
         config_dir = os.path.join(
             options.data_root, 'local', options.config_subdir)
 
     wsj_init_char_config(
-        wsj_subdirs, options.data_root, config_dir, options.eval_vocab_size)
+        wsj_subdirs, options.data_root, config_dir, options.eval_vocab_size,
+        options.ngraph_order)
 
     if options.lm:
-        wsj_char_lm(wsj_subdirs, config_dir, options.lm_max_order)
+        wsj_char_lm(
+            wsj_subdirs, config_dir, options.lm_max_order,
+            options.ngraph_order)
 
 
 def init_subword(options):
@@ -1616,13 +1682,14 @@ def torch_dir(options):
         feat_optional_args.extend(['--seed', str(options.seed)])
 
     token2id_txt = os.path.join(config_dir, 'token2id.txt')
-    unk = None
-    with open(token2id_txt) as file_:
-        for line in file_:
-            token = line.strip().split()[0]
-            if token.upper() == '<UNK>':
-                unk = token
-                break
+    token2id = (line.strip().split() for line in cat(token2id_txt))
+    token2id = dict((k, int(v)) for (k, v) in token2id)
+    if '<UNK>' in token2id:
+        unk = '<UNK>'
+    elif '<unk>' in token2id:
+        unk = '<unk>'
+    else:
+        unk = None
 
     for is_test, partition in enumerate((train, dev) + tests):
         prefix = 'test_' if is_test else 'train_'
@@ -1654,11 +1721,82 @@ def torch_dir(options):
                 dest = os.path.join(feat_dir, filename)
                 copy_paths(src, dest)
 
-        if not is_test:
-            args = [trn_src, token2id_txt, ref_dir]
-            if unk is not None:
-                args += ['--unk-symbol', unk]
-            torch_cmd.trn_to_torch_token_data_dir(args)
+        if is_test:
+            # before writing the ref/ dir, we need to check if there's any new
+            # vocabulary in the test set. We write special token2id and
+            # id2token files for the test set. This ensures the stored
+            # reference ids won't be considered <UNK>
+            cur_token2id = dict(token2id)
+            for line in cat(trn_src):
+                trans = line.split()
+                trans.pop()  # remove utt id
+                for word in trans:
+                    cur_token2id.setdefault(word, len(cur_token2id))
+            assert len(cur_token2id) == len(set(cur_token2id.values()))
+            cur_token2id_txt = os.path.join(
+                ext, 'token2id.' + partition + '.txt')
+            cur_id2token_txt = os.path.join(
+                ext, 'id2token.' + partition + '.txt')
+            with \
+                    open(cur_id2token_txt, 'w') as id2t, \
+                    open(cur_token2id_txt, 'w') as t2id:
+                for t, id_ in sorted(cur_token2id.items(), key=lambda x: x[1]):
+                    id2t.write('{} {}\n'.format(id_, t))
+                    t2id.write('{} {}\n'.format(t, id_))
+        else:
+            cur_token2id_txt = token2id_txt
+
+        args = [trn_src, cur_token2id_txt, ref_dir]
+        if not is_test and unk is not None:  # never write <UNK> for test
+            args += ['--unk-symbol', unk]
+        torch_cmd.trn_to_torch_token_data_dir(args)
+
+
+def filter_(options):
+
+    dir_ = os.path.join(options.data_root, 'local', 'data')
+    lex_equivs_csv = os.path.join(dir_, 'lex_equivs.csv')
+
+    # The utterance mappings in 93uttmap.rls are garbage. Using NIST's own
+    # program, tranfilt, we're just as likely to duplicate words as fix the
+    # transcription. e.g.
+    # ./nov93flt.sh < ~/WSJ1/13-32.1/score/lib/wsj/nov93wsj.ref > a.trn
+    # diff ~/WSJ1/13-32.1/score/lib/wsj/nov93wsj.ref a.trn
+    # 1140c1140
+    # < SEOUL YUK STATION HE REPEATS PRACTICING HIS NEW ENGLISH WORD (4OBC020E)
+    # ---
+    # > SEOUL SEOUL YUK STATION HE REPEATS PRACTICING HIS NEW ENGLISH ...
+    # 4447c4447
+    # < THE STORM HAS CREATED A NATIONAL DISASTER AND COMMUNITIES WITH ...
+    # ---
+    # > THE STORM HAS CREATED A NATIONAL DISASTER AND COMMUNITIES WITH WITH ...
+
+    lex_equivs = dict(x.rsplit(',', maxsplit=1) for x in cat(lex_equivs_csv))
+
+    # determine utterances from '93 sets (can only apply lexical equivalences
+    # to these
+    utts_from_93 = set()
+    for x in ('train_si284', 'test_dev93', 'test_eval93'):
+        Y = ('',) if x.startswith('train_') else ('', '_5k')
+        for y in Y:
+            path = os.path.join(dir_, x + y + '.raw.txt')
+            utts_from_93.update(x.split()[0] for x in cat(path))
+    path = os.path.join(dir_, 'train_si84.raw.txt')
+    utts_from_93.difference_update(x.split()[0] for x in cat(path))
+
+    for line in options.raw_trn:
+        toks = line.strip().split(' ')
+        utt = toks.pop()
+        if utt[0] != '(' or utt[-1] != ')':
+            raise ValueError('{} is not a trn'.format(options.raw_trn.name))
+        utt = utt[1:-1]
+        toks = (tok for tok in toks if tok and tok[0] != '<')
+        if utt in utts_from_93:
+            toks = (lex_equivs.get(tok, tok) for tok in toks)
+        options.filt_trn.write(' '.join(toks))
+        options.filt_trn.write(' (')
+        options.filt_trn.write(utt)
+        options.filt_trn.write(')\n')
 
 
 def main(args=None):
@@ -1677,6 +1815,8 @@ def main(args=None):
         init_subword(options)
     elif options.command == 'torch_dir':
         torch_dir(options)
+    elif options.command == 'filter':
+        filter_(options)
 
 
 if __name__ == '__main__':

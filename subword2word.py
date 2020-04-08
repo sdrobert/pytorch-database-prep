@@ -51,7 +51,9 @@ def main(args=None):
 
     for line in options.subword_trn:
         trans, utt = line.strip().rsplit(' ', maxsplit=1)
-        trans = trans.replace(' ', '').replace(options.space_char, ' ')
+        trans = (
+            trans.replace(' ', '').replace(options.space_char, ' ')
+            .replace('  ', ' ').strip())
         options.word_trn.write(trans)
         options.word_trn.write(' ')
         options.word_trn.write(utt)

@@ -22,8 +22,10 @@ import os
 import sys
 import argparse
 import locale
+import warnings
 
 from collections import Counter
+from shutil import copy as copy_paths
 
 from common import mkdir
 
@@ -83,6 +85,69 @@ def preamble(options):
             file_.write('{} {}\n'.format(word, freq))
 
 
+def init_word(options):
+
+    local_dir = os.path.join(options.data_root, 'local')
+    local_data_dir = os.path.join(local_dir, 'data')
+    word2freq_txt = os.path.join(local_data_dir, 'word2freq.txt')
+    vocab_size = 1000 if options.vocab_size is None else options.vocab_size
+    prune_thresh = 0 if options.prune_thresh is None else options.prune_thresh
+    if options.config_subdir is None:
+        config_dir = os.path.join(local_dir, 'word')
+        if options.vocab_size is not None:
+            config_dir += '{}k'.format(vocab_size)
+        elif options.prune_thresh is not None:
+            config_dir += '{}p'.format(prune_thresh)
+    else:
+        config_dir = os.path.join(local_dir, options.config_subdir)
+    token2id_txt = os.path.join(config_dir, 'token2id.txt')
+    id2token_txt = os.path.join(config_dir, 'id2token.txt')
+    train_oovs_txt = os.path.join(config_dir, 'train_oovs.txt')
+
+    with open(word2freq_txt) as file_:
+        freq_word = (line.strip().split() for line in file_)
+        freq_word = ((int(x[1]), x[0]) for x in freq_word)
+        freq_word = sorted(freq_word, reverse=True)
+
+    oovs = {x[1] for x in freq_word[vocab_size * 1000:]}
+    freq_word = freq_word[:vocab_size * 1000]
+    while freq_word and freq_word[-1][0] <= prune_thresh:
+        oovs.add(freq_word.pop(-1)[1])
+
+    if not freq_word:
+        warnings.warn(
+            'No words are left after pruning + vocab size. All tokens will be '
+            '<unk> in training')
+    vocab = set(x[1] for x in freq_word) | {'<unk>', '<s>', '</s>'}
+    vocab = sorted(vocab)
+    del freq_word
+
+    mkdir(config_dir)
+
+    with open(token2id_txt, 'w') as t2id, open(id2token_txt, 'w') as id2t:
+        for i, v in enumerate(vocab):
+            t2id.write('{} {}\n'.format(v, i))
+            id2t.write('{} {}\n'.format(i, v))
+
+    to_copy = {
+        'train.src.txt', 'train.tgt.txt', 'dev.src.txt', 'dev.tgt.txt',
+        'test.src.txt', 'test.tgt.txt'
+    }
+    for x in to_copy:
+        copy_paths(
+            os.path.join(local_data_dir, x),
+            os.path.join(config_dir, x)
+        )
+
+    # determine the OOVs in the training partition. Primarily for diagnostic
+    # purposes
+    oovs -= {'<unk>'}
+    oovs = sorted(oovs)
+    with open(train_oovs_txt, 'w') as file_:
+        file_.write('\n'.join(oovs))
+        file_.write('\n')
+
+
 def build_preamble_parser(subparsers):
     parser = subparsers.add_parser(
         'preamble',
@@ -92,6 +157,37 @@ def build_preamble_parser(subparsers):
         'ggws_root', type=os.path.abspath,
         help='Location of the GGWS data directory, downloaded from the UniLM '
         'project. Contains files like "dev.src" and "train.tgt"'
+    )
+
+
+def build_init_word_parser(subparsers):
+    parser = subparsers.add_parser(
+        'init_word',
+        help='Perform setup common to full word-level parsing. '
+        'Needs to be done only once for a specific vocabulary size. '
+        'Preceded by "preamble" command.'
+    )
+    parser.add_argument(
+        '--config-subdir', default=None,
+        help='Name of sub directory in data/local/ under which to store '
+        'setup specific to this vocabulary size. Defaults to '
+        '``word(<vocab_size>k|<prune_thresh>p|)``, depending on whether the '
+        'full vocabulary was used (~124k words), the top ``<vocab_size>k`` '
+        'words in terms of frequency, or the words remaining after pruning '
+        'those with less than or equal to ``<prune_thresh>`` tokens.'
+    )
+
+    vocab_group = parser.add_mutually_exclusive_group()
+    vocab_group.add_argument(
+        '--vocab-size', type=int, default=None,
+        help='Limit the vocabulary size to this many words (in thousands). '
+        'The vocabulary will be chosen from the most frequent word types in '
+        'the training set.'
+    )
+    vocab_group.add_argument(
+        '--prune-thresh', type=int, default=None,
+        help='Limit the vocabulary size by pruning all word types with equal '
+        'or fewer than this number of tokens in the training set.'
     )
 
 
@@ -105,6 +201,7 @@ def build_parser():
     subparsers = parser.add_subparsers(
         title='commands', required=True, dest='command')
     build_preamble_parser(subparsers)
+    build_init_word_parser(subparsers)
     return parser
 
 
@@ -116,6 +213,8 @@ def main(args=None):
 
     if options.command == 'preamble':
         preamble(options)
+    elif options.command == 'init_word':
+        init_word(options)
 
 
 if __name__ == '__main__':

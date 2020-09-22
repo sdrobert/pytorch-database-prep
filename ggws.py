@@ -301,27 +301,31 @@ def rouge_dir(options):
                 utt2part[utt] = part
                 part2utts.setdefault(part, set()).add(utt)
 
-    # read hypothesis
+    # read hypotheses
     part2present = dict((p, False) for p in part2utts)
     utt2present = dict((u, False) for u in utt2part)
-    model = os.path.splitext(os.path.basename(options.trn.name))[0]
-    utt2hyp = dict()
-    for line in options.trn:
-        toks = line.strip().split(" ")
-        utt = toks.pop()
-        if utt[0] != "(" or utt[-1] != ")":
-            raise ValueError("{} is not a trn".format(options.trn.name))
-        utt = utt[1:-1]
-        if utt not in utt2part:
-            warnings.warn(
-                "utterance id {} from '{}' does not have a reference."
-                " Skipping".format(utt, options.trn.name)
-            )
-            continue
-        if not toks or toks[-1] != ".":
-            toks.append(".")
-        part2present[utt2part[utt]] = utt2present[utt] = True
-        utt2hyp[utt] = " ".join(toks)
+    utt2peer2hyp = dict()
+    for trn in options.trns:
+        peer = os.path.splitext(os.path.basename(trn.name))[0]
+        for line in trn:
+            toks = line.strip().split(" ")
+            utt = toks.pop()
+            if utt[0] != "(" or utt[-1] != ")":
+                raise ValueError("{} is not a trn".format(trn.name))
+            utt = utt[1:-1]
+            if utt not in utt2part:
+                warnings.warn(
+                    "utterance id {} from '{}' does not have a reference."
+                    " Skipping".format(utt, options.trn.name)
+                )
+                continue
+            peer2hyp = utt2peer2hyp.setdefault(utt, dict())
+            if peer in peer2hyp:
+                raise ValueError("Duplicate peer {}".format())
+            if not toks or toks[-1] != ".":
+                toks.append(".")
+            part2present[utt2part[utt]] = utt2present[utt] = True
+            peer2hyp[peer] = " ".join(toks)
 
     # write each partition to an independent subdirectory
     # (only if some hypothesis mentioning it exists)
@@ -338,25 +342,29 @@ def rouge_dir(options):
 
         utts = sorted(utt for utt in part2utts[part] if utt2present[utt])
 
+        # Warning! The "model" is the gold standard/ref and the "peers" are the things
+        # we've generated (hypotheses). Ugh
         root = et.Element("ROUGE_EVAL", version="1.5.5")
-
         for utt in utts:
+            peer2hyp = utt2peer2hyp[utt]
             eval_ = et.SubElement(root, "EVAL", ID=utt)
             et.SubElement(eval_, "MODEL-ROOT").text = model_dir
             et.SubElement(eval_, "PEER-ROOT").text = peer_dir
             et.SubElement(eval_, "INPUT-FORMAT", TYPE="SPL")
 
-            peers = et.SubElement(eval_, "PEERS")
-            et.SubElement(peers, "P", ID="1").text = utt + ".txt"
-            with open(os.path.join(peer_dir, utt + ".txt"), "w") as txt:
+            models = et.SubElement(eval_, "MODELS")
+            et.SubElement(models, "M", ID="1").text = utt + ".1.txt"
+            with open(os.path.join(model_dir, utt + ".1.txt"), "w") as txt:
                 txt.write(utt2ref[utt])
                 txt.write("\n")
 
-            models = et.SubElement(eval_, "MODELS")
-            et.SubElement(models, "M", ID=model).text = model + "_" + utt + ".txt"
-            with open(os.path.join(model_dir, model + "_" + utt + ".txt"), "w") as txt:
-                txt.write(utt2hyp[utt])
-                txt.write("\n")
+            peers = et.SubElement(eval_, "PEERS")
+            for peer in sorted(peer2hyp):
+                bn = utt + "." + peer + ".txt"
+                et.SubElement(peers, "P", ID=peer).text = bn
+                with open(os.path.join(peer_dir, bn), "w") as txt:
+                    txt.write(peer2hyp[peer])
+                    txt.write("\n")
 
         tree = et.ElementTree(root)
         tree.write(os.path.join(subdir, "settings.xml"))
@@ -484,14 +492,16 @@ def build_rouge_dir_parser(subparsers):
     parser = subparsers.add_parser(
         "rouge_dir",
         help="Produce a rouge-style project directory out of one or more "
-        "hypothesis/peer trn files",
-    )
-    parser.add_argument(
-        "trn",
-        type=argparse.FileType("r"),
-        help="Hypothesis/peer/system-produced summaries of the GGWS data set",
+        "hypothesis/peer TRN files",
     )
     parser.add_argument("project_dir", help="Where to save the project directory to")
+    parser.add_argument(
+        "trns",
+        nargs="+",
+        type=argparse.FileType("r"),
+        help="Hypothesis/peer summaries of the GGWS data set (what you generated "
+        "using your fancy neural networks and whatnot) in TRN format",
+    )
 
 
 def build_parser():

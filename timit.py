@@ -28,11 +28,14 @@ import gzip
 import locale
 import os
 import sys
+import torch
 
 from shutil import copy as copy_paths
 
 import ngram_lm
 import pydrobert.speech.util as speech_util
+import pydrobert.speech.command_line as speech_cmd
+import pydrobert.torch.command_line as torch_cmd
 
 __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"
@@ -59,7 +62,7 @@ def get_phone_map():
             p61, p48, p39 = line[0], None, None
             if len(line) > 1:
                 p48 = line[1]
-                if len(line) == 2:
+                if len(line) == 3:
                     p39 = line[2]
             phone_map[p61] = (p61, p48, p39)
 
@@ -113,9 +116,9 @@ def timit_data_prep(timit, data_root):
             utt2type[utt] = type_
             spk2part[spk] = part
             utt2sph[utt] = path
-            spk2dialect[spk] = dr
+            spk2dialect[spk] = dr.upper()
             spk2gender[spk] = gender
-            utt2wc[utt] = (utt, "A")
+            utt2wc[utt] = utt + " A"
             utt2spk[utt] = spk
             no_ext = path.rsplit(".", maxsplit=1)[0]
             if os.path.isfile(no_ext + ".phn"):
@@ -205,6 +208,91 @@ def preamble(options):
     timit_data_prep(options.timit_root, options.data_root)
 
 
+def write_mapped_stm(src, dst, map_, wcinfo=None):
+
+    with open(src) as in_stm, open(dst, "w") as out_stm:
+        if wcinfo is not None:
+            out_stm.write(';; LABEL "F" "Female" "Female speaker"\n')
+            out_stm.write(';; LABEL "M" "Male" "Male speaker"\n')
+            out_stm.write(';; LABEL "DR1" "Dialect 1" "Speaker from New England"\n')
+            out_stm.write(';; LABEL "DR2" "Dialect 2" "Speaker from Northern U.S."\n')
+            out_stm.write(
+                ';; LABEL "DR3" "Dialect 3" "Speaker from North Midland U.S."\n'
+            )
+            out_stm.write(
+                ';; LABEL "DR4" "Dialect 4" "Speaker from South Midland U.S."\n'
+            )
+            out_stm.write(';; LABEL "DR5" "Dialect 5" "Speaker from Southern U.S."\n')
+            out_stm.write(';; LABEL "DR6" "Dialect 6" "Speaker from New York City"\n')
+            out_stm.write(';; LABEL "DR7" "Dialect 7" "Speaker from Western U.S."\n')
+            out_stm.write(
+                ';; LABEL "DR8" "Dialect 8" "Speaker was army brat in U.S."\n'
+            )
+            out_stm.write(';; LABEL "SA" "Dialect Prompt" "Prompt was a shibboleth"\n')
+            out_stm.write(
+                ';; LABEL "SI" "Diverse Prompt" "Prompt extracted from existing text"\n'
+            )
+            out_stm.write(
+                ';; LABEL "SX" "Compact Prompt" "Prompt designed to elicit biphones"\n'
+            )
+
+        for line in in_stm:
+            line = line.strip().split()
+            prefix, phns = line[:5], line[5:]
+            if wcinfo is not None:
+                wc = " ".join(prefix[:2])
+                if wc not in wcinfo:
+                    continue
+                prefix.append("<" + ",".join(wcinfo[wc]) + ">")
+            idx = 0
+            while idx < len(phns):
+                to = map_[phns[idx]]
+                if to is None:
+                    phns.pop(idx)
+                else:
+                    phns[idx] = to
+                    idx += 1
+            out_stm.write(" ".join(prefix + phns))
+            out_stm.write("\n")
+
+
+def write_mapped_ctm(src, dst, map_, wclist=None):
+
+    with open(src) as in_ctm, open(dst, "w") as out_ctm:
+        last_wc = last_start = last_dur = last_phn = None
+        for line in in_ctm:
+            wc, start, dur, phn = line.strip().rsplit(maxsplit=3)
+            if wclist is not None and wc not in wclist:
+                continue
+            start, dur = float(start), float(dur)
+            if wc != last_wc:
+                if last_phn is not None:
+                    out_ctm.write(
+                        "{} {:.3f} {:.3f} {}\n".format(
+                            last_wc, last_start, last_dur, last_phn
+                        )
+                    )
+                last_wc = wc
+                last_start = last_dur = 0.0
+                last_phn = None
+            to = map_[phn]
+            if to is not None:
+                if last_phn is not None:
+                    out_ctm.write(
+                        "{} {:.3f} {:.3f} {}\n".format(
+                            last_wc, last_start, last_dur, last_phn
+                        )
+                    )
+                last_wc, last_start, last_dur, last_phn = wc, start, dur, to
+            else:
+                # collapse this phone into the previous phone
+                last_dur += dur
+        if last_phn is not None:
+            out_ctm.write(
+                "{} {:.3f} {:.3f} {}\n".format(last_wc, last_start, last_dur, last_phn)
+            )
+
+
 def init_phn(options):
 
     local_dir = os.path.join(options.data_root, "local")
@@ -224,7 +312,7 @@ def init_phn(options):
         elif options.vocab_size == 48:
             phone_map[key] = phone_map[key][1]
         else:
-            phone_map[key] = phone_map[key][1]
+            phone_map[key] = phone_map[key][2]
     phone_set = sorted(set(val for val in phone_map.values() if val is not None))
     phone_set += ["</s>", "<s>"]
 
@@ -249,56 +337,17 @@ def init_phn(options):
             token2id.write("{} {}\n".format(token, id_))
             id2token.write("{} {}\n".format(id_, token))
 
-    with open(os.path.join(data_dir, "all.stm")) as in_stm, open(
-        os.path.join(config_dir, "all.stm"), "w"
-    ) as out_stm:
-        for line in in_stm:
-            line = line.strip().split()
-            prefix, phns = line[:5], line[5:]
-            idx = 0
-            while idx < len(phns):
-                to = phone_map[phns[idx]]
-                if to is None:
-                    phns.pop(idx)
-                else:
-                    phns[idx] = to
-                    idx += 1
-            out_stm.write(" ".join(prefix + phns))
-            out_stm.write("\n")
+    write_mapped_stm(
+        os.path.join(data_dir, "all.stm"),
+        os.path.join(config_dir, "all.stm"),
+        phone_map,
+    )
 
-    with open(os.path.join(data_dir, "all.ctm")) as in_ctm, open(
-        os.path.join(config_dir, "all.ctm"), "w"
-    ) as out_ctm:
-        last_wc = last_start = last_dur = last_phn = None
-        for line in in_ctm:
-            wc, start, dur, phn = line.strip().rsplit(maxsplit=3)
-            start, dur = float(start), float(dur)
-            if wc != last_wc:
-                if last_phn is not None:
-                    out_ctm.write(
-                        "{} {:.3f} {:.3f} {}\n".format(
-                            last_wc, last_start, last_dur, last_phn
-                        )
-                    )
-                last_wc = wc
-                last_start = last_dur = 0.0
-                last_phn = None
-            to = phone_map[phn]
-            if to is not None:
-                if last_phn is not None:
-                    out_ctm.write(
-                        "{} {:.3f} {:.3f} {}\n".format(
-                            last_wc, last_start, last_dur, last_phn
-                        )
-                    )
-                last_wc, last_start, last_dur, last_phn = wc, start, dur, to
-            else:
-                # collapse this phone into the previous phone
-                last_dur += dur
-        if last_phn is not None:
-            out_ctm.write(
-                "{} {:.3f} {:.3f} {}\n".format(last_wc, last_start, last_dur, last_phn)
-            )
+    write_mapped_ctm(
+        os.path.join(data_dir, "all.ctm"),
+        os.path.join(config_dir, "all.ctm"),
+        phone_map,
+    )
 
     if options.lm:
         train_phn_lm(config_dir, options.lm_max_order)
@@ -355,6 +404,193 @@ def train_phn_lm(config_dir, max_order):
         ngram_lm.write_arpa(prob_list, file_)
 
 
+def torch_dir(options):
+
+    local_dir = os.path.join(options.data_root, "local")
+    if options.config_subdir is None:
+        dirs = os.listdir(local_dir)
+        try:
+            dirs.remove("data")
+        except ValueError:
+            pass
+        if len(dirs) == 1:
+            config_dir = os.path.join(local_dir, dirs[0])
+        else:
+            raise ValueError(
+                'More than one directory ({}) besides "data" exists in "{}". '
+                "Cannot infer configuration. Please specify as a positional "
+                "argument".format(", ".join(dirs), local_dir)
+            )
+    else:
+        config_dir = os.path.join(local_dir, options.config_subdir)
+        if not os.path.isdir(config_dir):
+            raise ValueError('"{}" is not a directory'.format(config_dir))
+
+    dir_ = os.path.join(options.data_root, options.data_subdir)
+    ext = os.path.join(dir_, "ext")
+    os.makedirs(ext, exist_ok=True)
+
+    phone_map = get_phone_map()
+    phone_map = dict((k, v[2]) for (k, v) in phone_map.items())
+
+    for fn in (
+        "id2token.txt",
+        "spk2dialect",
+        "spk2gender",
+        "token2id.txt",
+        "utt2prompt",
+        "utt2spk",
+        "utt2type",
+        "utt2wc",
+    ):
+        copy_paths(os.path.join(config_dir, fn), os.path.join(ext, fn))
+
+    spk2info = dict()
+    for idx, fn in enumerate(("spk2part", "spk2gender", "spk2dialect")):
+        with open(os.path.join(config_dir, fn)) as file_:
+            for line in file_:
+                spk, tidbit = line.strip().split(" ", maxsplit=1)
+                spk2info.setdefault(spk, [None] * 3)[idx] = tidbit
+
+    utt2info = dict()
+    for idx, fn in enumerate(("utt2type", "utt2wc", "utt2spk")):
+        with open(os.path.join(config_dir, fn)) as file_:
+            for line in file_:
+                utt, tidbit = line.strip().split(" ", maxsplit=1)
+                utt2info.setdefault(utt, [None] * 3)[idx] = tidbit
+
+    train_types = test_types = ("SX", "SI")
+    if options.include_sa:
+        train_types += ("SA",)
+    train_uttids = set()
+    all_test_uttids = set()
+    for utt, (type_, wc, spk) in utt2info.items():
+        part = spk2info[spk][0]
+        if part == "train" and type_ in train_types:
+            train_uttids.add(utt)
+        elif part == "test" and type_ in test_types:
+            all_test_uttids.add(utt)
+    if len(all_test_uttids) != 168 * 8:
+        raise ValueError(
+            "Expected {} test utterance ids in complete test set, got {}".format(
+                168 * 8, len(all_test_uttids)
+            )
+        )
+
+    if options.complete_test:
+        test_uttids = all_test_uttids
+        dev_uttids = set()
+    else:
+        with open(os.path.join(RESOURCE_DIR, "core_spk.lst")) as lst:
+            test_spk = set()
+            for line in lst:
+                line = line.strip()
+                if line:
+                    test_spk.add(line)
+        test_uttids = set()
+        left_uttids = set()
+        for utt in all_test_uttids:
+            if utt2info[utt][2] in test_spk:
+                test_uttids.add(utt)
+            else:
+                left_uttids.add(utt)
+        if len(test_uttids) != 24 * 8:
+            raise ValueError(
+                "Expected {} core test utterance ids in complete test set, "
+                "got {}".format(24 * 8, len(test_uttids))
+            )
+        if options.large_dev:
+            dev_uttids = left_uttids
+        else:
+            with open(os.path.join(RESOURCE_DIR, "dev50_spk.lst")) as lst:
+                dev_spk = set()
+                for line in lst:
+                    line = line.strip()
+                    if line:
+                        dev_spk.add(line)
+            dev_uttids = set()
+            for utt in left_uttids:
+                if utt2info[utt][2] in dev_spk:
+                    dev_uttids.add(utt)
+            if len(dev_uttids) != 50 * 8:
+                raise ValueError(
+                    "Expected {} dev utterance ids in complete test set, got {}".format(
+                        50 * 8, len(dev_uttids)
+                    )
+                )
+
+    parts = (("train", train_uttids), ("test", test_uttids))
+    if dev_uttids:
+        parts += (("dev", dev_uttids),)
+
+    feat_optional_args = [
+        "--channel",
+        "-1",
+        "--num-workers",
+        str(torch.multiprocessing.cpu_count()),
+        "--force-as",
+        "sph",
+        "--preprocess",
+        options.preprocess,
+        "--postprocess",
+        options.postprocess,
+    ]
+    if options.seed is not None:
+        feat_optional_args.extend(["--seed", str(options.seed)])
+
+    ctm_src = os.path.join(config_dir, "all.ctm")
+    stm_src = os.path.join(config_dir, "all.stm")
+    utt2sph_src = os.path.join(config_dir, "utt2sph")
+    token2id_txt = os.path.join(config_dir, "token2id.txt")
+    for part, uttids in parts:
+        unmapped_ctm_dst = os.path.join(ext, part + ".ref_unmapped.ctm")
+        ctm_dst = os.path.join(ext, part + ".ref.ctm")
+        stm_dst = os.path.join(ext, part + ".ref.stm")
+        map_path = os.path.join(ext, part + ".scp")
+        part_dir = os.path.join(dir_, part)
+        feat_dir = os.path.join(part_dir, "feat")
+        ref_dir = os.path.join(part_dir, "ref")
+        wcinfo = dict(
+            (utt2info[utt][1], spk2info[utt2info[utt][2]][1:] + utt2info[utt][:1])
+            for utt in uttids
+        )
+
+        with open(utt2sph_src) as in_, open(map_path, "w") as out_:
+            for line in in_:
+                utt, sph = line.strip().split()
+                if utt in uttids:
+                    out_.write("{} {}\n".format(utt, sph))
+
+        write_mapped_ctm(
+            ctm_src, unmapped_ctm_dst, dict((k, k) for k in phone_map), wcinfo
+        )
+
+        write_mapped_ctm(ctm_src, ctm_dst, phone_map, wcinfo)
+
+        write_mapped_stm(stm_src, stm_dst, phone_map, wcinfo)
+
+        os.makedirs(feat_dir, exist_ok=True)
+
+        if options.feats_from is None:
+            args = [map_path, feat_dir] + feat_optional_args
+            if not options.raw:
+                args.insert(1, options.computer_json)
+            speech_cmd.signals_to_torch_feat_dir(args)
+        else:
+            feat_src = os.path.join(options.data_root, options.feats_from, part, "feat")
+            if not os.path.isdir(feat_src):
+                raise ValueError(
+                    'Specified --feats-from, but "{}" is not a directory'
+                    "".format(feat_src)
+                )
+            for filename in os.listdir(feat_src):
+                src = os.path.join(feat_src, filename)
+                dest = os.path.join(feat_dir, filename)
+                copy_paths(src, dest)
+
+        args = [ctm_dst, token2id_txt, ref_dir]
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
@@ -365,6 +601,7 @@ def build_parser():
     subparsers = parser.add_subparsers(title="commands", required=True, dest="command")
     build_preamble_parser(subparsers)
     build_init_phn_parser(subparsers)
+    build_torch_dir_parser(subparsers)
 
     return parser
 
@@ -419,6 +656,101 @@ def build_init_phn_parser(subparsers):
     )
 
 
+def build_torch_dir_parser(subparsers):
+    parser = subparsers.add_parser(
+        "torch_dir",
+        help="Write training, test, and extra data to subdirectories. The init_phn "
+        "command must have been called previously. If more than one init_phn call has "
+        "been made, the next positional argument must be specified.",
+    )
+    parser.add_argument(
+        "config_subdir",
+        nargs="?",
+        default=None,
+        help="The configuration in data/local/ which to build the directories "
+        "from. If init_phn was called only once, it can be inferred from the "
+        "contents fo data/local",
+    )
+    parser.add_argument(
+        "data_subdir",
+        nargs="?",
+        default=".",
+        help="What subdirectory in data/ to store training, test, and extra "
+        "data subdirectories to. Defaults to directly in data/",
+    )
+    parser.add_argument(
+        "--preprocess",
+        default="[]",
+        help="JSON list of configurations for "
+        "``pydrobert.speech.pre.PreProcessor`` objects. Audio will be "
+        "preprocessed in the same order as the list",
+    )
+    parser.add_argument(
+        "--postprocess",
+        default="[]",
+        help="JSON List of configurations for "
+        "``pydrobert.speech.post.PostProcessor`` objects. Features will be "
+        "postprocessed in the same order as the list",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="A random seed used for determinism. This affects operations "
+        "like dithering. If unset, a seed will be generated at the moment",
+    )
+    parser.add_argument(
+        "--include-sa",
+        action="store_true",
+        default=False,
+        help="If specified, SA utterances (dialect utterances) from speakers not in "
+        "the test set will be included in the training set. Please check the wiki "
+        "before using this flag.",
+    )
+
+    test_group = parser.add_mutually_exclusive_group()
+    test_group.add_argument(
+        "--complete-test",
+        action="store_true",
+        default=False,
+        help='Use the "complete" TIMIT test set rather than just the core. Specifying '
+        "this flag means no development set will be generated. Please check the wiki "
+        "before using this flag.",
+    )
+    test_group.add_argument(
+        "--large-dev",
+        action="store_true",
+        default=False,
+        help="Expand the dev set from 50 speakers to all speakers not in the core test "
+        "set nor the training set. Please check the wiki before using this flag.",
+    )
+
+    fbank_41_config = os.path.join(
+        os.path.dirname(__file__), "conf", "feats", "fbank_41.json"
+    )
+    feat_group = parser.add_mutually_exclusive_group()
+    feat_group.add_argument(
+        "--computer-json",
+        default=fbank_41_config,
+        help="Path to JSON configuration of a feature computer for "
+        "pydrobert-speech. Defaults to a 40-dimensional Mel-scaled triangular "
+        "overlapping filter bank + 1 energy coefficient every 10ms.",
+    )
+    feat_group.add_argument(
+        "--raw",
+        action="store_true",
+        default=False,
+        help="If specified, tensors of raw audio of shape (S, 1) will be "
+        "written instead of filter bank coefficients.",
+    )
+    feat_group.add_argument(
+        "--feats-from",
+        default=None,
+        help="If specified, rather than computing features, will copy the "
+        "feature folders from this subdirectory of data/",
+    )
+
+
 def main(args=None):
     """Prepare TIMIT data for end-to-end pytorch training"""
 
@@ -427,8 +759,10 @@ def main(args=None):
 
     if options.command == "preamble":
         preamble(options)
-    if options.command == "init_phn":
+    elif options.command == "init_phn":
         init_phn(options)
+    elif options.command == "torch_dir":
+        torch_dir(options)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ import os
 import sys
 import glob
 
+from shutil import copy as copy_paths
+
 import pydrobert.speech.util as speech_util
 
 __author__ = "Sean Robertson"
@@ -127,8 +129,8 @@ def timit_data_prep(timit, data_root):
                 phns = []
                 for line in file_:
                     start, end, phn = line.strip().split()
-                    start = max(float(start) / 1000, 0.0)
-                    end = min(float(end) / 1000, dur)
+                    start = max(float(start) / 16000, 0.0)
+                    end = min(float(end) / 16000, dur)
                     if stm_start is None:
                         stm_start = start
                     stm_end = end
@@ -183,13 +185,13 @@ def timit_data_prep(timit, data_root):
             file_.write("{} {} {:.3f} {:.3f} {}\n".format(*line))
 
     for name, dict_ in (
-        ("utt2type", utt2type),
-        ("spk2part", spk2part),
-        ("utt22sph", utt2sph),
         ("spk2dialect", spk2dialect),
         ("spk2gender", spk2gender),
-        ("utt2wc", utt2wc),
+        ("spk2part", spk2part),
         ("utt2prompt", utt2prompt),
+        ("utt2sph", utt2sph),
+        ("utt2type", utt2type),
+        ("utt2wc", utt2wc),
     ):
         with open(os.path.join(dir_, name), "w") as file_:
             for key in sorted(dict_):
@@ -198,6 +200,100 @@ def timit_data_prep(timit, data_root):
 
 def preamble(options):
     timit_data_prep(options.timit_root, options.data_root)
+
+
+def init_phn(options):
+
+    local_dir = os.path.join(options.data_root, "local")
+    data_dir = os.path.join(local_dir, "data")
+    if not os.path.isdir(data_dir):
+        raise ValueError("{} does not exist; call preamble first!".format(data_dir))
+
+    if options.config_subdir is None:
+        config_dir = os.path.join(local_dir, "phn{}".format(options.vocab_size))
+    else:
+        config_dir = os.path.join(local_dir, options.config_subdir)
+
+    phone_map = get_phone_map()
+    for key in set(phone_map):
+        if options.vocab_size == 61:
+            phone_map[key] = phone_map[key][0]
+        elif options.vocab_size == 48:
+            phone_map[key] = phone_map[key][1]
+        else:
+            phone_map[key] = phone_map[key][1]
+    phone_set = sorted(set(val for val in phone_map.values() if val is not None))
+
+    os.makedirs(config_dir, exist_ok=True)
+
+    for fn in (
+        "spk2dialect",
+        "spk2gender",
+        "spk2part",
+        "utt2prompt",
+        "utt2sph",
+        "utt2type",
+        "utt2wc",
+    ):
+        copy_paths(os.path.join(data_dir, fn), os.path.join(config_dir, fn))
+
+    with open(os.path.join(config_dir, "token2id.txt"), "w") as token2id, open(
+        os.path.join(config_dir, "id2token.txt"), "w"
+    ) as id2token:
+        for id_, token in enumerate(phone_set):
+            token2id.write("{} {}\n".format(token, id_))
+            id2token.write("{} {}\n".format(id_, token))
+
+    with open(os.path.join(data_dir, "all.stm")) as in_stm, open(
+        os.path.join(config_dir, "all.stm"), "w"
+    ) as out_stm:
+        for line in in_stm:
+            line = line.strip().split()
+            prefix, phns = line[:5], line[5:]
+            idx = 0
+            while idx < len(phns):
+                to = phone_map[phns[idx]]
+                if to is None:
+                    phns.pop(idx)
+                else:
+                    phns[idx] = to
+                    idx += 1
+            out_stm.write(" ".join(prefix + phns))
+            out_stm.write("\n")
+
+    with open(os.path.join(data_dir, "all.ctm")) as in_ctm, open(
+        os.path.join(config_dir, "all.ctm"), "w"
+    ) as out_ctm:
+        last_wc = last_start = last_dur = last_phn = None
+        for line in in_ctm:
+            wc, start, dur, phn = line.strip().rsplit(maxsplit=3)
+            start, dur = float(start), float(dur)
+            if wc != last_wc:
+                if last_phn is not None:
+                    out_ctm.write(
+                        "{} {:.3f} {:.3f} {}\n".format(
+                            last_wc, last_start, last_dur, last_phn
+                        )
+                    )
+                last_wc = wc
+                last_start = last_dur = 0.0
+                last_phn = None
+            to = phone_map[phn]
+            if to is not None:
+                if last_phn is not None:
+                    out_ctm.write(
+                        "{} {:.3f} {:.3f} {}\n".format(
+                            last_wc, last_start, last_dur, last_phn
+                        )
+                    )
+                last_wc, last_start, last_dur, last_phn = wc, start, dur, to
+            else:
+                # collapse this phone into the previous phone
+                last_dur += dur
+        if last_phn is not None:
+            out_ctm.write(
+                "{} {:.3f} {:.3f} {}\n".format(last_wc, last_start, last_dur, last_phn)
+            )
 
 
 def build_parser():
@@ -209,6 +305,7 @@ def build_parser():
     )
     subparsers = parser.add_subparsers(title="commands", required=True, dest="command")
     build_preamble_parser(subparsers)
+    build_init_phn_parser(subparsers)
 
     return parser
 
@@ -224,6 +321,45 @@ def build_preamble_parser(subparsers):
     )
 
 
+def build_init_phn_parser(subparsers):
+    parser = subparsers.add_parser(
+        "init_phn",
+        help="Perform setup common to all phone-based parsing. "
+        "Needs to be done only once for a specific vocabulary size",
+    )
+    parser.add_argument(
+        "--config-subdir",
+        default=None,
+        help="Name of sub directory in data/local/ under which to store setup "
+        "specific to this vocabulary size. Defaults to "
+        "``phn<vocab_size>``",
+    )
+    parser.add_argument(
+        "--vocab-size",
+        default=48,
+        type=int,
+        choices=[48, 61, 39],
+        help="The number of phones to train against. For smaller phone sets, a "
+        "surjective mapping is applied. WARNING: stored labels for test data will "
+        "have the same vocabulary size as the training data. You should NOT report "
+        "error rates against these. Please consult the repo wiki!",
+    )
+    parser.add_argument(
+        "--lm",
+        action="store_true",
+        default=False,
+        help="If set, will train a language model with Modified Kneser-Ney "
+        "smoothing on the training data labels",
+    )
+    parser.add_argument(
+        "--lm-max-order",
+        type=int,
+        default=2,
+        help="The maximum n-gram order to train the LM with when the --lm "
+        "flag is set",
+    )
+
+
 def main(args=None):
     """Prepare TIMIT data for end-to-end pytorch training"""
 
@@ -232,6 +368,8 @@ def main(args=None):
 
     if options.command == "preamble":
         preamble(options)
+    if options.command == "init_phn":
+        init_phn(options)
 
 
 if __name__ == "__main__":

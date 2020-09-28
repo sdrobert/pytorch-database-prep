@@ -33,24 +33,24 @@ __email__ = "sdrobert@cs.toronto.edu"
 __license__ = "Apache 2.0"
 __copyright__ = "Copyright 2019 Sean Robertson"
 __all__ = [
-    'BackoffNGramLM',
-    'write_arpa',
-    'ngram_counts_to_prob_list_mle',
-    'ngram_counts_to_prob_list_add_k',
-    'ngram_counts_to_prob_list_simple_good_turing',
-    'ngram_counts_to_prob_list_katz_backoff',
-    'ngram_counts_to_prob_list_absolute_discounting',
-    'ngram_counts_to_prob_list_kneser_ney',
-    'text_to_sents',
-    'sents_to_ngram_counts',
+    "BackoffNGramLM",
+    "write_arpa",
+    "ngram_counts_to_prob_list_mle",
+    "ngram_counts_to_prob_list_add_k",
+    "ngram_counts_to_prob_list_simple_good_turing",
+    "ngram_counts_to_prob_list_katz_backoff",
+    "ngram_counts_to_prob_list_absolute_discounting",
+    "ngram_counts_to_prob_list_kneser_ney",
+    "text_to_sents",
+    "sents_to_ngram_counts",
 ]
 
-locale.setlocale(locale.LC_ALL, 'C')
+locale.setlocale(locale.LC_ALL, "C")
 warnings.simplefilter("error", RuntimeWarning)
 
 
 class BackoffNGramLM(object):
-    '''A backoff NGram language model, stored as a trie
+    """A backoff NGram language model, stored as a trie
 
     This class is intended for two things: one, to prune backoff language
     models, and two, to calculate the perplexity of a language model on a
@@ -74,13 +74,13 @@ class BackoffNGramLM(object):
         for a token, the token is replaced with this symbol. Defaults to
         ``'<UNK>'`` if that symbol is in the vocabulary, otherwise
         ``'<unk>'``
-    '''
+    """
 
     def __init__(self, prob_list, sos=None, eos=None, unk=None):
         self.trie = self.TrieNode(0.0, 0.0)
         self.vocab = set()
         if not len(prob_list) or not len(prob_list[0]):
-            raise ValueError('prob_list must contain (all) unigrams')
+            raise ValueError("prob_list must contain (all) unigrams")
         for order, dict_ in enumerate(prob_list):
             is_first = not order
             is_last = order == len(prob_list) - 1
@@ -94,41 +94,43 @@ class BackoffNGramLM(object):
                     lprob, bo = value
                 self.trie.add_child(context, lprob, bo)
         if sos is None:
-            if '<S>' in self.vocab:
-                sos = '<S>'
+            if "<S>" in self.vocab:
+                sos = "<S>"
             else:
-                sos = '<s>'
+                sos = "<s>"
         if sos not in self.vocab:
             raise ValueError(
                 'start-of-sequence symbol "{}" does not have unigram '
-                'entry.'.format(sos))
+                "entry.".format(sos)
+            )
         self.sos = self.trie.sos = sos
         if eos is None:
-            if '</S>' in self.vocab:
-                eos = '</S>'
+            if "</S>" in self.vocab:
+                eos = "</S>"
             else:
-                eos = '</s>'
+                eos = "</s>"
         if eos not in self.vocab:
             raise ValueError(
                 'end-of-sequence symbol "{}" does not have unigram '
-                'entry.'.format(eos))
+                "entry.".format(eos)
+            )
         self.eos = self.trie.eos = eos
         if unk is None:
-            if '<UNK>' in self.vocab:
-                unk = '<UNK>'
+            if "<UNK>" in self.vocab:
+                unk = "<UNK>"
             else:
-                unk = '<unk>'
+                unk = "<unk>"
         if unk in self.vocab:
             self.unk = unk
         else:
             warnings.warn(
                 'out-of-vocabulary symbol "{}" does not have unigram count. '
-                'Out-of-vocabulary tokens will raise an error'.format(unk))
+                "Out-of-vocabulary tokens will raise an error".format(unk)
+            )
             self.unk = None
         assert self.trie.depth == len(prob_list)
 
     class TrieNode(object):
-
         def __init__(self, lprob, bo):
             self.lprob = lprob
             self.bo = bo
@@ -140,8 +142,7 @@ class BackoffNGramLM(object):
         def add_child(self, context, lprob, bo):
             assert len(context)
             next_, rest = context[0], context[1:]
-            child = self.children.setdefault(
-                next_, type(self)(None, 0.0))
+            child = self.children.setdefault(next_, type(self)(None, 0.0))
             if rest:
                 child.add_child(rest, lprob, bo)
             else:
@@ -151,7 +152,7 @@ class BackoffNGramLM(object):
 
         def conditional(self, context):
             assert context and self.depth
-            context = context[-self.depth:]
+            context = context[-self.depth :]
             cond = 0.0
             while True:
                 assert len(context)
@@ -175,8 +176,7 @@ class BackoffNGramLM(object):
 
         def log_prob(self, context, _srilm_hacks=False):
             joint = 0.0
-            for prefix in range(
-                    2 if context[0] == self.sos else 1, len(context) + 1):
+            for prefix in range(2 if context[0] == self.sos else 1, len(context) + 1):
                 joint += self.conditional(context[:prefix])
             if _srilm_hacks and context[0] == self.sos:
                 # this is a really silly thing that SRI does - it estimates
@@ -194,8 +194,7 @@ class BackoffNGramLM(object):
                 last, nodes = nodes, []
                 nodes_by_depth.append(nodes)
                 for ctx, parent in last:
-                    nodes.extend(
-                        (ctx + (k,), v) for (k, v) in parent.children.items())
+                    nodes.extend((ctx + (k,), v) for (k, v) in parent.children.items())
             return nodes_by_depth
 
         def _gather_nodes_at_depth(self, order):
@@ -203,8 +202,7 @@ class BackoffNGramLM(object):
             for _ in range(order):
                 last, nodes = nodes, []
                 for ctx, parent in last:
-                    nodes.extend(
-                        (ctx + (k,), v) for (k, v) in parent.children.items())
+                    nodes.extend((ctx + (k,), v) for (k, v) in parent.children.items())
             return nodes
 
         def _renormalize_backoffs_for_order(self, order):
@@ -218,22 +216,23 @@ class BackoffNGramLM(object):
                 denom = 0.0
                 for w, child in node.children.items():
                     assert child.lprob is not None
-                    num -= 10. ** child.lprob
-                    denom -= 10. ** self.conditional(h[1:] + (w,))
+                    num -= 10.0 ** child.lprob
+                    denom -= 10.0 ** self.conditional(h[1:] + (w,))
                 # these values may be ridiculously close to 1, but still valid.
-                if num < -1.:
+                if num < -1.0:
                     raise ValueError(
-                        'Too much probability mass {} on children of n-gram {}'
-                        ''.format(-num, h))
+                        "Too much probability mass {} on children of n-gram {}"
+                        "".format(-num, h)
+                    )
                 elif denom <= -1.0:
                     # We'll never back off. By convention, this is 0. (Pr(1.))
                     new_bo = 0.0
                 elif num == -1.0:
                     if node.bo > -10:
                         warnings.warn(
-                            'Found a non-negligible backoff {} for n-gram {} '
-                            'when no backoff mass should exist'.format(
-                                node.bo, h))
+                            "Found a non-negligible backoff {} for n-gram {} "
+                            "when no backoff mass should exist".format(node.bo, h)
+                        )
                     continue
                 else:
                     new_bo = (np.log1p(num) - np.log1p(denom)) / base_10
@@ -252,8 +251,7 @@ class BackoffNGramLM(object):
             for order in range(1, self.depth):  # final order has no backoffs
                 self._renormalize_backoffs_for_order(order)
 
-        def relative_entropy_pruning(
-                self, threshold, eps=1e-8, _srilm_hacks=False):
+        def relative_entropy_pruning(self, threshold, eps=1e-8, _srilm_hacks=False):
             nodes_by_depth = self._gather_nodes_by_depth(self.depth - 1)
             base_10 = np.log(10)
             while nodes_by_depth:
@@ -265,22 +263,24 @@ class BackoffNGramLM(object):
                     P_h = 10 ** self.log_prob(h, _srilm_hacks=_srilm_hacks)
                     for w, child in node.children.items():
                         assert child.lprob is not None
-                        num -= 10. ** child.lprob
+                        num -= 10.0 ** child.lprob
                         logP_w_given_hprime = self.conditional(h[1:] + (w,))
                         logP_w_given_hprimes.append(logP_w_given_hprime)
-                        denom -= 10. ** logP_w_given_hprime
+                        denom -= 10.0 ** logP_w_given_hprime
                     if num + 1 < eps or denom + 1 < eps:
                         warnings.warn(
-                            'Malformed backoff weight for context {}. Leaving '
-                            'as is'.format(h))
+                            "Malformed backoff weight for context {}. Leaving "
+                            "as is".format(h)
+                        )
                         continue
                     # alpha = (1 + num) / (1 + denom)
                     log_alpha = (np.log1p(num) - np.log1p(denom)) / base_10
                     if abs(log_alpha - node.bo) > 1e-2:
                         warnings.warn(
-                            'Calculated backoff ({}) differs from stored '
-                            'backoff ({}) for context {}'
-                            ''.format(log_alpha, node.bo, h))
+                            "Calculated backoff ({}) differs from stored "
+                            "backoff ({}) for context {}"
+                            "".format(log_alpha, node.bo, h)
+                        )
                     if _srilm_hacks:
                         # technically these should match when well-formed, but
                         # re-calculating alpha allows us to re-normalize an
@@ -302,16 +302,16 @@ class BackoffNGramLM(object):
                         log_delta_prob = logP_w_given_hprime + log_alphaprime
                         log_delta_prob -= logP_w_given_h
                         KL = -P_h * (
-                            P_w_given_h * log_delta_prob +
-                            (log_alphaprime - log_alpha) * (1. + num)
+                            P_w_given_h * log_delta_prob
+                            + (log_alphaprime - log_alpha) * (1.0 + num)
                         )
-                        delta_perplexity = 10. ** KL - 1
+                        delta_perplexity = 10.0 ** KL - 1
                         if delta_perplexity < threshold:
                             node.children.pop(w)
                     # we don't have to set backoff properly (we'll renormalize
                     # at end). We just have to signal whether we can be pruned
                     # to our parents (do *we* have children?)
-                    node.bo = float('nan') if len(node.children) else None
+                    node.bo = float("nan") if len(node.children) else None
             # recalculate depth in case it's changed
             self.depth = -1
             cur_nodes = (self,)
@@ -357,7 +357,7 @@ class BackoffNGramLM(object):
             to_prune = set(to_prune)
             # we'll prune by threshold in a second pass, so no need to worry
             # about parent-child stuff
-            extra_mass = -float('inf')
+            extra_mass = -float("inf")
             remainder = set()
             stack = [((w,), c) for w, c in self.children.items()]
             while stack:
@@ -376,7 +376,7 @@ class BackoffNGramLM(object):
             # to roughly zero and redistribute the collected mass across the
             # remainder
             if not remainder:
-                raise ValueError('No unigrams are left unpruned!')
+                raise ValueError("No unigrams are left unpruned!")
             extra_mass -= np.log10(len(remainder))
             for w in remainder:
                 child = self.children[w]
@@ -384,7 +384,7 @@ class BackoffNGramLM(object):
             self.prune_by_threshold(eps_lprob)
 
     def conditional(self, context):
-        r'''Return the log probability of the last word in the context
+        r"""Return the log probability of the last word in the context
 
         `context` is a non-empty sequence of tokens ``[w_1, w_2, ...,
         w_N]``. This method determines
@@ -403,18 +403,17 @@ class BackoffNGramLM(object):
         Returns
         -------
         cond : float or :obj:`None`
-        '''
+        """
         if self.unk is None:
             context = tuple(context)
         else:
-            context = tuple(
-                t if t in self.vocab else self.unk for t in context)
+            context = tuple(t if t in self.vocab else self.unk for t in context)
         if not len(context):
-            raise ValueError('context must have at least one token')
+            raise ValueError("context must have at least one token")
         return self.trie.conditional(context)
 
     def log_prob(self, context):
-        r'''Return the log probability of the whole context
+        r"""Return the log probability of the whole context
 
         `context` is a non-empty sequence of tokens ``[w_1, w_2, ..., w_N]``.
         This method determines
@@ -433,21 +432,20 @@ class BackoffNGramLM(object):
         Returns
         -------
         joint : float
-        '''
+        """
         if self.unk is None:
             context = tuple(context)
         else:
-            context = tuple(
-                t if t in self.vocab else self.unk for t in context)
+            context = tuple(t if t in self.vocab else self.unk for t in context)
         if not len(context):
-            raise ValueError('context must have at least one token')
+            raise ValueError("context must have at least one token")
         return self.trie.log_prob(context)
 
     def to_prob_list(self):
         return self.trie.to_prob_list()
 
     def renormalize_backoffs(self):
-        r'''Ensure backoffs induce a valid probability distribution
+        r"""Ensure backoffs induce a valid probability distribution
 
         Backoff models follow the same recursive formula for determining
         the probability of the next token:
@@ -463,11 +461,11 @@ class BackoffNGramLM(object):
 
         Calling this method renormalizes :math:`Backoff(\ldots)` such that,
         where possible, :math:`\sum_w Pr(w|\ldots) = 1`
-        '''
+        """
         return self.trie.renormalize_backoffs()
 
     def relative_entropy_pruning(self, threshold, _srilm_hacks=False):
-        r'''Prune n-grams with negligible impact on model perplexity
+        r"""Prune n-grams with negligible impact on model perplexity
 
         This method iterates through n-grams, highest order first, looking to
         absorb their explicit probabilities into a backoff. The language model
@@ -494,12 +492,11 @@ class BackoffNGramLM(object):
         ----------
         .. [stolcke2000] A. Stolcke "Entropy-based Pruning of Backoff Language
            Models," ArXiv ePrint, 2000
-        '''
-        return self.trie.relative_entropy_pruning(
-            threshold, _srilm_hacks=_srilm_hacks)
+        """
+        return self.trie.relative_entropy_pruning(threshold, _srilm_hacks=_srilm_hacks)
 
     def sequence_perplexity(self, sequence, include_delimiters=True):
-        r'''Return the perplexity of the sequence using this language model
+        r"""Return the perplexity of the sequence using this language model
 
         Given a `sequence` of tokens ``[w_1, w_2, ..., w_N]``, the perplexity
         of the sequence is
@@ -523,7 +520,7 @@ class BackoffNGramLM(object):
         it is added using `include_delimiters`), it will not be included in
         the count ``N`` because ``Pr(sos) = 1`` always. An end-of-sequence
         token is always included in ``N``.
-        '''
+        """
         sequence = list(sequence)
         if include_delimiters:
             if not len(sequence) or sequence[0] != self.sos:
@@ -532,14 +529,15 @@ class BackoffNGramLM(object):
                 sequence.append(self.eos)
         if not len(sequence):
             raise ValueError(
-                'sequence cannot be empty when include_delimiters is False')
+                "sequence cannot be empty when include_delimiters is False"
+            )
         N = len(sequence)
         if sequence[0] == self.sos:
             N -= 1
-        return 10. ** (-self.log_prob(sequence) / N)
+        return 10.0 ** (-self.log_prob(sequence) / N)
 
     def corpus_perplexity(self, corpus, include_delimiters=True):
-        r'''Calculate the perplexity of an entire corpus using this model
+        r"""Calculate the perplexity of an entire corpus using this model
 
         A `corpus` is a sequence of sequences ``[s_1, s_2, ..., s_S]``. Each
         sequence ``s_i`` is a sequence of tokens ``[w_1, w_2, ..., w_N_i]``.
@@ -564,7 +562,7 @@ class BackoffNGramLM(object):
             Whether to add start- and end-of-sequence delimiters to each
             sequence (if necessary). See :func:`sequence_complexity` for more
             info
-        '''
+        """
         joint = 0.0
         M = 0
         for sequence in corpus:
@@ -575,18 +573,17 @@ class BackoffNGramLM(object):
                 if sequence[-1] != self.eos:
                     sequence.append(self.eos)
             if not len(sequence):
-                warnings.warn(
-                    'skipping empty sequence (include_delimiters is False)')
+                warnings.warn("skipping empty sequence (include_delimiters is False)")
                 continue
             N = len(sequence)
             if sequence[0] == self.sos:
                 N -= 1
             M += N
             joint += self.log_prob(sequence)
-        return 10. ** (-joint / M)
+        return 10.0 ** (-joint / M)
 
     def prune_by_threshold(self, lprob):
-        '''Prune n-grams with a log-probability leq to a threshold
+        """Prune n-grams with a log-probability leq to a threshold
 
         This method prunes n-grams with a conditional log-probability less than
         or equal to some fixed threshold. The reclaimed probability mass is
@@ -602,11 +599,11 @@ class BackoffNGramLM(object):
         lprob : float
             The base-10 log probability of conditionals, below or at which the
             n-gram will be pruned.
-        '''
+        """
         self.trie.prune_by_threshold(lprob)
 
     def prune_by_name(self, to_prune, eps_lprob=-99.999):
-        '''Prune n-grams by name
+        """Prune n-grams by name
 
         This method prunes n-grams of arbitrary order by name. For n-grams of
         order > 1, the reclaimed probability mass is allotted to the
@@ -630,12 +627,12 @@ class BackoffNGramLM(object):
             A set of all n-grams of all orders to prune.
         eps_lprob : float, optional
             A base 10 log probability considered negligible
-        '''
+        """
         self.trie.prune_by_name(to_prune, eps_lprob)
 
 
 def write_arpa(prob_list, out=sys.stdout):
-    '''Convert an lists of n-gram probabilities to arpa format
+    """Convert an lists of n-gram probabilities to arpa format
 
     The inverse operation of :func:`pydrobert.torch.util.parse_arpa_lm`
 
@@ -644,36 +641,34 @@ def write_arpa(prob_list, out=sys.stdout):
     prob_list : list of dict
     out : file or str, optional
         Path or file object to output to
-    '''
+    """
     if isinstance(out, str):
-        with open(out, 'w') as f:
+        with open(out, "w") as f:
             return write_arpa(prob_list, f)
     entries_by_order = []
     for idx, dict_ in enumerate(prob_list):
-        entries = sorted(
-            (k, v) if idx else ((k,), v)
-            for (k, v) in dict_.items()
-        )
+        entries = sorted((k, v) if idx else ((k,), v) for (k, v) in dict_.items())
         entries_by_order.append(entries)
-    out.write('\\data\\\n')
+    out.write("\\data\\\n")
     for idx in range(len(entries_by_order)):
-        out.write('ngram {}={}\n'.format(idx + 1, len(entries_by_order[idx])))
-    out.write('\n')
+        out.write("ngram {}={}\n".format(idx + 1, len(entries_by_order[idx])))
+    out.write("\n")
     for idx, entries in enumerate(entries_by_order):
-        out.write('\\{}-grams:\n'.format(idx + 1))
+        out.write("\\{}-grams:\n".format(idx + 1))
         if idx == len(entries_by_order) - 1:
             for entry in entries:
-                out.write('{} {}\n'.format(' '.join(entry[0]), entry[1]))
+                out.write("{} {}\n".format(" ".join(entry[0]), entry[1]))
         else:
             for entry in entries:
-                out.write('{} {} {}\n'.format(
-                    entry[1][0], ' '.join(entry[0]), entry[1][1]))
-        out.write('\n')
-    out.write('\\end\\\n')
+                out.write(
+                    "{} {} {}\n".format(entry[1][0], " ".join(entry[0]), entry[1][1])
+                )
+        out.write("\n")
+    out.write("\\end\\\n")
 
 
 def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
-    r'''Determine probabilities based on MLE of observed n-gram counts
+    r"""Determine probabilities based on MLE of observed n-gram counts
 
     For a given n-gram :math:`p, w`, where :math:`p` is a prefix, :math:`w` is
     the next word, the maximum likelihood estimate of the last token given the
@@ -738,9 +733,8 @@ def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
     To be compatible with back-off models, MLE estimates assign a negligible
     backoff probability (`eps_lprob`) to n-grams where necessary. This means
     the probability mass might not exactly sum to one.
-    '''
-    return ngram_counts_to_prob_list_add_k(
-        ngram_counts, eps_lprob=-99.99, k=0.)
+    """
+    return ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.99, k=0.0)
 
 
 def _get_cond_mle(order, counts, vocab, k):
@@ -758,8 +752,8 @@ def _get_cond_mle(order, counts, vocab, k):
     )
 
 
-def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
-    r'''MLE probabilities with constant discount factor added to counts
+def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=0.5):
+    r"""MLE probabilities with constant discount factor added to counts
 
     Similar to :func:`ngram_counts_to_prob_list_mle`, but with a constant
     added to each count to smooth out probabilities:
@@ -823,10 +817,10 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
     >>> #                   = 1 / (9 + 8)
     >>> prob_list[1][('a', '<unk>')]  # (log10(1 / 17), eps_lprob)
     (-1.2304489213782739, -99.999)
-    '''
+    """
     max_order = len(ngram_counts) - 1
     if not len(ngram_counts):
-        raise ValueError('At least unigram counts must exist')
+        raise ValueError("At least unigram counts must exist")
     vocab = set(ngram_counts[0])
     prob_list = []
     for order, counts in enumerate(ngram_counts):
@@ -835,8 +829,7 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=.5):
             for v in vocab:
                 probs.setdefault((v,), eps_lprob)
         if order != max_order:
-            probs = dict(
-                (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
+            probs = dict((ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
         prob_list.append(probs)
     prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
     return prob_list
@@ -853,7 +846,7 @@ def _log10sumexp(*args):
         return np.inf
     x = x[np.isfinite(x)]
     if not len(x):
-        return 0.
+        return 0.0
     max_ = np.max(x)
     return np.log10((10 ** (x - max_)).sum()) + max_
 
@@ -871,7 +864,7 @@ def _simple_good_turing_counts(counts, eps_lprob):
     nonzeros = np.where(N_r != 0)[0]
 
     # find S(r) = a r^b
-    Z_rp1 = 2. * N_r[1:-1]
+    Z_rp1 = 2.0 * N_r[1:-1]
     j = r[1:-1]
     diff = nonzeros - j[..., None]
     i = j - np.where(-diff < 1, max_r, -diff).min(1)
@@ -911,9 +904,9 @@ def _simple_good_turing_counts(counts, eps_lprob):
             elif log_x < log_y:
                 log_abs_diff = log_x + np.log1p(-np.exp(log_y - log_x))
             else:
-                log_abs_diff = -float('inf')
-            log_z = C + log_rp1 - log_Nr + .5 * log_Nrp1
-            log_z += .5 * np.log1p(N_r[r_ + 1] / N_r[r_]) / ln_10
+                log_abs_diff = -float("inf")
+            log_z = C + log_rp1 - log_Nr + 0.5 * log_Nrp1
+            log_z += 0.5 * np.log1p(N_r[r_ + 1] / N_r[r_]) / ln_10
             if log_abs_diff <= log_z:
                 switched = True
             else:
@@ -928,8 +921,7 @@ def _simple_good_turing_counts(counts, eps_lprob):
     # where N' = \sum_i>0 N_r[i] r_star[i]
     # we convert back to counts so that our conditional MLEs are accurate
     max_log_r_star = np.max(log_r_star[1:][nonzeros[:-1] - 1])
-    log_Np = np.log10(
-        (N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
+    log_Np = np.log10((N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
     log_Np += max_log_r_star
     log_p_0 = log_r_star[0] - log_N
     log_r_star[1:] += -log_Np + np.log10(1 - 10 ** log_p_0) + log_N
@@ -937,9 +929,8 @@ def _simple_good_turing_counts(counts, eps_lprob):
     return log_r_star
 
 
-def ngram_counts_to_prob_list_simple_good_turing(
-        ngram_counts, eps_lprob=-99.999):
-    r'''Determine probabilities based on n-gram counts using simple good-turing
+def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999):
+    r"""Determine probabilities based on n-gram counts using simple good-turing
 
     Simple Good-Turing smoothing discounts counts of n-grams according to the
     following scheme:
@@ -1038,9 +1029,9 @@ def ngram_counts_to_prob_list_simple_good_turing(
     .. [gale1995] W. A. Gale and G. Sampson, "Good‐Turing frequency estimation
        without tears," Journal of Quantitative Linguistics, vol. 2, no. 3, pp.
        217-237, Jan. 1995.
-    '''
+    """
     if len(ngram_counts) < 1:
-        raise ValueError('At least unigram counts must exist')
+        raise ValueError("At least unigram counts must exist")
     max_order = len(ngram_counts) - 1
     vocab = set(ngram_counts[0])
     prob_list = []
@@ -1052,7 +1043,7 @@ def ngram_counts_to_prob_list_simple_good_turing(
         for ngram in product(vocab, repeat=order + 1):
             r = counts.get(ngram if order else ngram[0], 0)
             if r:
-                c = 10. ** log_r_stars[r]
+                c = 10.0 ** log_r_stars[r]
                 n_counts[ngram] = c
                 d_counts[ngram[:-1]] = d_counts.get(ngram[:-1], 0) + c
             else:
@@ -1069,12 +1060,11 @@ def ngram_counts_to_prob_list_simple_good_turing(
             )
         else:
             warnings.warn(
-                'No {}-grams were missing. Using MLE instead'
-                ''.format(order + 1))
+                "No {}-grams were missing. Using MLE instead" "".format(order + 1)
+            )
             probs = _get_cond_mle(order, counts, vocab, 0)
         if order != max_order:
-            probs = dict(
-                (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
+            probs = dict((ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
         prob_list.append(probs)
     prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
     return prob_list
@@ -1088,19 +1078,20 @@ def _get_katz_discounted_counts(counts, k):
     r = np.arange(max_r + 2)
     N = (N_r * r).sum()
     log_N = np.log10(N)
-    with np.errstate(divide='ignore', invalid='ignore'):
+    with np.errstate(divide="ignore", invalid="ignore"):
         log_Nr = np.log10(N_r)
         log_rp1 = np.log10(r + 1)
         log_r_star = log_rp1[:-1] + log_Nr[1:] - log_Nr[:-1]
     if k + 1 < len(N_r):
         log_d_rp1 = np.zeros(max_r, dtype=float)
-        log_num_minu = log_r_star[1:k + 1] - log_rp1[:k]
+        log_num_minu = log_r_star[1 : k + 1] - log_rp1[:k]
         log_subtra = np.log10(k + 1) + log_Nr[k + 1] - log_Nr[1]
         if log_subtra >= 0:
-            raise ValueError('Your corpus is too small for this')
+            raise ValueError("Your corpus is too small for this")
         # np.log10((10 ** (x - max_)).sum()) + max_
         log_num = log_num_minu + np.log1p(
-            -10 ** (log_subtra - log_num_minu)) / np.log(10)
+            -(10 ** (log_subtra - log_num_minu))
+        ) / np.log(10)
         log_denom = np.log1p(-(10 ** log_subtra)) / np.log(10)
         log_d_rp1[:k] = log_num - log_denom
     else:
@@ -1113,8 +1104,9 @@ def _get_katz_discounted_counts(counts, k):
 
 
 def ngram_counts_to_prob_list_katz_backoff(
-        ngram_counts, k=7, eps_lprob=-99.999, _cmu_hacks=False):
-    r'''Determine probabilities based on Katz's backoff algorithm
+    ngram_counts, k=7, eps_lprob=-99.999, _cmu_hacks=False
+):
+    r"""Determine probabilities based on Katz's backoff algorithm
 
     Kat'z backoff algorithm determines the conditional probability of the last
     token in n-gram :math:`w = (w_1, w_2, ..., w_n)` as
@@ -1189,20 +1181,19 @@ def ngram_counts_to_prob_list_katz_backoff(
        the language model component of a speech recognizer," IEEE Transactions
        on Acoustics, Speech, and Signal Processing, vol. 35, no. 3, pp.
        400-401, Mar. 1987.
-    '''
+    """
     if len(ngram_counts) < 1:
-        raise ValueError('At least unigram counts must exist')
+        raise ValueError("At least unigram counts must exist")
     if k < 1:
-        raise ValueError('k too low')
+        raise ValueError("k too low")
     prob_list = []
     max_order = len(ngram_counts) - 1
     probs = _get_cond_mle(0, ngram_counts[0], set(ngram_counts[0]), 0)
     if 0 != max_order:
-        probs = dict((ngram, (prob, 0.)) for (ngram, prob) in probs.items())
+        probs = dict((ngram, (prob, 0.0)) for (ngram, prob) in probs.items())
     prob_list.append(probs)
     log_r_stars = [
-        _get_katz_discounted_counts(counts, k)
-        for counts in ngram_counts[1:]
+        _get_katz_discounted_counts(counts, k) for counts in ngram_counts[1:]
     ]
     if _cmu_hacks:
         # A note on CMU compatibility. First, the standard non-ML estimate of
@@ -1220,11 +1211,9 @@ def ngram_counts_to_prob_list_katz_backoff(
             for ngram, count in ngram_counts[order].items():
                 prefix2children.setdefault(ngram[:-1], []).append(ngram)
             for prefix, children in prefix2children.items():
-                if (
-                        len(children) == 1 and
-                        ngram_counts[order][children[0]] > k):
+                if len(children) == 1 and ngram_counts[order][children[0]] > k:
                     for oo in range(order):
-                        pp = prefix[:oo + 1]
+                        pp = prefix[: oo + 1]
                         if not oo:
                             pp = pp[0]
                         ngram_counts[oo][pp] += 1
@@ -1246,13 +1235,14 @@ def ngram_counts_to_prob_list_katz_backoff(
             log_r_star = log_r_stars[order - 1][r]
             probs[ngram] = log_r_star
             lg_num_subtras[ngram[:-1]] = _log10sumexp(
-                lg_num_subtras.get(ngram[:-1], -np.inf), log_r_star)
+                lg_num_subtras.get(ngram[:-1], -np.inf), log_r_star
+            )
             lg_den_subtras[ngram[:-1]] = _log10sumexp(
-                lg_den_subtras.get(ngram[:-1], -np.inf),
-                prob_list[-1][ngram[1:]][0]
+                lg_den_subtras.get(ngram[:-1], -np.inf), prob_list[-1][ngram[1:]][0]
             )
             lg_pref_counts[ngram[:-1]] = _log10sumexp(
-                lg_pref_counts.get(ngram[:-1], -np.inf), np.log10(r))
+                lg_pref_counts.get(ngram[:-1], -np.inf), np.log10(r)
+            )
         for ngram in probs:
             prefix = ngram[:-1]
             if _cmu_hacks:
@@ -1271,19 +1261,20 @@ def ngram_counts_to_prob_list_katz_backoff(
                     lg_norm = np.log10(ngram_counts[order - 1][prefix])
             else:
                 lg_norm = lg_pref_counts[prefix]
-            num_subtra = 10. ** (lg_num_subtra - lg_norm)
-            den_subtra = 10. ** lg_den_subtra
-            if np.isclose(den_subtra, 1.):  # 1 - den_subtra = 0
+            num_subtra = 10.0 ** (lg_num_subtra - lg_norm)
+            den_subtra = 10.0 ** lg_den_subtra
+            if np.isclose(den_subtra, 1.0):  # 1 - den_subtra = 0
                 # If the denominator is zero, it means nothing we're backing
                 # off to has a nonzero probability. It doesn't really matter
                 # what we put here, but let's not warn about it (we've already
                 # warned about the prefix)
-                log_alpha = 0.
-            elif np.isclose(num_subtra, 1.):
+                log_alpha = 0.0
+            elif np.isclose(num_subtra, 1.0):
                 warnings.warn(
-                    'Cannot back off to prefix {}. Will assign negligible '
-                    'probability. If this is an issue, try increasing k'
-                    ''.format(prefix))
+                    "Cannot back off to prefix {}. Will assign negligible "
+                    "probability. If this is an issue, try increasing k"
+                    "".format(prefix)
+                )
                 # If the numerator is zero and the denominator is nonzero,
                 # this means we did not discount any probability mass for
                 # unseen terms. The only way to make a proper distribution is
@@ -1295,8 +1286,7 @@ def ngram_counts_to_prob_list_katz_backoff(
             log_prob, bad_backoff = prob_list[-1][prefix]
             prob_list[-1][prefix] = (log_prob, log_alpha)
         if order != max_order:
-            probs = dict(
-                (ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
+            probs = dict((ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
         prob_list.append(probs)
     prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
     return prob_list
@@ -1306,24 +1296,24 @@ def _optimal_deltas(counts, y):
     N_r = Counter(counts.values())
     if not all(N_r[r] for r in range(1, y + 2)):
         raise ValueError(
-            'Your dataset is too small to use the default discount '
-            '(or maybe you removed the hapax before estimating probs?)')
+            "Your dataset is too small to use the default discount "
+            "(or maybe you removed the hapax before estimating probs?)"
+        )
     Y = N_r[1] / (N_r[1] + 2 * N_r[2])
     deltas = [r - (r + 1) * Y * N_r[r + 1] / N_r[r] for r in range(1, y + 1)]
-    if any(d <= 0. for d in deltas):
+    if any(d <= 0.0 for d in deltas):
         raise ValueError(
-            'Your dataset is too small to use the default discount '
-            '(or maybe you removed the hapax before estimating probs?)'
+            "Your dataset is too small to use the default discount "
+            "(or maybe you removed the hapax before estimating probs?)"
         )
     return deltas
 
 
 def _absolute_discounting(ngram_counts, deltas, to_prune):
     V = len(set(ngram_counts[0]) - to_prune)
-    prob_list = [{tuple(): (-np.log10(V), 0.)}]
+    prob_list = [{tuple(): (-np.log10(V), 0.0)}]
     max_order = len(ngram_counts) - 1
-    for order, counts, delta in zip(
-            range(len(ngram_counts)), ngram_counts, deltas):
+    for order, counts, delta in zip(range(len(ngram_counts)), ngram_counts, deltas):
         delta = np.array(delta, dtype=float)
         n_counts = dict()
         d_counts = dict()
@@ -1338,7 +1328,7 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
                 continue
             bin_ = min(count - 1, len(delta) - 1)
             d = delta[bin_]
-            assert count - d >= 0.
+            assert count - d >= 0.0
             prefix = ngram[:-1]
             d_counts[prefix] = d_counts.get(prefix, 0) + count
             prefix_bins = pr2bin.setdefault(prefix, np.zeros(len(delta) + 1))
@@ -1350,7 +1340,7 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
         for prefix, prefix_bins in pr2bin.items():
             if (order == 1 and prefix[0] in to_prune) or prefix in to_prune:
                 continue
-            with np.errstate(divide='ignore'):
+            with np.errstate(divide="ignore"):
                 prefix_bins = np.log10(prefix_bins)
                 prefix_bins[:-1] += np.log10(delta)
             gamma = _log10sumexp(prefix_bins)
@@ -1363,7 +1353,7 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
             if n_count:
                 lprob = np.log10(n_count) - np.log10(d_counts[prefix])
             else:
-                lprob = -float('inf')
+                lprob = -float("inf")
             lower_order = prob_list[-1][prefix][1]  # gamma(prefix)
             lower_order += prob_list[-1][ngram[1:]][0]  # Pr(w|prefix[1:])
             lprob = _log10sumexp(lprob, lower_order)
@@ -1374,7 +1364,7 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
                 # Pr(w|prefix) = P(w|prefix[1:]). We can achieve this by
                 # setting gamma(prefix) = 1 and treating the higher-order
                 # contribution to Pr(w|prefix) as zero
-                lprob = (lprob, 0.)
+                lprob = (lprob, 0.0)
             probs[ngram] = lprob
         prob_list.append(probs)
     del prob_list[0]  # zero-th order
@@ -1383,8 +1373,9 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
 
 
 def ngram_counts_to_prob_list_absolute_discounting(
-        ngram_counts, delta=None, to_prune=set()):
-    r'''Determine probabilities from n-gram counts using absolute discounting
+    ngram_counts, delta=None, to_prune=set()
+):
+    r"""Determine probabilities from n-gram counts using absolute discounting
 
     Absolute discounting (based on the formulation in [chen1999]_) interpolates
     between higher-order and lower-order n-grams as
@@ -1496,25 +1487,26 @@ def ngram_counts_to_prob_list_absolute_discounting(
     .. [chen1999] S. F. Chen and J. Goodman, "An empirical study of smoothing
        techniques for language modeling," Computer Speech & Language, vol. 13,
        no. 4, pp. 359-394, Oct. 1999, doi: 10.1006/csla.1999.0128.
-    '''
+    """
     if len(ngram_counts) < 1:
-        raise ValueError('At least unigram counts must exist')
+        raise ValueError("At least unigram counts must exist")
     if not isinstance(delta, Iterable):
         delta = (delta,) * len(ngram_counts)
     if len(delta) != len(ngram_counts):
         raise ValueError(
-            'Expected {} deltas, got {}'.format(len(ngram_counts), len(delta)))
+            "Expected {} deltas, got {}".format(len(ngram_counts), len(delta))
+        )
     delta = tuple(
-        _optimal_deltas(counts, 1)
-        if d is None else [d]
+        _optimal_deltas(counts, 1) if d is None else [d]
         for (d, counts) in zip(delta, ngram_counts)
     )
     return _absolute_discounting(ngram_counts, delta, to_prune)
 
 
 def ngram_counts_to_prob_list_kneser_ney(
-        ngram_counts, delta=None, sos=None, to_prune=set()):
-    r'''Determine probabilities from counts using Kneser-Ney(-like) estimates
+    ngram_counts, delta=None, sos=None, to_prune=set()
+):
+    r"""Determine probabilities from counts using Kneser-Ney(-like) estimates
 
     Chen and Goodman's implemented Kneser-Ney smoothing [chen1999]_ is the same
     as absolute discounting, but with lower-order n-gram counts ((n-1)-grams,
@@ -1588,7 +1580,7 @@ def ngram_counts_to_prob_list_kneser_ney(
         This differs from simply removing those n-grams from `ngram_counts` in
         some key ways. First, nonzero counts of pruned n-grams are used when
         calculating adjusted counts of the remaining terms. Second, pruned
-        counts can still be used to calculate default `delta` values. Second,
+        counts can still be used to calculate default `delta` values. Third,
         as per [chen1999]_, pruned counts are still summed in the denominator,
         :math:`\sum_w' C(w_1, \ldots, w_{n-1}, w')`, which then make their
         way into the numerator of :math:`gamma(w_1, \ldots, w_{n-1})`.
@@ -1674,16 +1666,17 @@ def ngram_counts_to_prob_list_kneser_ney(
        "Scalable modified Kneser-Ney language model estimation,” in Proceedings
        of the 51st Annual Meeting of the Association for Computational
        Linguistics, Sofia, Bulgaria, 2013, vol. 2, pp. 690-696.
-    '''
+    """
     if len(ngram_counts) < 1:
-        raise ValueError('At least unigram counts must exist')
+        raise ValueError("At least unigram counts must exist")
     if not isinstance(delta, Iterable):
         delta = (delta,) * len(ngram_counts)
     if len(delta) != len(ngram_counts):
         raise ValueError(
-            'Expected {} deltas, got {}'.format(len(ngram_counts), len(delta)))
+            "Expected {} deltas, got {}".format(len(ngram_counts), len(delta))
+        )
     if sos is None:
-        sos = '<S>' if '<S>' in ngram_counts[0] else '<s>'
+        sos = "<S>" if "<S>" in ngram_counts[0] else "<s>"
     new_ngram_counts = [ngram_counts[-1]]
     for order in range(len(ngram_counts) - 2, -1, -1):
         if order:
@@ -1696,7 +1689,8 @@ def ngram_counts_to_prob_list_kneser_ney(
             suffix = ngram[1:] if order else ngram[1]
             new_counts[suffix] = new_counts.get(suffix, 0) + 1
         new_counts.update(
-            (k, v) for (k, v) in ngram_counts[order].items()
+            (k, v)
+            for (k, v) in ngram_counts[order].items()
             if ((order and k[0] == sos) or (not order and k == sos))
         )
         new_ngram_counts.insert(0, new_counts)
@@ -1722,9 +1716,13 @@ def ngram_counts_to_prob_list_kneser_ney(
 
 
 def text_to_sents(
-        text, sent_end_expr=r'[.?!]+', word_delim_expr=r'\W+',
-        to_case='upper', trim_empty_sents=False):
-    '''Convert a block of text to a list of sentences, each a list of words
+    text,
+    sent_end_expr=r"[.?!]+",
+    word_delim_expr=r"\W+",
+    to_case="upper",
+    trim_empty_sents=False,
+):
+    """Convert a block of text to a list of sentences, each a list of words
 
     Parameters
     ----------
@@ -1750,7 +1748,7 @@ def text_to_sents(
     sents : list of tuples
         A list of sentences from `text`. Each sentence/element is actually a
         tuple of the words in the sentences
-    '''
+    """
     if not isinstance(sent_end_expr, re.Pattern):
         sent_end_expr = re.compile(sent_end_expr)
     if not isinstance(word_delim_expr, re.Pattern):
@@ -1760,9 +1758,9 @@ def text_to_sents(
     while i < len(sents):
         sent = word_delim_expr.split(sents[i])
         sent = tuple(w for w in sent if w)
-        if to_case == 'lower':
+        if to_case == "lower":
             sent = tuple(w.lower() for w in sent)
-        elif to_case == 'upper':
+        elif to_case == "upper":
             sent = tuple(w.upper() for w in sent)
         if trim_empty_sents and not sent:
             del sents[i]
@@ -1775,8 +1773,9 @@ def text_to_sents(
 
 
 def sents_to_ngram_counts(
-        sents, max_order, sos='<S>', eos='</S>', count_unigram_sos=False):
-    '''Count n-grams in sentence lists up to a maximum order
+    sents, max_order, sos="<S>", eos="</S>", count_unigram_sos=False
+):
+    """Count n-grams in sentence lists up to a maximum order
 
     Parameters
     ----------
@@ -1814,21 +1813,23 @@ def sents_to_ngram_counts(
     the next word to be the start-of-sequence token, rather, it always exists
     prior to the first word being predicted. This exception can be disabled
     by setting `count_unigram_sos` to :obj:`True`
-    '''
+    """
     if max_order < 1:
-        raise ValueError('max_order ({}) must be >= 1'.format(max_order))
+        raise ValueError("max_order ({}) must be >= 1".format(max_order))
     ngram_counts = [Counter() for _ in range(max_order)]
     ngram_counts[0].setdefault(sos, 0)
     for sent in sents:
         if {sos, eos} & set(sent):
             raise ValueError(
-                'start-of-sequence ({}) or end-of-sequence ({}) found in '
-                'sentence "{}"'.format(sos, eos, ' '.join(sent)))
+                "start-of-sequence ({}) or end-of-sequence ({}) found in "
+                'sentence "{}"'.format(sos, eos, " ".join(sent))
+            )
         sent = (sos,) + tuple(sent) + (eos,)
         for order, counter in zip(range(1, max_order + 1), ngram_counts):
             if order == 1:
                 counter.update(sent if count_unigram_sos else sent[1:])
             else:
                 counter.update(
-                    sent[s:s + order] for s in range(len(sent) - order + 1))
+                    sent[s : s + order] for s in range(len(sent) - order + 1)
+                )
     return ngram_counts

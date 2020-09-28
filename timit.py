@@ -23,13 +23,15 @@
 # limitations under the License.
 
 import argparse
+import glob
+import gzip
 import locale
 import os
 import sys
-import glob
 
 from shutil import copy as copy_paths
 
+import ngram_lm
 import pydrobert.speech.util as speech_util
 
 __author__ = "Sean Robertson"
@@ -190,6 +192,7 @@ def timit_data_prep(timit, data_root):
         ("spk2part", spk2part),
         ("utt2prompt", utt2prompt),
         ("utt2sph", utt2sph),
+        ("utt2spk", utt2spk),
         ("utt2type", utt2type),
         ("utt2wc", utt2wc),
     ):
@@ -223,6 +226,7 @@ def init_phn(options):
         else:
             phone_map[key] = phone_map[key][1]
     phone_set = sorted(set(val for val in phone_map.values() if val is not None))
+    phone_set += ["</s>", "<s>"]
 
     os.makedirs(config_dir, exist_ok=True)
 
@@ -232,6 +236,7 @@ def init_phn(options):
         "spk2part",
         "utt2prompt",
         "utt2sph",
+        "utt2spk",
         "utt2type",
         "utt2wc",
     ):
@@ -295,6 +300,60 @@ def init_phn(options):
                 "{} {:.3f} {:.3f} {}\n".format(last_wc, last_start, last_dur, last_phn)
             )
 
+    if options.lm:
+        train_phn_lm(config_dir, options.lm_max_order)
+
+
+def train_phn_lm(config_dir, max_order):
+
+    spk2utts = dict()
+    with open(os.path.join(config_dir, "utt2spk")) as utt2spk:
+        for line in utt2spk:
+            utt, spk = line.strip().split()
+            spk2utts.setdefault(spk, []).append(utt)
+
+    train_utt = set()
+    with open(os.path.join(config_dir, "spk2part")) as utt2part:
+        for line in utt2part:
+            spk, part = line.strip().split()
+            if part != "train":
+                continue
+            for utt in spk2utts[spk]:
+                if not utt.endswith("sa1") and not utt.endswith("sa2"):
+                    train_utt.add(utt)
+
+    text = ""
+    with open(os.path.join(config_dir, "all.stm")) as stm:
+        for line in stm:
+            utt, _, _, _, _, phns = line.strip().split(maxsplit=5)
+            if utt not in train_utt:
+                continue
+            text += phns + "\n"
+
+    sents = ngram_lm.text_to_sents(
+        text, sent_end_expr="\n", word_delim_expr=" ", to_case=None
+    )
+    del text
+
+    # the number of times a given prompt occurred was controlled by the corpus
+    # creators, so there's no reason a sentence that occurred three times is more
+    # valuable than one that occurred only once. Drop duplicate entries
+    sents = set(sents)
+
+    ngram_counts = ngram_lm.sents_to_ngram_counts(
+        sents, max_order, sos="<s>", eos="</s>"
+    )
+    # 4-fold cross-validation said K&M with delta=0.5 lead to the best perplexity for
+    # both 2-grams and 3-grams. Too small for Katz. Perplexity for add k was higher
+    # for a variety of k.
+    # I suspect the primary benefit of the LM is to forbid invalid phone sequences.
+    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=0.5)
+    lm = ngram_lm.BackoffNGramLM(prob_list, sos="<s>", eos="</s>", unk="<s>")
+    lm.prune_by_name({"<s>"})
+    prob_list = lm.to_prob_list()
+    with gzip.open(os.path.join(config_dir, "lm.arpa.gz"), "wt") as file_:
+        ngram_lm.write_arpa(prob_list, file_)
+
 
 def build_parser():
     parser = argparse.ArgumentParser(description=main.__doc__)
@@ -354,7 +413,7 @@ def build_init_phn_parser(subparsers):
     parser.add_argument(
         "--lm-max-order",
         type=int,
-        default=2,
+        default=3,
         help="The maximum n-gram order to train the LM with when the --lm "
         "flag is set",
     )

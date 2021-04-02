@@ -1,6 +1,6 @@
 #! /usr/bin/env python
 
-# Copyright 2020 Sean Robertson
+# Copyright 2021 Sean Robertson
 #
 # Adapted from kaldi/egs/timit/s5/local/timit_data_prep.sh (and associated resource
 # files conf/{{dev,test}_spk.lst,phones.60-48-39.map}:
@@ -22,6 +22,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Command-line interface to prepare the TIMIT speech corpus for end-to-end ASR"""
+
 import argparse
 import glob
 import gzip
@@ -35,7 +37,8 @@ from shutil import copy as copy_paths
 import ngram_lm
 import pydrobert.speech.util as speech_util
 import pydrobert.speech.command_line as speech_cmd
-import pydrobert.torch.command_line as torch_cmd
+
+# import pydrobert.torch.command_line as torch_cmd
 
 __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"

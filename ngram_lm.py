@@ -1,4 +1,4 @@
-# Copyright 2019 Sean Robertson
+# Copyright 2021 Sean Robertson
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,11 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import warnings
 import sys
@@ -31,7 +26,7 @@ import numpy as np
 __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"
 __license__ = "Apache 2.0"
-__copyright__ = "Copyright 2019 Sean Robertson"
+__copyright__ = "Copyright 2021 Sean Robertson"
 __all__ = [
     "BackoffNGramLM",
     "write_arpa",
@@ -52,9 +47,9 @@ warnings.simplefilter("error", RuntimeWarning)
 class BackoffNGramLM(object):
     """A backoff NGram language model, stored as a trie
 
-    This class is intended for two things: one, to prune backoff language
-    models, and two, to calculate the perplexity of a language model on a
-    corpus. It is very inefficient.
+    This class is intended for two things: one, to prune backoff language models, and
+    two, to calculate the perplexity of a language model on a corpus. It is very
+    inefficient.
 
     Parameters
     ----------
@@ -283,8 +278,8 @@ class BackoffNGramLM(object):
                         )
                     if _srilm_hacks:
                         # technically these should match when well-formed, but
-                        # re-calculating alpha allows us to re-normalize an
-                        # ill-formed language model
+                        # re-calculating alpha allows us to re-normalize an ill-formed
+                        # language model
                         log_alpha = node.bo
                     for idx, w in enumerate(tuple(node.children)):
                         child = node.children[w]
@@ -308,9 +303,9 @@ class BackoffNGramLM(object):
                         delta_perplexity = 10.0 ** KL - 1
                         if delta_perplexity < threshold:
                             node.children.pop(w)
-                    # we don't have to set backoff properly (we'll renormalize
-                    # at end). We just have to signal whether we can be pruned
-                    # to our parents (do *we* have children?)
+                    # we don't have to set backoff properly (we'll renormalize at end).
+                    # We just have to signal whether we can be pruned to our parents (do
+                    # *we* have children?)
                     node.bo = float("nan") if len(node.children) else None
             # recalculate depth in case it's changed
             self.depth = -1
@@ -355,8 +350,8 @@ class BackoffNGramLM(object):
 
         def prune_by_name(self, to_prune, eps_lprob):
             to_prune = set(to_prune)
-            # we'll prune by threshold in a second pass, so no need to worry
-            # about parent-child stuff
+            # we'll prune by threshold in a second pass, so no need to worry about
+            # parent-child stuff
             extra_mass = -float("inf")
             remainder = set()
             stack = [((w,), c) for w, c in self.children.items()]
@@ -372,9 +367,8 @@ class BackoffNGramLM(object):
                         remainder.add(ctx)
                 elif ctx in to_prune:
                     node.lprob = eps_lprob
-            # we never *actually* remove unigrams - we set their probablities
-            # to roughly zero and redistribute the collected mass across the
-            # remainder
+            # we never *actually* remove unigrams - we set their probablities to roughly
+            # zero and redistribute the collected mass across the remainder
             if not remainder:
                 raise ValueError("No unigrams are left unpruned!")
             extra_mass -= np.log10(len(remainder))
@@ -386,15 +380,15 @@ class BackoffNGramLM(object):
     def conditional(self, context):
         r"""Return the log probability of the last word in the context
 
-        `context` is a non-empty sequence of tokens ``[w_1, w_2, ...,
-        w_N]``. This method determines
+        `context` is a non-empty sequence of tokens ``[w_1, w_2, ..., w_N]``. This
+        method determines
 
         .. math::
 
             \log Pr(w_N | w_{N-1}, w_{N-2}, ... w_{N-C})
 
-        Where ``C`` is this model's maximum n-gram size. If an exact entry
-        cannot be found, the model backs off to a shorter context.
+        Where ``C`` is this model's maximum n-gram size. If an exact entry cannot be
+        found, the model backs off to a shorter context.
 
         Parameters
         ----------
@@ -415,15 +409,14 @@ class BackoffNGramLM(object):
     def log_prob(self, context):
         r"""Return the log probability of the whole context
 
-        `context` is a non-empty sequence of tokens ``[w_1, w_2, ..., w_N]``.
-        This method determines
+        `context` is a non-empty sequence of tokens ``[w_1, w_2, ..., w_N]``. This
+        method determines
 
         .. math::
 
             \log Pr(w_1, w_2, ..., w_{N})
 
-        Which it decomposes according to the markov assumption
-        (see :func:`conditional`)
+        Which it decomposes according to the markov assumption (see :func:`conditional`)
 
         Parameters
         ----------
@@ -447,8 +440,8 @@ class BackoffNGramLM(object):
     def renormalize_backoffs(self):
         r"""Ensure backoffs induce a valid probability distribution
 
-        Backoff models follow the same recursive formula for determining
-        the probability of the next token:
+        Backoff models follow the same recursive formula for determining the probability
+        of the next token:
 
         .. math::
 
@@ -467,22 +460,21 @@ class BackoffNGramLM(object):
     def relative_entropy_pruning(self, threshold, _srilm_hacks=False):
         r"""Prune n-grams with negligible impact on model perplexity
 
-        This method iterates through n-grams, highest order first, looking to
-        absorb their explicit probabilities into a backoff. The language model
-        defines a distribution over sequences, :math:`s \sim p(\cdot|\theta)`.
-        Assuming this is the true distribution of sequences, we can define
-        an approximation of :math:`p(\cdot)`, :math:`q(\cdot)`, as one that
-        replaces one explicit n-gram probability with a backoff.
-        [stolcke2000]_ defines the relative change in model perplexity as:
+        This method iterates through n-grams, highest order first, looking to absorb
+        their explicit probabilities into a backoff. The language model defines a
+        distribution over sequences, :math:`s \sim p(\cdot|\theta)`. Assuming this is
+        the true distribution of sequences, we can define an approximation of
+        :math:`p(\cdot)`, :math:`q(\cdot)`, as one that replaces one explicit n-gram
+        probability with a backoff. [stolcke2000]_ defines the relative change in model
+        perplexity as:
 
         .. math::
 
             \Delta PP = e^{D_{KL}(p\|q)} - 1
 
-        Where :math:`D_{KL}` is the KL-divergence between the two
-        distributions. This method will prune an n-gram whenever the change
-        in model perplexity is negligible (below `threshold`). More details
-        can be found in [stolcke2000]_.
+        Where :math:`D_{KL}` is the KL-divergence between the two distributions. This
+        method will prune an n-gram whenever the change in model perplexity is
+        negligible (below `threshold`). More details can be found in [stolcke2000]_.
 
         Parameters
         ----------
@@ -490,16 +482,16 @@ class BackoffNGramLM(object):
 
         References
         ----------
-        .. [stolcke2000] A. Stolcke "Entropy-based Pruning of Backoff Language
-           Models," ArXiv ePrint, 2000
+        .. [stolcke2000] A. Stolcke "Entropy-based pruning of Backoff Language Models,"
+           ArXiv ePrint, 2000
         """
         return self.trie.relative_entropy_pruning(threshold, _srilm_hacks=_srilm_hacks)
 
     def sequence_perplexity(self, sequence, include_delimiters=True):
         r"""Return the perplexity of the sequence using this language model
 
-        Given a `sequence` of tokens ``[w_1, w_2, ..., w_N]``, the perplexity
-        of the sequence is
+        Given a `sequence` of tokens ``[w_1, w_2, ..., w_N]``, the perplexity of the
+        sequence is
 
         .. math::
 
@@ -583,40 +575,39 @@ class BackoffNGramLM(object):
         return 10.0 ** (-joint / M)
 
     def prune_by_threshold(self, lprob):
-        """Prune n-grams with a log-probability leq to a threshold
+        """Prune n-grams with a log-probability <= a threshold
 
-        This method prunes n-grams with a conditional log-probability less than
-        or equal to some fixed threshold. The reclaimed probability mass is
-        sent to the (n-1)-gram's backoff.
+        This method prunes n-grams with a conditional log-probability less than or equal
+        to some fixed threshold. The reclaimed probability mass is sent to the
+        (n-1)-gram's backoff.
 
-        This method never prunes unigrams. Further, it cannot prune n-grams
-        which are a prefix of some higher-order n-gram that has a conditional
-        probability above that threshold, since the higher-order n-gram may
-        have need of the lower-order's backoff.
+        This method never prunes unigrams. Further, it cannot prune n-grams which are a
+        prefix of some higher-order n-gram that has a conditional probability above that
+        threshold, since the higher-order n-gram may have need of the lower-order's
+        backoff.
 
         Parameters
         ----------
         lprob : float
-            The base-10 log probability of conditionals, below or at which the
-            n-gram will be pruned.
+            The base-10 log probability of conditionals, below or at which the n-gram
+            will be pruned.
         """
         self.trie.prune_by_threshold(lprob)
 
     def prune_by_name(self, to_prune, eps_lprob=-99.999):
         """Prune n-grams by name
 
-        This method prunes n-grams of arbitrary order by name. For n-grams of
-        order > 1, the reclaimed probability mass is allotted to the
-        appropriate backoff. For unigrams, the reclaimed probability mass is
-        distributed uniformly across the remaining unigrams.
+        This method prunes n-grams of arbitrary order by name. For n-grams of order > 1,
+        the reclaimed probability mass is allotted to the appropriate backoff. For
+        unigrams, the reclaimed probability mass is distributed uniformly across the
+        remaining unigrams.
 
-        This method prunes nodes by setting their probabilities a small
-        log-probability (`eps_lprob`), then calling :func:`prune_by_threshold`
-        with that small log-probability. This ensures we do not remove the
-        backoff of higher-order n-grams (instead setting the probability of
-        "pruned" nodes very low), and gets rid of lower-order nodes that were
-        previously "pruned" but had to exist for their backoff when their
-        backoff is now no longer needed.
+        This method prunes nodes by setting their probabilities a small log-probability
+        (`eps_lprob`), then calling :func:`prune_by_threshold` with that small
+        log-probability. This ensures we do not remove the backoff of higher-order
+        n-grams (instead setting the probability of "pruned" nodes very low), and gets
+        rid of lower-order nodes that were previously "pruned" but had to exist for
+        their backoff when their backoff is now no longer needed.
 
         Unigrams are never fully pruned - their log probabilities are set to
         `eps_lprob`.
@@ -670,26 +661,24 @@ def write_arpa(prob_list, out=sys.stdout):
 def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
     r"""Determine probabilities based on MLE of observed n-gram counts
 
-    For a given n-gram :math:`p, w`, where :math:`p` is a prefix, :math:`w` is
-    the next word, the maximum likelihood estimate of the last token given the
-    prefix is:
+    For a given n-gram :math:`p, w`, where :math:`p` is a prefix, :math:`w` is the next
+    word, the maximum likelihood estimate of the last token given the prefix is:
 
     .. math::
 
         Pr(w | p) = C(p, w) / (\sum_w' C(p, w'))
 
-    Where :math:`C(x)` Is the count of the sequence :math:`x`. Many counts will
-    be zero, especially for large n-grams or rare words, making this a not
-    terribly generalizable solution.
+    Where :math:`C(x)` Is the count of the sequence :math:`x`. Many counts will be zero,
+    especially for large n-grams or rare words, making this a not terribly generalizable
+    solution.
 
     Parameters
     ----------
     ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to
-        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
-        Keys are tuples of tokens (n-grams) of the appropriate length, with
-        the exception of unigrams, whose keys are the tokens themselves.
-        Values are the counts of those n-grams in the corpus
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
+        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+        (n-grams) of the appropriate length, with the exception of unigrams, whose keys
+        are the tokens themselves. Values are the counts of those n-grams in the corpus.
     eps_lprob : float, optional
         A very negative value substituted as "negligible probability"
 
@@ -730,11 +719,11 @@ def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
 
     Notes
     -----
-    To be compatible with back-off models, MLE estimates assign a negligible
-    backoff probability (`eps_lprob`) to n-grams where necessary. This means
-    the probability mass might not exactly sum to one.
+    To be compatible with back-off models, MLE estimates assign a negligible backoff
+    probability (`eps_lprob`) to n-grams where necessary. This means the probability
+    mass might not exactly sum to one.
     """
-    return ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.99, k=0.0)
+    return ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=eps_lprob, k=0.0)
 
 
 def _get_cond_mle(order, counts, vocab, k):
@@ -755,27 +744,25 @@ def _get_cond_mle(order, counts, vocab, k):
 def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=0.5):
     r"""MLE probabilities with constant discount factor added to counts
 
-    Similar to :func:`ngram_counts_to_prob_list_mle`, but with a constant
-    added to each count to smooth out probabilities:
+    Similar to :func:`ngram_counts_to_prob_list_mle`, but with a constant added to each
+    count to smooth out probabilities:
 
     .. math::
 
         Pr(w|p) = (C(p,w) + k)/(\sum_w' C(p, w') + k|V|)
 
-    Where :math:`p` is a prefix, :math:`w` is the next word, and
-    :math:`V` is the vocabulary set. The initial vocabulary set is
-    determined from the unique unigrams :math:`V = U`. The bigram vocabulary
-    set is the Cartesian product :math:`V = U \times U`, trigrams
-    :math:`V = U \times U \times U`, and so on.
+    Where :math:`p` is a prefix, :math:`w` is the next word, and :math:`V` is the
+    vocabulary set. The initial vocabulary set is determined from the unique unigrams
+    :math:`V = U`. The bigram vocabulary set is the Cartesian product :math:`V = U
+    \times U`, trigrams :math:`V = U \times U \times U`, and so on.
 
     Parameters
     ----------
     ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to
-        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
-        Keys are tuples of tokens (n-grams) of the appropriate length, with
-        the exception of unigrams, whose keys are the tokens themselves.
-        Values are the counts of those n-grams in the corpus
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
+        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+        (n-grams) of the appropriate length, with the exception of unigrams, whose keys
+        are the tokens themselves. Values are the counts of those n-grams in the corpus.
     eps_lprob : float, optional
         A very negative value substituted as "negligible probability"
 
@@ -932,40 +919,38 @@ def _simple_good_turing_counts(counts, eps_lprob):
 def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999):
     r"""Determine probabilities based on n-gram counts using simple good-turing
 
-    Simple Good-Turing smoothing discounts counts of n-grams according to the
-    following scheme:
+    Simple Good-Turing smoothing discounts counts of n-grams according to the following
+    scheme:
 
     .. math::
 
         r^* = (r + 1) N_{r + 1} / N_r
 
-    Where :math:`r` is the original count of the n-gram in question,
-    :math:`r^*` the discounted, and :math:`N_r` is the count of the number of
-    times any n-gram had a count `r`.
+    Where :math:`r` is the original count of the n-gram in question, :math:`r^*` the
+    discounted, and :math:`N_r` is the count of the number of times any n-gram had a
+    count `r`.
 
-    When :math:`N_r` becomes sparse, it is replaced with a log-linear
-    regression of :math:`N_r` values, :math:`S(r) = a + b \log r`.
-    :math:`r^*` for :math:`r > 0` are renormalized so that
-    :math:`\sum_r N_r r^* = \sum_r N_r r`.
+    When :math:`N_r` becomes sparse, it is replaced with a log-linear regression of
+    :math:`N_r` values, :math:`S(r) = a + b \log r`. :math:`r^*` for :math:`r > 0` are
+    renormalized so that :math:`\sum_r N_r r^* = \sum_r N_r r`.
 
-    We assume a closed vocabulary and that, for any order n-gram, :math:`N_0`
-    is the size of the set of n-grams with frequency zero. This method differs
-    from traditional Good-Turing, which assumes one unseen "event" (i.e.
-    n-gram) per level. See below notes for more details.
+    We assume a closed vocabulary and that, for any order n-gram, :math:`N_0` is the
+    size of the set of n-grams with frequency zero. This method differs from traditional
+    Good-Turing, which assumes one unseen "event" (i.e. n-gram) per level. See below
+    notes for more details.
 
-    If, for a given order of n-gram, none of the terms have frequency
-    zero, this function will warn and use MLEs.
+    If, for a given order of n-gram, none of the terms have frequency zero, this
+    function will warn and use MLEs.
 
     Parameters
     ----------
     ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to
-        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
-        Keys are tuples of tokens (n-grams) of the appropriate length, with
-        the exception of unigrams, whose keys are the tokens themselves.
-        Values are the counts of those n-grams in the corpus
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
+        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+        (n-grams) of the appropriate length, with the exception of unigrams, whose keys
+        are the tokens themselves. Values are the counts of those n-grams in the corpus.
     eps_lprob : float, optional
-        A very negative value substituted as "negligible probability"
+        A very negative value substituted as "negligible probability."
 
     Returns
     -------
@@ -975,27 +960,27 @@ def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999
 
     Notes
     -----
-    The traditional definition of Good-Turing is somewhat vague about how to
-    assign probability mass among unseen events. By setting
-    :math:`r^* = N_1 / N` for :math:`r = 0`, it's implicitly stating that
-    :math:`N_0 = 1`, that is, there's only one possible unseen event. This is
-    consistent with introducing a special token, e.g. ``"<unk>"``, that does
-    not occur in the corpus. It also collapses unseen n-grams into one event.
+    The traditional definition of Good-Turing is somewhat vague about how to assign
+    probability mass among unseen events. By setting :math:`r^* = N_1 / N` for :math:`r
+    = 0`, it's implicitly stating that :math:`N_0 = 1`, that is, there's only one
+    possible unseen event. This is consistent with introducing a special token, e.g.
+    ``"<unk>"``, that does not occur in the corpus. It also collapses unseen n-grams
+    into one event.
 
-    We cannot bootstrap the backoff penalty to be the probability of the
-    unseen term because the backoff will be combined with a lower-order
-    estimate, and Good-Turing uses a fixed unseen probability.
+    We cannot bootstrap the backoff penalty to be the probability of the unseen term
+    because the backoff will be combined with a lower-order estimate, and Good-Turing
+    uses a fixed unseen probability.
 
-    As our solution, we assume the vocabulary is closed. Any term that appears
-    zero times is added to :math:`N_0`. If all terms appear, then
-    :math:`N_0 = 0` and we revert to the MLE. While you can simulate the
-    traditional Good-Turing at the unigram-level by introducing ``"<unk>"``
-    with count 0, this will not hold for higher-order n-grams.
+    As our solution, we assume the vocabulary is closed. Any term that appears zero
+    times is added to :math:`N_0`. If all terms appear, then :math:`N_0 = 0` and we
+    revert to the MLE. While you can simulate the traditional Good-Turing at the
+    unigram-level by introducing ``"<unk>"`` with count 0, this will not hold for
+    higher-order n-grams.
 
     Warnings
     --------
-    This function manually defines all n-grams of the target order given a
-    vocabulary. This means that higher-order n-grams will be very large.
+    This function manually defines all n-grams of the target order given a vocabulary.
+    This means that higher-order n-grams will be very large.
 
     Examples
     --------
@@ -1026,9 +1011,9 @@ def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999
 
     References
     ----------
-    .. [gale1995] W. A. Gale and G. Sampson, "Good‐Turing frequency estimation
-       without tears," Journal of Quantitative Linguistics, vol. 2, no. 3, pp.
-       217-237, Jan. 1995.
+    .. [gale1995] W. A. Gale and G. Sampson, "Good‐Turing frequency estimation without
+       tears," Journal of Quantitative Linguistics, vol. 2, no. 3, pp. 217-237, Jan.
+       1995.
     """
     if len(ngram_counts) < 1:
         raise ValueError("At least unigram counts must exist")
@@ -1108,8 +1093,8 @@ def ngram_counts_to_prob_list_katz_backoff(
 ):
     r"""Determine probabilities based on Katz's backoff algorithm
 
-    Kat'z backoff algorithm determines the conditional probability of the last
-    token in n-gram :math:`w = (w_1, w_2, ..., w_n)` as
+    Kat'z backoff algorithm determines the conditional probability of the last token in
+    n-gram :math:`w = (w_1, w_2, ..., w_n)` as
 
     .. math::
 
@@ -1119,39 +1104,37 @@ def ngram_counts_to_prob_list_katz_backoff(
                                                                     \text{else}
         \end{cases}
 
-    Where :math:`Pr_{MLE}` is the maximum likelihood estimate (based on
-    frequencies), :math:`d_w` is some discount factor (based on Good-Turing
-    for low-frequency n-grams), and :math:`\alpha` is an allowance of the
-    leftover probability mass from discounting.
+    Where :math:`Pr_{MLE}` is the maximum likelihood estimate (based on frequencies),
+    :math:`d_w` is some discount factor (based on Good-Turing for low-frequency
+    n-grams), and :math:`\alpha` is an allowance of the leftover probability mass from
+    discounting.
 
     Parameters
     ----------
     ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to
-        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
-        Keys are tuples of tokens (n-grams) of the appropriate length, with
-        the exception of unigrams, whose keys are the tokens themselves.
-        Values are the counts of those n-grams in the corpus
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
+        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+        (n-grams) of the appropriate length, with the exception of unigrams, whose keys
+        are the tokens themselves. Values are the counts of those n-grams in the corpus.
     k : int, optional
-        `k` is a threshold such that, if :math:`C(w) > k`, no discounting will
-        be applied to the term. That is, the probability mass assigned for
-        backoff will be entirely from n-grams s.t. :math:`C(w) \leq k`
+        `k` is a threshold such that, if :math:`C(w) > k`, no discounting will be
+        applied to the term. That is, the probability mass assigned for backoff will be
+        entirely from n-grams s.t. :math:`C(w) \leq k`.
     eps_lprob : float, optional
-        A very negative value substituted as "negligible probability"
+        A very negative value substituted as "negligible probability."
 
     Warnings
     --------
-    If the counts of the extensions of a prefix are all above k, no discounting
-    will be applied to those counts, meaning no probability mass can be
-    assigned to unseen events.
+    If the counts of the extensions of a prefix are all above `k`, no discounting will
+    be applied to those counts, meaning no probability mass can be assigned to unseen
+    events.
 
-    For example, in the Brown corpus, "Hong" is always followed by "Kong". The
-    bigram "Hong Kong" occurs something like 10 times, so it's not discounted.
-    Thus :math:`P_{BO}(Kong|Hong) = 1` :math:`P_{BO}(not Kong|Hong) = 0`.
+    For example, in the Brown corpus, "Hong" is always followed by "Kong". The bigram
+    "Hong Kong" occurs something like 10 times, so it's not discounted. Thus
+    :math:`P_{BO}(Kong|Hong) = 1` :math:`P_{BO}(not Kong|Hong) = 0`.
 
-    A :obj:`UserWarning` will be issued whenever ths happens. If this bothers
-    you, you could try increasing `k` or, better yet, abandon Katz Backoff
-    altogether.
+    A :class:`UserWarning` will be issued whenever ths happens. If this bothers you, you
+    could try increasing `k` or, better yet, abandon Katz Backoff altogether.
 
     Returns
     -------
@@ -1177,10 +1160,9 @@ def ngram_counts_to_prob_list_katz_backoff(
 
     References
     ----------
-    .. [katz1987] S. Katz, "Estimation of probabilities from sparse data for
-       the language model component of a speech recognizer," IEEE Transactions
-       on Acoustics, Speech, and Signal Processing, vol. 35, no. 3, pp.
-       400-401, Mar. 1987.
+    .. [katz1987] S. Katz, "Estimation of probabilities from sparse data for the
+       language model component of a speech recognizer," IEEE Transactions on Acoustics,
+       Speech, and Signal Processing, vol. 35, no. 3, pp. 400-401, Mar. 1987.
     """
     if len(ngram_counts) < 1:
         raise ValueError("At least unigram counts must exist")
@@ -1377,8 +1359,8 @@ def ngram_counts_to_prob_list_absolute_discounting(
 ):
     r"""Determine probabilities from n-gram counts using absolute discounting
 
-    Absolute discounting (based on the formulation in [chen1999]_) interpolates
-    between higher-order and lower-order n-grams as
+    Absolute discounting (based on the formulation in [chen1999]_) interpolates between
+    higher-order and lower-order n-grams as
 
     .. math::
 
@@ -1388,9 +1370,9 @@ def ngram_counts_to_prob_list_absolute_discounting(
             - \gamma(w_1, \ldots, w_{n-1})
                Pr_{abs}(w_n|w_{n-1}, \ldots, w_2)
 
-    Where :math:`\gamma` are chosen so :math:`Pr_{abs}(\cdot)` sum to one.
-    For the base case, we pretend there's such a thing as a zeroth-order
-    n-gram, and :math:`Pr_{abs}(\emptyset) = 1 / \left\|V\right\|`.
+    Where :math:`\gamma` are chosen so :math:`Pr_{abs}(\cdot)` sum to one. For the base
+    case, we pretend there's such a thing as a zeroth-order n-gram, and
+    :math:`Pr_{abs}(\emptyset) = 1 / \left\|V\right\|`.
 
     Letting
 
@@ -1400,35 +1382,32 @@ def ngram_counts_to_prob_list_absolute_discounting(
                 (w'_1, \ldots, w'_n): C(w'_1, \ldots, w'_n) = c
             \right\}\right|
 
-    :math:`\delta` is often chosen to be :math:`\delta = N_1 / (N_1 + 2N_2)`
-    for a given order n-gram. We can use different :math:`\delta` for different
-    orders of the recursion.
+    :math:`\delta` is often chosen to be :math:`\delta = N_1 / (N_1 + 2N_2)` for a given
+    order n-gram. We can use different :math:`\delta` for different orders of the
+    recursion.
 
     Parameters
     ----------
     ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to
-        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
-        Keys are tuples of tokens (n-grams) of the appropriate length, with
-        the exception of unigrams, whose keys are the tokens themselves.
-        Values are the counts of those n-grams in the corpus
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
+        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+        (n-grams) of the appropriate length, with the exception of unigrams, whose keys
+        are the tokens themselves. Values are the counts of those n-grams in the corpus.
     delta : float or tuple or :obj:`None`, optional
-        The absolute discount to apply to non-zero values. `delta` can take
-        one of three forms: a :class:`float` to be used identically for all
-        orders of the recursion; :obj:`None` specifies that the above formula
-        for calculating `delta` should be used separately for each order of
-        the recursion; or a tuple of length `ngram_counts`, where
-        each element is either a :class:`float` or :obj:`None`, specifying
-        either a fixed value or the default value for every order of the
-        recursion (except the zeroth-order), unigrams first
+        The absolute discount to apply to non-zero values. `delta` can take one of three
+        forms: a :class:`float` to be used identically for all orders of the recursion;
+        :obj:`None` specifies that the above formula for calculating `delta` should be
+        used separately for each order of the recursion; or a tuple of length
+        ``len(ngram_counts)``, where each element is either a :class:`float` or
+        :obj:`None`, specifying either a fixed value or the default value for every
+        order of the recursion (except the zeroth-order), unigrams first.
     to_prune : set, optional
-        A set of n-grams that will not be explicitly set in the return value.
-        This differs from simply removing those n-grams from `ngram_counts` in
-        some key ways. First, pruned counts can still be used to calculate
-        default `delta` values. Second, as per [chen1999]_, pruned counts are
-        still summed in the denominator,
-        :math:`\sum_w' C(w_1, \ldots, w_{n-1}, w')`, which then make their
-        way into the numerator of :math:`gamma(w_1, \ldots, w_{n-1})`.
+        A set of n-grams that will not be explicitly set in the return value. This
+        differs from simply removing those n-grams from `ngram_counts` in some key ways.
+        First, pruned counts can still be used to calculate default `delta` values.
+        Second, as per [chen1999]_, pruned counts are still summed in the denominator,
+        :math:`\sum_w' C(w_1, \ldots, w_{n-1}, w')`, which then make their way into the
+        numerator of :math:`gamma(w_1, \ldots, w_{n-1})`.
 
     Returns
     -------
@@ -1508,9 +1487,9 @@ def ngram_counts_to_prob_list_kneser_ney(
 ):
     r"""Determine probabilities from counts using Kneser-Ney(-like) estimates
 
-    Chen and Goodman's implemented Kneser-Ney smoothing [chen1999]_ is the same
-    as absolute discounting, but with lower-order n-gram counts ((n-1)-grams,
-    (n-2)-grams, etc.) replaced with adjusted counts:
+    Chen and Goodman's implemented Kneser-Ney smoothing [chen1999]_ is the same as
+    absolute discounting, but with lower-order n-gram counts ((n-1)-grams, (n-2)-grams,
+    etc.) replaced with adjusted counts:
 
     .. math::
 
@@ -1519,12 +1498,12 @@ def ngram_counts_to_prob_list_kneser_ney(
             \left|\left\{v : C(v, w_1, \ldots, w_k) > 0\right\}\right| & else\\
         \end{cases}
 
-    The adjusted count is the number of unique prefixes the n-gram can occur
-    with. We do not modify n-grams starting with the start-of-sequence `sos`
-    token (as per [heafield2013]_) as they cannot have a preceding context.
+    The adjusted count is the number of unique prefixes the n-gram can occur with. We do
+    not modify n-grams starting with the start-of-sequence `sos` token (as per
+    [heafield2013]_) as they cannot have a preceding context.
 
-    By default, modified Kneser-Ney is performed, which uses different
-    absolute discounts for different adjusted counts:
+    By default, modified Kneser-Ney is performed, which uses different absolute
+    discounts for different adjusted counts:
 
     .. math::
 
@@ -1533,13 +1512,12 @@ def ngram_counts_to_prob_list_kneser_ney(
                  {\sum_{w'} C'(w_1, \ldots, w_{n-1}, w')}
             + \gamma(w_1, \ldots, w_{n-1}) Pr_{KN}(w_n|w_1, \ldots, w_{n-1})
 
-    :math:`\gamma` are chosen so that :math:`Pr_{KN}(\cdot)` sum to one.
-    As a base case, :math:`Pr_{KN}(\emptyset) = 1 / \left\|V\right\|`.
+    :math:`\gamma` are chosen so that :math:`Pr_{KN}(\cdot)` sum to one. As a base case,
+    :math:`Pr_{KN}(\emptyset) = 1 / \left\|V\right\|`.
 
     Letting :math:`N_c` be defined as in
-    :func:`ngram_counts_to_prob_list_absolute_discounting`, and
-    :math:`y = N_1 / (N_1 + 2 N_2)`, the default value for
-    :math:`\delta(\cdot)` is
+    :func:`ngram_counts_to_prob_list_absolute_discounting`, and :math:`y = N_1 / (N_1 +
+    2 N_2)`, the default value for :math:`\delta(\cdot)` is
 
     .. math::
 
@@ -1550,40 +1528,37 @@ def ngram_counts_to_prob_list_kneser_ney(
     Parameters
     ----------
     ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to
-        unigram counts in a corpus, ``ngram_counts[1]`` to bi-grams, etc.
-        Keys are tuples of tokens (n-grams) of the appropriate length, with
-        the exception of unigrams, whose keys are the tokens themselves.
-        Values are the counts of those n-grams in the corpus
+        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
+        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+        (n-grams) of the appropriate length, with the exception of unigrams, whose keys
+        are the tokens themselves. Values are the counts of those n-grams in the corpus.
     delta : float or tuple or :obj:`None`, optional
-        The absolute discount to apply to non-zero values. `delta` may be
-        a :class:`float`, at which point a fixed discount will be applied to
-        all orders of the recursion. If :obj:`None`, the default values defined
-        above will be employed. `delta` can be a :class:`tuple` of the same
-        length as `ngram_counts`, which can be used to specify discounts at
-        each level of the recursion (excluding the zero-th order), unigrams
-        first. If an element is a :class:`float`, that fixed discount will
-        be applied to all nonzero counts at that order. If :obj:`None`, `delta`
-        will be calculated in the default manner for that order. Finally, an
-        element can be a :class:`tuple` itself of positive length. In this
-        case, the elements of that tuple will correspond to the values of
-        :math:`\delta(k)` where the i-th indexed element is
-        :math:`\delta(i+1)`. Counts above the last :math:`\delta(k)` will use
-        the same discount as the last :math:`\delta(k)`. Elements within the
-        tuple can be either :class:`float` (use this value) or :obj:`None`
-        (use defafult)
+        The absolute discount to apply to non-zero values. `delta` may be a
+        :class:`float`, at which point a fixed discount will be applied to all orders of
+        the recursion. If :obj:`None`, the default values defined above will be
+        employed. `delta` can be a :class:`tuple` of the same length as
+        ``len(ngram_counts)``, which can be used to specify discounts at each level of
+        the recursion (excluding the zero-th order), unigrams first. If an element is a
+        :class:`float`, that fixed discount will be applied to all nonzero counts at
+        that order. If :obj:`None`, `delta` will be calculated in the default manner for
+        that order. Finally, an element can be a :class:`tuple` itself of positive
+        length. In this case, the elements of that tuple will correspond to the values
+        of :math:`\delta(k)` where the i-th indexed element is :math:`\delta(i+1)`.
+        Counts above the last :math:`\delta(k)` will use the same discount as the last
+        :math:`\delta(k)`. Elements within the tuple can be either :class:`float`
+        (use this value) or :obj:`None` (use defafult)
     sos : str or :obj:`None`, optional
-        The start-of-sequence symbol. Defaults to ``'<S>'`` if that symbol is
-        in the vocabulary, otherwise ``'<s>'``
+        The start-of-sequence symbol. Defaults to ``'<S>'`` if that symbol is in the
+        vocabulary, otherwise ``'<s>'``
     to_prune : set, optional
-        A set of n-grams that will not be explicitly set in the return value.
-        This differs from simply removing those n-grams from `ngram_counts` in
-        some key ways. First, nonzero counts of pruned n-grams are used when
-        calculating adjusted counts of the remaining terms. Second, pruned
-        counts can still be used to calculate default `delta` values. Third,
-        as per [chen1999]_, pruned counts are still summed in the denominator,
-        :math:`\sum_w' C(w_1, \ldots, w_{n-1}, w')`, which then make their
-        way into the numerator of :math:`gamma(w_1, \ldots, w_{n-1})`.
+        A set of n-grams that will not be explicitly set in the return value. This
+        differs from simply removing those n-grams from `ngram_counts` in some key ways.
+        First, nonzero counts of pruned n-grams are used when calculating adjusted
+        counts of the remaining terms. Second, pruned counts can still be used to
+        calculate default `delta` values. Third, as per [chen1999]_, pruned counts are
+        still summed in the denominator, :math:`\sum_w' C(w_1, \ldots, w_{n-1}, w')`,
+        which then make their way into the numerator of
+        :math:`gamma(w_1, \ldots, w_{n-1})`.
 
     Returns
     -------
@@ -1653,19 +1628,19 @@ def ngram_counts_to_prob_list_kneser_ney(
 
     Notes
     -----
-    As discussed in [chen1999]_, Kneser-Ney is usually formulated so that only
-    unigram counts are adjusted. However, they themselves experiment with
-    modified counts for all lower orders.
+    As discussed in [chen1999]_, Kneser-Ney is usually formulated so that only unigram
+    counts are adjusted. However, they themselves experiment with modified counts for
+    all lower orders.
 
     References
     ----------
-    .. [chen1999] S. F. Chen and J. Goodman, "An empirical study of smoothing
-       techniques for language modeling," Computer Speech & Language, vol. 13,
-       no. 4, pp. 359-394, Oct. 1999, doi: 10.1006/csla.1999.0128.
-    .. [heafield2013] K. Heafield, I. Pouzyrevsky, J. H. Clark, and P. Koehn,
-       "Scalable modified Kneser-Ney language model estimation,” in Proceedings
-       of the 51st Annual Meeting of the Association for Computational
-       Linguistics, Sofia, Bulgaria, 2013, vol. 2, pp. 690-696.
+    .. [chen1999] S. F. Chen and J. Goodman, "An empirical study of smoothing techniques
+       for language modeling," Computer Speech & Language, vol. 13, no. 4, pp. 359-394,
+       Oct. 1999, doi: 10.1006/csla.1999.0128.
+    .. [heafield2013] K. Heafield, I. Pouzyrevsky, J. H. Clark, and P. Koehn, "Scalable
+       modified Kneser-Ney language model estimation,” in Proceedings of the 51st Annual
+       Meeting of the Association for Computational Linguistics, Sofia, Bulgaria, 2013,
+       vol. 2, pp. 690-696.
     """
     if len(ngram_counts) < 1:
         raise ValueError("At least unigram counts must exist")
@@ -1729,25 +1704,24 @@ def text_to_sents(
     text : str
         The text to parse
     set_end_expr : str or re.Pattern, optional
-        A regular expression indicating an end of a sentence. By default, this
-        is one or more of the characters ".?!"
+        A regular expression indicating an end of a sentence. By default, this is one or
+        more of the characters ".?!"
     word_delim_expr : str or re.Pattern, optional
-        A regular expression used for splitting words. By default, it is one
-        or more of any non-alphanumeric character (including ' and -). Any
-        empty words are removed from the sentence
+        A regular expression used for splitting words. By default, it is one or more of
+        any non-alphanumeric character (including ' and -). Any empty words are removed
+        from the sentence
     to_case : {'lower', 'upper', :obj:`None`}, optional
-        Convert all words to a specific case: ``'lower'`` is lower case,
-        ``'upper'`` is upper case, anything else performs no conversion
+        Convert all words to a specific case: ``'lower'`` is lower case, ``'upper'`` is
+        upper case, anything else performs no conversion
     trim_empty_sents : bool, optional
-        If :obj:`True`, any sentences with no words in them will be removed
-        from the return value. The exception is an empty final string, which
-        is always removed.
+        If :obj:`True`, any sentences with no words in them will be removed from the
+        return value. The exception is an empty final string, which is always removed.
 
     Returns
     -------
     sents : list of tuples
-        A list of sentences from `text`. Each sentence/element is actually a
-        tuple of the words in the sentences
+        A list of sentences from `text`. Each sentence/element is actually a tuple of
+        the words in the sentences
     """
     if not isinstance(sent_end_expr, re.Pattern):
         sent_end_expr = re.compile(sent_end_expr)
@@ -1780,39 +1754,37 @@ def sents_to_ngram_counts(
     Parameters
     ----------
     sents : list of tuples
-        A list of sentences, where each sentence is a tuple of its words
+        A list of sentences, where each sentence is a tuple of its words.
     max_order : int
-        The maximum order (inclusive) of n-gram to count
+        The maximum order (inclusive) of n-gram to count.
     sos : str, optional
-        A token representing the start-of-sequence
+        A token representing the start-of-sequence.
     eos : str, optional
-        A token representing the end-of-sequence
+        A token representing the end-of-sequence.
     count_unigram_sos : bool, optional
-        If :obj:`False`, the unigram count of the start-of-sequence token will
-        always be zero (though higher-order n-grams beginning with the SOS
-        can have counts).
+        If :obj:`False`, the unigram count of the start-of-sequence token will always be
+        zero (though higher-order n-grams beginning with the SOS can have counts).
 
     Returns
     -------
     ngram_counts : list of dicts
-        A list of length `max_order` where ``ngram_counts[0]`` is a dictionary
-        of unigram counts, ``ngram_counts[1]`` of bigram counts, etc.
+        A list of length `max_order` where ``ngram_counts[0]`` is a dictionary of
+        unigram counts, ``ngram_counts[1]`` of bigram counts, etc.
 
     Notes
     -----
-    The way n-grams count start-of-sequence and end-of-sequence tokens differ
-    from package to package. For example, some tools left-pad sentences with
-    n - 1 start-of-sequence tokens (e.g. making ``Pr(x|<s><s>)`` a valid
-    conditional). Others only count sos and eos tokens for n > 1.
+    The way n-grams count start-of-sequence and end-of-sequence tokens differ from
+    package to package. For example, some tools left-pad sentences with n - 1
+    start-of-sequence tokens (e.g. making ``Pr(x|<s><s>)`` a valid conditional). Others
+    only count sos and eos tokens for n > 1.
 
-    This function adds one (and only one) sos and eos to the beginning and end
-    of each sentence before counting n-grams with only one exception. By
-    default, `count_unigram_sos` is set to :obj:`False`, meaning the
-    start-of-sequence token will not be counted as a unigram. This makes sense
-    in the word prediction context, since a language model should never predict
-    the next word to be the start-of-sequence token, rather, it always exists
-    prior to the first word being predicted. This exception can be disabled
-    by setting `count_unigram_sos` to :obj:`True`
+    This function adds one (and only one) sos and eos to the beginning and end of each
+    sentence before counting n-grams with only one exception. By default,
+    `count_unigram_sos` is set to :obj:`False`, meaning the start-of-sequence token will
+    not be counted as a unigram. This makes sense in the word prediction context since a
+    language model should never predict the next word to be the start-of-sequence token.
+    Rather, it always exists prior to the first word being predicted. This exception can
+    be disabled by setting `count_unigram_sos` to :obj:`True`.
     """
     if max_order < 1:
         raise ValueError("max_order ({}) must be >= 1".format(max_order))

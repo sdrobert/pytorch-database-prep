@@ -1,0 +1,14 @@
+name: pytorch-database-prep
+channels:
+  - pytorch
+  - sdrobert
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pydrobert-pytorch=0.3.0
+  - pytorch=1.8.1
+  - pydrobert-speech=0.2.0
+  - sentencepiece=0.1.95
+  - nltk=3.5
+prefix: pytorch-database-prep

@@ -31,19 +31,64 @@ import locale
 import os
 import sys
 import torch
+import json
 
 from shutil import copy as copy_paths
 
+import numpy as np
 import ngram_lm
+import pydrobert.torch.data
 import pydrobert.speech.util as speech_util
 import pydrobert.speech.command_line as speech_cmd
+import pydrobert.torch.command_line as torch_cmd
 
-# import pydrobert.torch.command_line as torch_cmd
+from pydrobert.speech.compute import FrameComputer
+from pydrobert.speech.util import alias_factory_subclass_from_arg
 
 __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"
 __license__ = "Apache 2.0"
 __copyright__ = "Copyright 2020 Sean Robertson"
+
+
+# FIXME(sdrobert): version 0.3.0 of pydrobert-pytorch floors the end frame index. I'll
+# update for 0.3.1, but I don't want to release just for that. Instead, I'll inject the
+# corrected version here.
+def transcript_to_token(
+    transcript, token2id=None, frame_shift_ms=None, unk=None, skip_frame_times=False,
+):
+    if token2id is not None and unk in token2id:
+        unk = token2id[unk]
+    tok_size = (len(transcript),)
+    if not skip_frame_times:
+        tok_size = tok_size + (3,)
+    tok = torch.empty(tok_size, dtype=torch.long)
+    for i, token in enumerate(transcript):
+        start = end = -1
+        try:
+            if len(token) == 3 and np.isreal(token[1]) and np.isreal(token[2]):
+                token, start, end = token
+                if frame_shift_ms:
+                    start = (1000 * start) // frame_shift_ms
+                    end = (1000 * end + 0.5 * frame_shift_ms) // frame_shift_ms
+                start = int(start)
+                end = max(int(end), start + 1)
+        except TypeError:
+            pass
+        if token2id is None:
+            id_ = token
+        else:
+            id_ = token2id.get(token, token if unk is None else unk)
+        if skip_frame_times:
+            tok[i] = id_
+        else:
+            tok[i, 0] = id_
+            tok[i, 1] = start
+            tok[i, 2] = end
+    return tok
+
+
+pydrobert.torch.data.transcript_to_token = transcript_to_token
 
 
 locale.setlocale(locale.LC_ALL, "C")
@@ -186,11 +231,11 @@ def timit_data_prep(timit, data_root):
 
     with open(os.path.join(dir_, "all.stm"), "w") as file_:
         for line in stm:
-            file_.write("{} {} {} {:.3f} {:.3f} {}\n".format(*line))
+            file_.write("{} {} {} {:.4f} {:.4f} {}\n".format(*line))
 
     with open(os.path.join(dir_, "all.ctm"), "w") as file_:
         for line in ctm:
-            file_.write("{} {} {:.3f} {:.3f} {}\n".format(*line))
+            file_.write("{} {} {:.4f} {:.4f} {}\n".format(*line))
 
     for name, dict_ in (
         ("spk2dialect", spk2dialect),
@@ -271,7 +316,7 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
             if wc != last_wc:
                 if last_phn is not None:
                     out_ctm.write(
-                        "{} {:.3f} {:.3f} {}\n".format(
+                        "{} {:.4f} {:.4f} {}\n".format(
                             last_wc, last_start, last_dur, last_phn
                         )
                     )
@@ -282,7 +327,7 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
             if to is not None:
                 if last_phn is not None:
                     out_ctm.write(
-                        "{} {:.3f} {:.3f} {}\n".format(
+                        "{} {:.4f} {:.4f} {}\n".format(
                             last_wc, last_start, last_dur, last_phn
                         )
                     )
@@ -292,7 +337,7 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
                 last_dur += dur
         if last_phn is not None:
             out_ctm.write(
-                "{} {:.3f} {:.3f} {}\n".format(last_wc, last_start, last_dur, last_phn)
+                "{} {:.4f} {:.4f} {}\n".format(last_wc, last_start, last_dur, last_phn)
             )
 
 
@@ -541,6 +586,17 @@ def torch_dir(options):
     if options.seed is not None:
         feat_optional_args.extend(["--seed", str(options.seed)])
 
+    if options.raw:
+        # 16 samps per ms = 1 / 16 ms per samp
+        frame_shift_ms = 1 / 6
+    else:
+        # more complicated. Have to build our feature computer
+        with open(options.computer_json) as file_:
+            json_ = json.load(file_)
+        computer: FrameComputer = alias_factory_subclass_from_arg(FrameComputer, json_)
+        frame_shift_ms = computer.frame_shift_ms
+        del computer, json_
+
     ctm_src = os.path.join(config_dir, "all.ctm")
     stm_src = os.path.join(config_dir, "all.stm")
     utt2sph_src = os.path.join(config_dir, "utt2sph")
@@ -574,24 +630,31 @@ def torch_dir(options):
 
         os.makedirs(feat_dir, exist_ok=True)
 
-        if options.feats_from is None:
-            args = [map_path, feat_dir] + feat_optional_args
-            if not options.raw:
-                args.insert(1, options.computer_json)
-            speech_cmd.signals_to_torch_feat_dir(args)
-        else:
-            feat_src = os.path.join(options.data_root, options.feats_from, part, "feat")
-            if not os.path.isdir(feat_src):
-                raise ValueError(
-                    'Specified --feats-from, but "{}" is not a directory'
-                    "".format(feat_src)
-                )
-            for filename in os.listdir(feat_src):
-                src = os.path.join(feat_src, filename)
-                dest = os.path.join(feat_dir, filename)
-                copy_paths(src, dest)
+        # if options.feats_from is None:
+        #     args = [map_path, feat_dir] + feat_optional_args
+        #     if not options.raw:
+        #         args.insert(1, options.computer_json)
+        #     speech_cmd.signals_to_torch_feat_dir(args)
+        # else:
+        #     feat_src = os.path.join(options.data_root, options.feats_from, part, "feat")
+        #     if not os.path.isdir(feat_src):
+        #         raise ValueError(
+        #             'Specified --feats-from, but "{}" is not a directory'
+        #             "".format(feat_src)
+        #         )
+        #     for filename in os.listdir(feat_src):
+        #         src = os.path.join(feat_src, filename)
+        #         dest = os.path.join(feat_dir, filename)
+        #         copy_paths(src, dest)
 
-        args = [ctm_dst, token2id_txt, ref_dir]
+        args = [
+            ctm_dst,
+            token2id_txt,
+            ref_dir,
+            "--frame-shift-ms",
+            f"{frame_shift_ms:e}",
+        ]
+        torch_cmd.ctm_to_torch_token_data_dir(args)
 
 
 def build_parser():

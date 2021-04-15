@@ -255,6 +255,11 @@ def write_mapped_trn(src, dst, map_, utts=None):
             continue
         idx = 0
         while idx < len(phns):
+            phn = phns[idx]
+            if phn not in map_:
+                raise RuntimeError(
+                    f"{src.name} line {line_no + 1}: unknown phone {phn}"
+                )
             to = map_[phns[idx]]
             if to is None:
                 phns.pop(idx)
@@ -792,7 +797,7 @@ def filter(options):
             if len(line) < 5:
                 raise RuntimeError(f"{in_.name} line {line_no + 1}: not stm entry")
             if len(line) > 5 and line[5][0] == "<":
-                line = [line[6], f"({line[0]})"]
+                line = line[6:] + [f"({line[0]})"]
             else:
                 line = line[5:] + [f"({line[0]})"]
             tmp.write(" ".join(line))
@@ -800,7 +805,13 @@ def filter(options):
         tmp.seek(0)
         in_ = tmp
 
-    write_mapped_trn(in_, options.filt_trn, phone_map)
+    try:
+        write_mapped_trn(in_, options.filt_trn, phone_map)
+    except RuntimeError as e:
+        if in_ != options.raw_trn and e.args[0].startswith("None"):
+            # inject the true file name back
+            e.args = (options.raw_trn.name + e.args[0][4:],)
+        raise
 
 
 def build_parser():

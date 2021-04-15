@@ -6,9 +6,11 @@ channels:
   - defaults
 dependencies:
   - python=3.9
-  - pydrobert-pytorch=0.3.0
   - pytorch=1.8.1
   - pydrobert-speech=0.2.0
   - sentencepiece=0.1.95
   - nltk=3.5
+  - pip
+  - pip:  # FIXME(sdrobert): Update to conda dep when pydrobert-pytorch releases >0.3.0
+      - "git+https://github.com/sdrobert/pydrobert-pytorch.git@96e726991934571bdf5c3b805d13d68a8a379b24"
 prefix: pytorch-database-prep

@@ -51,46 +51,6 @@ __license__ = "Apache 2.0"
 __copyright__ = "Copyright 2020 Sean Robertson"
 
 
-# FIXME(sdrobert): version 0.3.0 of pydrobert-pytorch floors the end frame index. I'll
-# update for 0.3.1, but I don't want to release just for that. Instead, I'll inject the
-# corrected version here.
-def transcript_to_token(
-    transcript, token2id=None, frame_shift_ms=None, unk=None, skip_frame_times=False,
-):
-    if token2id is not None and unk in token2id:
-        unk = token2id[unk]
-    tok_size = (len(transcript),)
-    if not skip_frame_times:
-        tok_size = tok_size + (3,)
-    tok = torch.empty(tok_size, dtype=torch.long)
-    for i, token in enumerate(transcript):
-        start = end = -1
-        try:
-            if len(token) == 3 and np.isreal(token[1]) and np.isreal(token[2]):
-                token, start, end = token
-                if frame_shift_ms:
-                    start = (1000 * start) // frame_shift_ms
-                    end = (1000 * end + 0.5 * frame_shift_ms) // frame_shift_ms
-                start = int(start)
-                end = max(int(end), start + 1)
-        except TypeError:
-            pass
-        if token2id is None:
-            id_ = token
-        else:
-            id_ = token2id.get(token, token if unk is None else unk)
-        if skip_frame_times:
-            tok[i] = id_
-        else:
-            tok[i, 0] = id_
-            tok[i, 1] = start
-            tok[i, 2] = end
-    return tok
-
-
-pydrobert.torch.data.transcript_to_token = transcript_to_token
-
-
 locale.setlocale(locale.LC_ALL, "C")
 
 RESOURCE_DIR = os.path.join(os.path.dirname(__file__), "resources", "timit")
@@ -223,19 +183,23 @@ def timit_data_prep(timit, data_root):
     if len(utt2type) != 6300:
         raise ValueError("Expected 6300 utterances, got {}".format(len(utt2type)))
 
-    stm.sort(key=lambda x: (x[0], x[1], x[3]))
+    stm.sort(key=lambda x: (x[0], x[3]))  # x[1] is always "A"
     ctm.sort()
 
     dir_ = os.path.join(data_root, "local", "data")
     os.makedirs(dir_, exist_ok=True)
 
+    with open(os.path.join(dir_, "all.trn"), "w") as file_:
+        for line in stm:
+            file_.write("{5} ({0})\n".format(*line))
+
     with open(os.path.join(dir_, "all.stm"), "w") as file_:
         for line in stm:
-            file_.write("{} {} {} {:.4f} {:.4f} {}\n".format(*line))
+            file_.write("{} {} {} {:.7f} {:.7f} {}\n".format(*line))
 
     with open(os.path.join(dir_, "all.ctm"), "w") as file_:
         for line in ctm:
-            file_.write("{} {} {:.4f} {:.4f} {}\n".format(*line))
+            file_.write("{} {} {:.7f} {:.7f} {}\n".format(*line))
 
     for name, dict_ in (
         ("spk2dialect", spk2dialect),
@@ -256,36 +220,76 @@ def preamble(options):
     timit_data_prep(options.timit_root, options.data_root)
 
 
+def write_mapped_trn(src, dst, map_, utts=None):
+
+    if isinstance(src, str):
+        if isinstance(dst, str):
+            with open(src) as in_trn, open(dst, "w") as out_trn:
+                return write_mapped_trn(in_trn, out_trn, map_, utts)
+        else:
+            with open(src) as in_trn:
+                return write_mapped_trn(in_trn, dst, map_, utts)
+    elif isinstance(dst, str):
+        with open(dst) as out_trn:
+            return write_mapped_trn(src, out_trn, map_, utts)
+
+    for line in src:
+        phns = line.strip().split()
+        if not phns:
+            continue
+        utt = phns.pop()
+        assert utt[0] == "(" and utt[-1] == ")"
+        if utts is not None and utt[1:-1] not in utts:
+            continue
+        idx = 0
+        while idx < len(phns):
+            to = map_[phns[idx]]
+            if to is None:
+                phns.pop(idx)
+            else:
+                phns[idx] = to
+                idx += 1
+        phns.append(utt)
+        dst.write(" ".join(phns))
+        dst.write("\n")
+
+
 def write_mapped_stm(src, dst, map_, wcinfo=None):
 
+    if isinstance(src, str):
+        if isinstance(dst, str):
     with open(src) as in_stm, open(dst, "w") as out_stm:
+                return write_mapped_stm(in_stm, out_stm, map_, wcinfo)
+        else:
+            with open(src) as in_stm:
+                return write_mapped_stm(in_stm, dst, map_, wcinfo)
+    elif isinstance(dst, str):
+        with open(dst) as out_stm:
+            return write_mapped_stm(src, out_stm, map_, wcinfo)
+
         if wcinfo is not None:
-            out_stm.write(';; LABEL "F" "Female" "Female speaker"\n')
-            out_stm.write(';; LABEL "M" "Male" "Male speaker"\n')
-            out_stm.write(';; LABEL "DR1" "Dialect 1" "Speaker from New England"\n')
-            out_stm.write(';; LABEL "DR2" "Dialect 2" "Speaker from Northern U.S."\n')
-            out_stm.write(
-                ';; LABEL "DR3" "Dialect 3" "Speaker from North Midland U.S."\n'
-            )
-            out_stm.write(
-                ';; LABEL "DR4" "Dialect 4" "Speaker from South Midland U.S."\n'
-            )
-            out_stm.write(';; LABEL "DR5" "Dialect 5" "Speaker from Southern U.S."\n')
-            out_stm.write(';; LABEL "DR6" "Dialect 6" "Speaker from New York City"\n')
-            out_stm.write(';; LABEL "DR7" "Dialect 7" "Speaker from Western U.S."\n')
-            out_stm.write(
-                ';; LABEL "DR8" "Dialect 8" "Speaker was army brat in U.S."\n'
-            )
-            out_stm.write(';; LABEL "SA" "Dialect Prompt" "Prompt was a shibboleth"\n')
-            out_stm.write(
+        dst.write(';; LABEL "F" "Female" "Female speaker"\n')
+        dst.write(';; LABEL "M" "Male" "Male speaker"\n')
+        dst.write(';; LABEL "DR1" "Dialect 1" "Speaker from New England"\n')
+        dst.write(';; LABEL "DR2" "Dialect 2" "Speaker from Northern U.S."\n')
+        dst.write(';; LABEL "DR3" "Dialect 3" "Speaker from North Midland U.S."\n')
+        dst.write(';; LABEL "DR4" "Dialect 4" "Speaker from South Midland U.S."\n')
+        dst.write(';; LABEL "DR5" "Dialect 5" "Speaker from Southern U.S."\n')
+        dst.write(';; LABEL "DR6" "Dialect 6" "Speaker from New York City"\n')
+        dst.write(';; LABEL "DR7" "Dialect 7" "Speaker from Western U.S."\n')
+        dst.write(';; LABEL "DR8" "Dialect 8" "Speaker was army brat in U.S."\n')
+        dst.write(';; LABEL "SA" "Dialect Prompt" "Prompt was a shibboleth"\n')
+        dst.write(
                 ';; LABEL "SI" "Diverse Prompt" "Prompt extracted from existing text"\n'
             )
-            out_stm.write(
+        dst.write(
                 ';; LABEL "SX" "Compact Prompt" "Prompt designed to elicit biphones"\n'
             )
 
-        for line in in_stm:
-            line = line.strip().split()
+    for line in src:
+        line = line.strip().split(";;")[0].split()
+        if not line:
+            continue
             prefix, phns = line[:5], line[5:]
             if wcinfo is not None:
                 wc = " ".join(prefix[:2])
@@ -300,23 +304,33 @@ def write_mapped_stm(src, dst, map_, wcinfo=None):
                 else:
                     phns[idx] = to
                     idx += 1
-            out_stm.write(" ".join(prefix + phns))
-            out_stm.write("\n")
+        dst.write(" ".join(prefix + phns))
+        dst.write("\n")
 
 
 def write_mapped_ctm(src, dst, map_, wclist=None):
 
+    if isinstance(src, str):
+        if isinstance(dst, str):
     with open(src) as in_ctm, open(dst, "w") as out_ctm:
+                return write_mapped_ctm(in_ctm, out_ctm, map_, wclist)
+        else:
+            with open(src) as in_ctm:
+                return write_mapped_ctm(in_ctm, dst, map_, wclist)
+    elif isinstance(dst, str):
+        with open(dst) as out_ctm:
+            return write_mapped_ctm(src, out_ctm, map_, wclist)
+
         last_wc = last_start = last_dur = last_phn = None
-        for line in in_ctm:
+    for line in src:
             wc, start, dur, phn = line.strip().rsplit(maxsplit=3)
             if wclist is not None and wc not in wclist:
                 continue
             start, dur = float(start), float(dur)
             if wc != last_wc:
                 if last_phn is not None:
-                    out_ctm.write(
-                        "{} {:.4f} {:.4f} {}\n".format(
+                dst.write(
+                    "{} {:.7f} {:.7f} {}\n".format(
                             last_wc, last_start, last_dur, last_phn
                         )
                     )
@@ -326,8 +340,8 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
             to = map_[phn]
             if to is not None:
                 if last_phn is not None:
-                    out_ctm.write(
-                        "{} {:.4f} {:.4f} {}\n".format(
+                dst.write(
+                    "{} {:.7f} {:.7f} {}\n".format(
                             last_wc, last_start, last_dur, last_phn
                         )
                     )
@@ -336,8 +350,8 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
                 # collapse this phone into the previous phone
                 last_dur += dur
         if last_phn is not None:
-            out_ctm.write(
-                "{} {:.4f} {:.4f} {}\n".format(last_wc, last_start, last_dur, last_phn)
+        dst.write(
+            "{} {:.7f} {:.7f} {}\n".format(last_wc, last_start, last_dur, last_phn)
             )
 
 
@@ -385,6 +399,12 @@ def init_phn(options):
             token2id.write("{} {}\n".format(token, id_))
             id2token.write("{} {}\n".format(id_, token))
 
+    write_mapped_trn(
+        os.path.join(data_dir, "all.trn"),
+        os.path.join(config_dir, "all.trn"),
+        phone_map,
+    )
+
     write_mapped_stm(
         os.path.join(data_dir, "all.stm"),
         os.path.join(config_dir, "all.stm"),
@@ -420,10 +440,11 @@ def train_phn_lm(config_dir, max_order):
                     train_utt.add(utt)
 
     text = ""
-    with open(os.path.join(config_dir, "all.stm")) as stm:
-        for line in stm:
-            utt, _, _, _, _, phns = line.strip().split(maxsplit=5)
-            if utt not in train_utt:
+    with open(os.path.join(config_dir, "all.trn")) as trn:
+        for line in trn:
+            phns, utt = line.strip().rsplit(maxsplit=1)
+            assert utt[0] == "(" and utt[-1] == ")"
+            if utt[1:-1] not in train_utt:
                 continue
             text += phns + "\n"
 
@@ -492,6 +513,10 @@ def torch_dir(options):
         "utt2wc",
     ):
         copy_paths(os.path.join(config_dir, fn), os.path.join(ext, fn))
+
+    lm_arpa_gz = os.path.join(config_dir, "lm", "lm.arpa.gz")
+    if os.path.exists(lm_arpa_gz):
+        copy_paths(lm_arpa_gz, ext)
 
     spk2info = dict()
     for idx, fn in enumerate(("spk2part", "spk2gender", "spk2dialect")):
@@ -599,12 +624,17 @@ def torch_dir(options):
 
     ctm_src = os.path.join(config_dir, "all.ctm")
     stm_src = os.path.join(config_dir, "all.stm")
+    trn_src = os.path.join(config_dir, "all.trn")
     utt2sph_src = os.path.join(config_dir, "utt2sph")
     token2id_txt = os.path.join(config_dir, "token2id.txt")
+    id_map = dict((k, k) for k in phone_map)
     for part, uttids in parts:
         unmapped_ctm_dst = os.path.join(ext, part + ".ref_unmapped.ctm")
         ctm_dst = os.path.join(ext, part + ".ref.ctm")
+        unmapped_stm_dst = os.path.join(ext, part + ".ref_unmapped.stm")
         stm_dst = os.path.join(ext, part + ".ref.stm")
+        unmapped_trn_dst = os.path.join(ext, part + ".ref_unmapped.trn")
+        trn_dst = os.path.join(ext, part + ".ref.trn")
         map_path = os.path.join(ext, part + ".scp")
         part_dir = os.path.join(dir_, part)
         feat_dir = os.path.join(part_dir, "feat")
@@ -620,13 +650,14 @@ def torch_dir(options):
                 if utt in uttids:
                     out_.write("{} {}\n".format(utt, sph))
 
-        write_mapped_ctm(
-            ctm_src, unmapped_ctm_dst, dict((k, k) for k in phone_map), wcinfo
-        )
-
+        write_mapped_ctm(ctm_src, unmapped_ctm_dst, id_map, wcinfo)
         write_mapped_ctm(ctm_src, ctm_dst, phone_map, wcinfo)
 
+        write_mapped_stm(stm_src, unmapped_stm_dst, id_map, wcinfo)
         write_mapped_stm(stm_src, stm_dst, phone_map, wcinfo)
+
+        write_mapped_trn(trn_src, unmapped_trn_dst, id_map, uttids)
+        write_mapped_trn(trn_src, trn_dst, phone_map, uttids)
 
         os.makedirs(feat_dir, exist_ok=True)
 

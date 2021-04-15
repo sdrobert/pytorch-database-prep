@@ -130,7 +130,7 @@ def timit_data_prep(timit, data_root):
             dname, spk = os.path.split(dname)
             dr = os.path.basename(dname)
             gender = spk[0].upper()
-            utt = spk + prompt
+            utt = spk + "-" + prompt
             type_ = prompt[:2].upper()
             utt2type[utt] = type_
             spk2part[spk] = part

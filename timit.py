@@ -34,9 +34,10 @@ import torch
 import json
 
 from shutil import copy as copy_paths
+from tempfile import SpooledTemporaryFile
 
-import numpy as np
 import ngram_lm
+
 import pydrobert.torch.data
 import pydrobert.speech.util as speech_util
 import pydrobert.speech.command_line as speech_cmd
@@ -62,6 +63,7 @@ ALPHA = set(chr(x) for x in range(ord("a"), ord("z") + 1))
 
 def get_phone_map():
     phone_map = dict()
+    p39s = set()
     with open(os.path.join(RESOURCE_DIR, "phones.map")) as file_:
         for line in file_:
             line = line.strip().split()
@@ -72,8 +74,17 @@ def get_phone_map():
                 p48 = line[1]
                 if len(line) == 3:
                     p39 = line[2]
+                    p39s.add(p39)
             phone_map[p61] = (p61, p48, p39)
-
+            # p61->p48 and p48->p39 are surjective mappings. We extend the composition
+            # p61->p48 to (p61 U p48)->p48 with the inclusion map. We only add the
+            # mapping if it doesn't already exist and allow it to be clobbered if some
+            # p61 == p48.
+            if p48 is not None and p48 not in phone_map:
+                phone_map[p48] = (None, p48, p39)
+    # any p39s that don't have entries already we extend with the inclusion map.
+    for p39 in p39s:
+        phone_map.setdefault(p39, (None, None, p39))
     return phone_map
 
 
@@ -233,12 +244,13 @@ def write_mapped_trn(src, dst, map_, utts=None):
         with open(dst) as out_trn:
             return write_mapped_trn(src, out_trn, map_, utts)
 
-    for line in src:
+    for line_no, line in enumerate(src):
         phns = line.strip().split()
         if not phns:
             continue
         utt = phns.pop()
-        assert utt[0] == "(" and utt[-1] == ")"
+        if utt[0] != "(" or utt[-1] != ")":
+            raise RuntimeError(f"{src.name} line {line_no + 1}: not a trn line")
         if utts is not None and utt[1:-1] not in utts:
             continue
         idx = 0
@@ -258,7 +270,7 @@ def write_mapped_stm(src, dst, map_, wcinfo=None):
 
     if isinstance(src, str):
         if isinstance(dst, str):
-    with open(src) as in_stm, open(dst, "w") as out_stm:
+            with open(src) as in_stm, open(dst, "w") as out_stm:
                 return write_mapped_stm(in_stm, out_stm, map_, wcinfo)
         else:
             with open(src) as in_stm:
@@ -267,7 +279,7 @@ def write_mapped_stm(src, dst, map_, wcinfo=None):
         with open(dst) as out_stm:
             return write_mapped_stm(src, out_stm, map_, wcinfo)
 
-        if wcinfo is not None:
+    if wcinfo is not None:
         dst.write(';; LABEL "F" "Female" "Female speaker"\n')
         dst.write(';; LABEL "M" "Male" "Male speaker"\n')
         dst.write(';; LABEL "DR1" "Dialect 1" "Speaker from New England"\n')
@@ -280,30 +292,46 @@ def write_mapped_stm(src, dst, map_, wcinfo=None):
         dst.write(';; LABEL "DR8" "Dialect 8" "Speaker was army brat in U.S."\n')
         dst.write(';; LABEL "SA" "Dialect Prompt" "Prompt was a shibboleth"\n')
         dst.write(
-                ';; LABEL "SI" "Diverse Prompt" "Prompt extracted from existing text"\n'
-            )
+            ';; LABEL "SI" "Diverse Prompt" "Prompt extracted from existing text"\n'
+        )
         dst.write(
-                ';; LABEL "SX" "Compact Prompt" "Prompt designed to elicit biphones"\n'
-            )
+            ';; LABEL "SX" "Compact Prompt" "Prompt designed to elicit biphones"\n'
+        )
 
-    for line in src:
+    for line_no, line in enumerate(src):
         line = line.strip().split(";;")[0].split()
         if not line:
             continue
-            prefix, phns = line[:5], line[5:]
-            if wcinfo is not None:
-                wc = " ".join(prefix[:2])
-                if wc not in wcinfo:
-                    continue
-                prefix.append("<" + ",".join(wcinfo[wc]) + ">")
-            idx = 0
-            while idx < len(phns):
-                to = map_[phns[idx]]
-                if to is None:
-                    phns.pop(idx)
-                else:
-                    phns[idx] = to
-                    idx += 1
+        if len(line) < 5:
+            raise RuntimeError(f"{src.name} line {line_no + 1}: invalid stm line")
+        prefix, phns = line[:5], line[5:]
+        if phns and phns[0][0] == "<":
+            prefix.append(phns.pop(0))  # it's actually wcinfo
+        if wcinfo is not None:
+            wc = " ".join(prefix[:2])
+            if wc not in wcinfo:
+                continue
+            wcinfo_ = "<" + ",".join(wcinfo[wc]) + ">"
+            if len(prefix) == 5:
+                prefix.append(wcinfo_)
+            elif prefix[-1] != wcinfo_:
+                raise RuntimeError(
+                    f"{src.name} line {line_no + 1}: waveform/channel '{wc}' has info "
+                    f"string {prefix[-1]} but expected {wcinfo_}. Did you modify it?"
+                )
+        idx = 0
+        while idx < len(phns):
+            phn = phns[idx]
+            if phn not in map_:
+                raise RuntimeError(
+                    f"{src.name} line {line_no + 1}: unknown phone {phn}"
+                )
+            to = map_[phn]
+            if to is None:
+                phns.pop(idx)
+            else:
+                phns[idx] = to
+                idx += 1
         dst.write(" ".join(prefix + phns))
         dst.write("\n")
 
@@ -312,7 +340,7 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
 
     if isinstance(src, str):
         if isinstance(dst, str):
-    with open(src) as in_ctm, open(dst, "w") as out_ctm:
+            with open(src) as in_ctm, open(dst, "w") as out_ctm:
                 return write_mapped_ctm(in_ctm, out_ctm, map_, wclist)
         else:
             with open(src) as in_ctm:
@@ -321,38 +349,46 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
         with open(dst) as out_ctm:
             return write_mapped_ctm(src, out_ctm, map_, wclist)
 
-        last_wc = last_start = last_dur = last_phn = None
-    for line in src:
-            wc, start, dur, phn = line.strip().rsplit(maxsplit=3)
-            if wclist is not None and wc not in wclist:
-                continue
+    last_wc = last_start = last_dur = last_phn = None
+    for line_no, line in enumerate(src):
+        line = line.strip().rsplit(maxsplit=3)
+        if len(line) != 4:
+            raise RuntimeError(f"{src.name} line {line_no + 1}: not a ctm line")
+        wc, start, dur, phn = line
+        if wclist is not None and wc not in wclist:
+            continue
+        try:
             start, dur = float(start), float(dur)
-            if wc != last_wc:
-                if last_phn is not None:
+        except ValueError as e:
+            raise RuntimeError(f"{src.name} line {line_no + 1}") from e
+        if wc != last_wc:
+            if last_phn is not None:
                 dst.write(
                     "{} {:.7f} {:.7f} {}\n".format(
-                            last_wc, last_start, last_dur, last_phn
-                        )
+                        last_wc, last_start, last_dur, last_phn
                     )
-                last_wc = wc
-                last_start = last_dur = 0.0
-                last_phn = None
-            to = map_[phn]
-            if to is not None:
-                if last_phn is not None:
+                )
+            last_wc = wc
+            last_start = last_dur = 0.0
+            last_phn = None
+        if phn not in map_:
+            raise RuntimeError(f"{src.name} line {line_no + 1}: unknown phone {phn}")
+        to = map_[phn]
+        if to is not None:
+            if last_phn is not None:
                 dst.write(
                     "{} {:.7f} {:.7f} {}\n".format(
-                            last_wc, last_start, last_dur, last_phn
-                        )
+                        last_wc, last_start, last_dur, last_phn
                     )
-                last_wc, last_start, last_dur, last_phn = wc, start, dur, to
-            else:
-                # collapse this phone into the previous phone
-                last_dur += dur
-        if last_phn is not None:
+                )
+            last_wc, last_start, last_dur, last_phn = wc, start, dur, to
+        else:
+            # collapse this phone into the previous phone
+            last_dur += dur
+    if last_phn is not None:
         dst.write(
             "{} {:.7f} {:.7f} {}\n".format(last_wc, last_start, last_dur, last_phn)
-            )
+        )
 
 
 def init_phn(options):
@@ -696,6 +732,77 @@ def torch_dir(options):
         assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
 
+def filter(options):
+    phone_map = get_phone_map()
+    # always drop down to the p39 set
+    phone_map = dict((k, v[2]) for (k, v) in phone_map.items())
+
+    if options.both_ctm:
+        write_mapped_ctm(options.raw_trn, options.filt_trn, phone_map)
+        return
+
+    if options.both_stm:
+
+        # these files shouldn't change for specific subdirectory configurations, so
+        # we won't bother the user with 'em.
+        config_dir = os.path.join(options.data_root, "local", "data")
+
+        spk2info = dict()
+        for idx, fn in enumerate(("spk2part", "spk2gender", "spk2dialect")):
+            with open(os.path.join(config_dir, fn)) as file_:
+                for line in file_:
+                    spk, tidbit = line.strip().split(" ", maxsplit=1)
+                    spk2info.setdefault(spk, [None] * 3)[idx] = tidbit
+        utt2info = dict()
+        for idx, fn in enumerate(("utt2type", "utt2wc", "utt2spk")):
+            with open(os.path.join(config_dir, fn)) as file_:
+                for line in file_:
+                    utt, tidbit = line.strip().split(" ", maxsplit=1)
+                    utt2info.setdefault(utt, [None] * 3)[idx] = tidbit
+        wcinfo = dict(
+            (utt2info[utt][1], spk2info[utt2info[utt][2]][1:] + utt2info[utt][:1])
+            for utt in utt2info
+        )
+
+        write_mapped_stm(options.raw_trn, options.filt_trn, phone_map, wcinfo)
+        return
+
+    in_ = options.raw_trn
+
+    # we'll always be writing to a trn file. If our source is a CTM or an STM file,
+    # we'll first convert to a trn file
+    if options.in_ctm:
+        transcripts = pydrobert.torch.data.read_ctm(in_)
+        tmp = SpooledTemporaryFile(mode="w+")
+        for utt, transcript in transcripts:
+            transcript = " ".join(x[0] for x in transcript)
+            tmp.write(transcript)
+            tmp.write(f" ({utt})\n")
+        tmp.seek(0)
+        in_ = tmp
+        del transcripts, tmp
+    elif options.in_stm:
+        tmp = SpooledTemporaryFile(mode="w+")
+        for line_no, line in enumerate(in_):
+            line = line.strip().split(";;")[0].split(maxsplit=6)
+            if not line:
+                # keep it around so as not to mess with the line numbering later
+                tmp.write("\n")
+                continue
+            if len(line) < 5:
+                raise RuntimeError(f"{in_.name} line {line_no + 1}: not stm entry")
+            if len(line) > 5 and line[5][0] == "<":
+                line = [line[6], f"({line[0]})"]
+            else:
+                line = line[5:] + [f"({line[0]})"]
+            tmp.write(" ".join(line))
+            tmp.write("\n")
+        tmp.seek(0)
+        in_ = tmp
+
+    write_mapped_trn(in_, options.filt_trn, phone_map)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
@@ -707,6 +814,7 @@ def build_parser():
     build_preamble_parser(subparsers)
     build_init_phn_parser(subparsers)
     build_torch_dir_parser(subparsers)
+    build_filter_parser(subparsers)
 
     return parser
 
@@ -856,6 +964,48 @@ def build_torch_dir_parser(subparsers):
     )
 
 
+def build_filter_parser(subparsers):
+    parser = subparsers.add_parser(
+        "filter", help="Filter an input phone-level hypothesis trn file to"
+    )
+    parser.add_argument(
+        "raw_trn", type=argparse.FileType("r"), help="The input (unfiltered) trn file"
+    )
+    parser.add_argument(
+        "filt_trn", type=argparse.FileType("w"), help="The output (filtered) trn file"
+    )
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--in-ctm",
+        action="store_true",
+        default=False,
+        help="The input is a CTM file, not a trn file. Will still output the filtered "
+        "trn file",
+    )
+    group.add_argument(
+        "--both-ctm",
+        action="store_true",
+        default=False,
+        help="The input is a CTM file, not a trn file. Will output a filtered CTM file "
+        "as well",
+    )
+    group.add_argument(
+        "--in-stm",
+        action="store_true",
+        default=False,
+        help="The input is an STM file, not a trn file. Will still output the filtered "
+        "trn file",
+    )
+    group.add_argument(
+        "--both-stm",
+        action="store_true",
+        default=False,
+        help="The input is an STM file, not a trn file. Will output a filtered STM "
+        "file as well",
+    )
+
+
 def main(args=None):
     """Prepare TIMIT data for end-to-end pytorch training"""
 
@@ -868,6 +1018,8 @@ def main(args=None):
         init_phn(options)
     elif options.command == "torch_dir":
         torch_dir(options)
+    elif options.command == "filter":
+        filter(options)
 
 
 if __name__ == "__main__":

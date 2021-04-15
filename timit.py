@@ -588,7 +588,7 @@ def torch_dir(options):
 
     if options.raw:
         # 16 samps per ms = 1 / 16 ms per samp
-        frame_shift_ms = 1 / 6
+        frame_shift_ms = 1 / 16
     else:
         # more complicated. Have to build our feature computer
         with open(options.computer_json) as file_:
@@ -630,31 +630,39 @@ def torch_dir(options):
 
         os.makedirs(feat_dir, exist_ok=True)
 
-        # if options.feats_from is None:
-        #     args = [map_path, feat_dir] + feat_optional_args
-        #     if not options.raw:
-        #         args.insert(1, options.computer_json)
-        #     speech_cmd.signals_to_torch_feat_dir(args)
-        # else:
-        #     feat_src = os.path.join(options.data_root, options.feats_from, part, "feat")
-        #     if not os.path.isdir(feat_src):
-        #         raise ValueError(
-        #             'Specified --feats-from, but "{}" is not a directory'
-        #             "".format(feat_src)
-        #         )
-        #     for filename in os.listdir(feat_src):
-        #         src = os.path.join(feat_src, filename)
-        #         dest = os.path.join(feat_dir, filename)
-        #         copy_paths(src, dest)
+        if options.feats_from is None:
+            args = [map_path, feat_dir] + feat_optional_args
+            if not options.raw:
+                args.insert(1, options.computer_json)
+            assert not speech_cmd.signals_to_torch_feat_dir(args)
+        else:
+            feat_src = os.path.join(options.data_root, options.feats_from, part, "feat")
+            if not os.path.isdir(feat_src):
+                raise ValueError(
+                    'Specified --feats-from, but "{}" is not a directory'
+                    "".format(feat_src)
+                )
+            for filename in os.listdir(feat_src):
+                src = os.path.join(feat_src, filename)
+                dest = os.path.join(feat_dir, filename)
+                copy_paths(src, dest)
 
         args = [
-            ctm_dst,
+            unmapped_ctm_dst,
             token2id_txt,
             ref_dir,
             "--frame-shift-ms",
             f"{frame_shift_ms:e}",
         ]
-        torch_cmd.ctm_to_torch_token_data_dir(args)
+        assert not torch_cmd.ctm_to_torch_token_data_dir(args)
+
+        # verify correctness (while storing info as a bonus)
+        args = [
+            part_dir,
+            os.path.join(ext, f"{part}.info.ark"),
+            "--strict",
+        ]
+        assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
 
 def build_parser():

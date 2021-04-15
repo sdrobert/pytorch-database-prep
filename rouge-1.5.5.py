@@ -6,11 +6,14 @@
 #
 # Best effort:
 #
-# Copyright 2020 Diego Antognini
+#   Copyright 2020 Diego Antognini
 #
 # Command-line wrapper code subject to Apache 2.0 as well by me:
 #
-# Copyright 2020 Sean Robertson
+#   Copyright 2020 Sean Robertson
+#
+# The code was also automatically formatted by Black and includes some of my own
+# formatting to stop the linter from complaining.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,7 +51,8 @@ class Rouge:
     AVAILABLE_LENGTH_LIMIT_TYPES = {"words", "bytes"}
     REMOVE_CHAR_PATTERN = re.compile("[^A-Za-z0-9]")
 
-    # Hack to not tokenize "cannot" to "can not" and consider them different as in the official ROUGE script
+    # Hack to not tokenize "cannot" to "can not" and consider them different as in the
+    # official ROUGE script
     KEEP_CANNOT_IN_ONE_WORD = re.compile("cannot")
     KEEP_CANNOT_IN_ONE_WORD_REVERSED = re.compile("_cannot_")
 
@@ -74,30 +78,50 @@ class Rouge:
         weight_factor=1.0,
         ensure_compatibility=True,
     ):
-        """
-        Handle the ROUGE score computation as in the official perl script.
+        """Handle the ROUGE score computation as in the official perl script.
 
-        Note 1: Small differences might happen if the resampling of the perl script is not high enough (as the average depends on this).
-        Note 2: Stemming of the official Porter Stemmer of the ROUGE perl script is slightly different and the Porter one implemented in NLTK. However, special cases of DUC 2004 have been traited.
-                The solution would be to rewrite the whole perl stemming in python from the original script
+        Note 1: Small differences might happen if the resampling of the perl script is
+        not high enough (as the average depends on this).
 
-        Args:
-          metrics: What ROUGE score to compute. Available: ROUGE-N, ROUGE-L, ROUGE-W. Default: ROUGE-N
-          max_n: N-grams for ROUGE-N if specify. Default:1
-          limit_length: If the summaries must be truncated. Defaut:True
-          length_limit: Number of the truncation where the unit is express int length_limit_Type. Default:665 (bytes)
-          length_limit_type: Unit of length_limit. Available: words, bytes. Default: 'bytes'
-          apply_avg: If we should average the score of multiple samples. Default: True. If apply_Avg & apply_best = False, then each ROUGE scores are independant
-          apply_best: Take the best instead of the average. Default: False, then each ROUGE scores are independant
-          stemming: Apply stemming to summaries. Default: True
-          alpha: Alpha use to compute f1 score: P*R/((1-a)*P + a*R). Default:0.5
-          weight_factor: Weight factor to be used for ROUGE-W. Official rouge score defines it at 1.2. Default: 1.0
-          ensure_compatibility: Use same stemmer and special "hacks" to product same results as in the official perl script (besides the number of sampling if not high enough). Default:True
+        Note 2: Stemming of the official Porter Stemmer of the ROUGE perl script is
+        slightly different and the Porter one implemented in NLTK. However, special
+        cases of DUC 2004 have been traited. The solution would be to rewrite the whole
+        perl stemming in python from the original script
 
-        Raises:
-          ValueError: raises exception if metric is not among AVAILABLE_METRICS
-          ValueError: raises exception if length_limit_type is not among AVAILABLE_LENGTH_LIMIT_TYPES
-          ValueError: raises exception if weight_factor < 0
+        Parameters
+        ----------
+        metrics: {'rouge-n', 'rouge-l', 'rouge-w'}, optional
+            What ROUGE score to compute.
+        max_n: int, optional
+            N-grams for ROUGE-N if specify.
+        limit_length: bool, optional
+            If the summaries must be truncated.
+        length_limit: int, optional
+            Number of the truncation where the unit is express int length_limit_Type. In
+            bytes.
+        length_limit_type: {'bytes', 'words'}, optional
+            Unit of length_limit.
+        apply_avg: bool, optional
+            If we should average the score of multiple samples. If `apply_avg` and
+            `apply_best` are :obj:`False`, then each ROUGE scores are independent.
+        apply_best: bool, optional
+            Take the best instead of the average.
+        stemming: bool, optional
+            Apply stemming to summaries.
+        alpha: float, optional
+            Alpha use to compute f1 score: ``P*R/((1-a)*P + a*R)``
+        weight_factor: float, optional
+            Weight factor to be used for ROUGE-W. Official rouge score defines it at
+            1.2
+        ensure_compatibility: bool, optional
+            Use same stemmer and special "hacks" to product same results as in the
+            official perl script (besides the number of sampling if not high enough)
+
+        Raises
+        ------
+        ValueError
+            If metric is not among AVAILABLE_METRICS, `length_limit_type` is not amon
+            AVAILABLE_LENGTH_LIMIT_TYPES, or `weight_factor` < 0
         """
         self.metrics = metrics[:] if metrics is not None else Rouge.DEFAULT_METRICS
         for m in self.metrics:
@@ -141,10 +165,13 @@ class Rouge:
 
     @staticmethod
     def load_stemmer(ensure_compatibility):
-        """
-        Load the stemmer that is going to be used if stemming is enabled
-        Args
-            ensure_compatibility: Use same stemmer and special "hacks" to product same results as in the official perl script (besides the number of sampling if not high enough)
+        """Load the stemmer that is going to be used if stemming is enabled
+
+        Parameters
+        ----------
+        ensure_compatibility: bool
+            Use same stemmer and special "hacks" to product same results as in the
+            official perl script (besides the number of sampling if not high enough)
         """
         Rouge.STEMMER = (
             nltk.stem.porter.PorterStemmer("ORIGINAL_ALGORITHM")
@@ -154,13 +181,22 @@ class Rouge:
 
     @staticmethod
     def load_wordnet_db(ensure_compatibility):
-        """
-        Load WordNet database to apply specific rules instead of stemming + load file for special cases to ensure kind of compatibility (at list with DUC 2004) with the original stemmer used in the Perl script
-        Args
-            ensure_compatibility: Use same stemmer and special "hacks" to product same results as in the official perl script (besides the number of sampling if not high enough)
+        """Load WordNet database
 
-        Raises:
-            FileNotFoundError: If one of both databases is not found
+        In order to to apply specific rules instead of stemming + load file for special
+        cases to ensure kind of compatibility (at list with DUC 2004) with the original
+        stemmer used in the Perl script
+
+        Parameters
+        ----------
+        ensure_compatibility: bool
+            Use same stemmer and special "hacks" to product same results as in the
+            official perl script (besides the number of sampling if not high enough)
+
+        Raises
+        ------
+        FileNotFoundError
+            If one of both databases is not found
         """
         files_to_load = [Rouge.WORDNET_DB_FILEPATH]
         if ensure_compatibility:
@@ -178,30 +214,41 @@ class Rouge:
 
     @staticmethod
     def tokenize_text(text, language="english"):
-        """
-        Tokenize text in the specific language
+        """Tokenize text in the specific language
 
-        Args:
-          text: The string text to tokenize
-          language: Language of the text
+        Parameters
+        ----------
+        text: str
+            The string text to tokenize
+        language: str, optional
+            Language of the text
 
-        Returns:
-          List of tokens of text
+        Returns
+        -------
+        tokens : list of str
+            List of tokens of text
         """
         return nltk.word_tokenize(text, language)
 
     @staticmethod
     def split_into_sentences(text, ensure_compatibility, language="english"):
-        """
-        Split text into sentences, using specified language. Use PunktSentenceTokenizer
+        """Split text into sentences, using specified language.
 
-        Args:
-          text: The string text to tokenize
-          ensure_compatibility: Split sentences by '\n' instead of NLTK sentence tokenizer model
-          language: Language of the text
+        Uses PunktSentenceTokenizer
 
-        Returns:
-          List of tokens of text
+        Parameters
+        ----------
+        text: str
+            The string text to tokenize
+        ensure_compatibility: bool
+            Split sentences by `'\n'` instead of NLTK sentence tokenizer model
+        language: str, optional
+            Language of the text
+
+        Returns
+        -------
+        tokens : list of str
+            List of tokens of text
         """
         if ensure_compatibility:
             return text.split("\n")
@@ -210,14 +257,17 @@ class Rouge:
 
     @staticmethod
     def stem_tokens(tokens):
-        """
-        Apply WordNetDB rules or Stem each token of tokens
+        """Apply WordNetDB rules or stem each token of tokens in place
 
-        Args:
-          tokens: List of tokens to apply WordNetDB rules or to stem
+        Parameters
+        ----------
+        tokens: lis of str
+            List of tokens to apply WordNetDB rules or to stem
 
-        Returns:
-          List of final stems
+        Returns
+        -------
+        tokens : list of str
+          List of final stems (same list)
         """
         # Stemming & Wordnet apply only if token has at least 3 chars
         for i, token in enumerate(tokens):
@@ -233,17 +283,22 @@ class Rouge:
 
     @staticmethod
     def _get_ngrams(n, text):
-        """
-        Calcualtes n-grams.
+        """Calcualtes n-gram counts
 
-        Args:
-          n: which n-grams to calculate
-          text: An array of tokens
+        Parameters
+        ----------
+        n: int
+            Which order n-grams to calculate.
+        text: sequence of str
+            An array of tokens
 
-        Returns:
-          A set of n-grams with their number of occurences
+        Returns
+        -------
+        ngram_set : dict
+            A set of n-grams with their number of occurences
         """
-        # Modified from https://github.com/pltrdy/seq2seq/blob/master/seq2seq/metrics/rouge.py
+        # Modified from
+        # https://github.com/pltrdy/seq2seq/blob/master/seq2seq/metrics/rouge.py
         ngram_set = collections.defaultdict(int)
         max_index_ngram_start = len(text) - n
         for i in range(max_index_ngram_start + 1):
@@ -252,31 +307,38 @@ class Rouge:
 
     @staticmethod
     def _split_into_words(sentences):
-        """
-        Splits multiple sentences into words and flattens the result
+        """Splits multiple sentences into words and flattens the result
 
-        Args:
-          sentences: list of string
+        Parameters
+        ----------
+        sentences: list of str
 
-        Returns:
-          A list of words (split by white space)
+        Returns
+        -------
+        words : list of str
+            A list of words (split by white space)
         """
-        # Modified from https://github.com/pltrdy/seq2seq/blob/master/seq2seq/metrics/rouge.py
+        # Modified from
+        # https://github.com/pltrdy/seq2seq/blob/master/seq2seq/metrics/rouge.py
         return list(itertools.chain(*[_.split() for _ in sentences]))
 
     @staticmethod
     def _get_word_ngrams_and_length(n, sentences):
-        """
-        Calculates word n-grams for multiple sentences.
+        """Calculates word n-grams for multiple sentences.
 
-        Args:
-          n: wich n-grams to calculate
-          sentences: list of string
+        Parameters
+        ----------
+        n: int
+            Wich order n-grams to calculate
+        sentences: list of str
 
-        Returns:
-          A set of n-grams, their frequency and #n-grams in sentences
+        Returns
+        -------
+        ngram_set, tokens, num : dict, list of str, int
+            A set of n-grams, their frequency and #n-grams in sentences
         """
-        # Modified from https://github.com/pltrdy/seq2seq/blob/master/seq2seq/metrics/rouge.py
+        # Modified from
+        # https://github.com/pltrdy/seq2seq/blob/master/seq2seq/metrics/rouge.py
         assert len(sentences) > 0
         assert n > 0
 
@@ -285,14 +347,16 @@ class Rouge:
 
     @staticmethod
     def _get_unigrams(sentences):
-        """
-        Calcualtes uni-grams.
+        """Calcualtes uni-grams.
 
-        Args:
-          sentences: list of string
+        Parameters
+        ----------
+        sentences: list of str
 
-        Returns:
-          A set of n-grams and their freqneucy
+        Returns
+        -------
+        unigram_set, num : dict, int
+            A set of n-grams and their frequencies
         """
         assert len(sentences) > 0
 
@@ -310,18 +374,27 @@ class Rouge:
         alpha=0.5,
         weight_factor=1.0,
     ):
-        """
-        Compute precision, recall and f1_score (with alpha: P*R / ((1-alpha)*P + alpha*R))
+        """Compute precision, recall and f1_score
 
-        Args:
-          evaluated_count: #n-grams in the hypothesis
-          reference_count: #n-grams in the reference
-          overlapping_count: #n-grams in common between hypothesis and reference
-          alpha: Value to use for the F1 score (default: 0.5)
-          weight_factor: Weight factor if we have use ROUGE-W (default: 1.0, no impact)
+        Using `alpha`: ``P*R / ((1-alpha)*P + alpha*R)``
 
-        Returns:
-          A dict with 'p', 'r' and 'f' as keys fore precision, recall, f1 score
+        Parameters
+        ----------
+        evaluated_count: int
+            #n-grams in the hypothesis
+        reference_count: int
+            #n-grams in the reference
+        overlapping_count: int
+            #n-grams in common between hypothesis and reference
+        alpha: float, optional
+            Value to use for the F1 score
+        weight_factor: float
+            Weight factor if we have use ROUGE-W
+
+        Returns
+        -------
+        scores : dict
+            A dict with 'p', 'r' and 'f' as keys fore precision, recall, f1 score
         """
         precision = (
             0.0 if evaluated_count == 0 else overlapping_count / float(evaluated_count)
@@ -338,16 +411,19 @@ class Rouge:
 
     @staticmethod
     def _compute_f_score(precision, recall, alpha=0.5):
-        """
-        Compute f1_score (with alpha: P*R / ((1-alpha)*P + alpha*R))
+        """Compute f1_score
 
-        Args:
-          precision: precision
-          recall: recall
-          overlapping_count: #n-grams in common between hypothesis and reference
+        Using alpha: ``P*R / ((1-alpha)*P + alpha*R))``
 
-        Returns:
-            f1 score
+        Parameters
+        ----------
+        precision: float
+        recall: float
+        alpha: float, optional
+
+        Returns
+        -------
+        f1_score : float
         """
         return (
             0.0
@@ -357,25 +433,34 @@ class Rouge:
 
     @staticmethod
     def _compute_ngrams(evaluated_sentences, reference_sentences, n):
+        """Computes n-grams overlap of two text collections of sentences.
+
+        `Source
+        <http://research.microsoft.com/en-us/um/people/cyl/download/papers/rouge-working-note-v1.3.1.pdf>`_
+
+        Parameters
+        ----------
+        evaluated_sentences: sequence of str
+            The sentences that have been picked by the summarizer.
+        reference_sentences: sequence of str
+            The sentences from the referene set.
+        n: int
+            Order of n-gram.
+
+        Returns
+        -------
+        evaluated_count, reference_count, overlapping_count : int, int, int
+            Number of n-grams for evaluated_sentences, reference_sentences and
+            intersection of both. Intersection of both counts multiple of occurences in
+            n-grams match several times.
+
+        Raises
+        ------
+        ValueError
+            If a param has len <= 0
         """
-        Computes n-grams overlap of two text collections of sentences.
-        Source: http://research.microsoft.com/en-us/um/people/cyl/download/
-        papers/rouge-working-note-v1.3.1.pdf
-
-        Args:
-          evaluated_sentences: The sentences that have been picked by the
-                               summarizer
-          reference_sentences: The sentences from the referene set
-          n: Size of ngram
-
-        Returns:
-          Number of n-grams for evaluated_sentences, reference_sentences and intersection of both.
-          intersection of both count multiple of occurences in n-grams match several times
-
-        Raises:
-          ValueError: raises exception if a param has len <= 0
-        """
-        # Modified from https://github.com/pltrdy/seq2seq/blob/master/seq2seq/metrics/rouge.py
+        # Modified from
+        # https://github.com/pltrdy/seq2seq/blob/master/seq2seq/metrics/rouge.py
         if len(evaluated_sentences) <= 0 or len(reference_sentences) <= 0:
             raise ValueError("Collections must contain at least 1 sentence.")
 
@@ -400,19 +485,31 @@ class Rouge:
     def _compute_ngrams_lcs(
         evaluated_sentences, reference_sentences, weight_factor=1.0
     ):
-        """
-        Computes ROUGE-L (summary level) of two text collections of sentences.
-        http://research.microsoft.com/en-us/um/people/cyl/download/papers/
-        rouge-working-note-v1.3.1.pdf
-        Args:
-          evaluated_sentences: The sentences that have been picked by the summarizer
-          reference_sentence: One of the sentences in the reference summaries
-          weight_factor: Weight factor to be used for WLCS (1.0 by default if LCS)
-        Returns:
-          Number of LCS n-grams for evaluated_sentences, reference_sentences and intersection of both.
-          intersection of both count multiple of occurences in n-grams match several times
-        Raises:
-          ValueError: raises exception if a param has len <= 0
+        """Computes ROUGE-L (summary level) of two text collections of sentences.
+
+        `Source
+        <http://research.microsoft.com/en-us/um/people/cyl/download/papers/rouge-working-note-v1.3.1.pdf>`_
+
+        Parameters
+        ----------
+        evaluated_sentences: sequence of str
+            The sentences that have been picked by the summarizer.
+        reference_sentence: str
+            One of the sentences in the reference summaries.
+        weight_factor: float, optional
+            Weight factor to be used for WLCS
+
+        Returns
+        -------
+        evaluated_count, reference_count, overlapping_count : int, int, int
+            Number of LCS n-grams for evaluated_sentences, reference_sentences and
+            intersection of both. Intersection of both counts multiple of occurences in
+            n-grams match several times.
+
+        Raises
+        ------
+        ValueError
+            If a param has len <= 0
         """
 
         def _lcs(x, y):
@@ -552,19 +649,25 @@ class Rouge:
         return evaluated_count, reference_count, overlapping_count
 
     def get_scores(self, hypothesis, references):
-        """
-        Compute precision, recall and f1 score between hypothesis and references
+        """Compute precision, recall and f1 score between hypothesis and references
 
-        Args:
-          hypothesis: hypothesis summary, string
-          references: reference summary/ies, either string or list of strings (if multiple)
+        Parameters
+        ----------
+        hypothesis: str or seqeuence of str
+            Hypothesis summary.
+        references: str or sequence of str
+            Reference summary/ies, either one or many.
 
-        Returns:
-          Return precision, recall and f1 score between hypothesis and references
+        Returns
+        ------
+        scores : dict
+            Return precision, recall and f1 score between hypothesis and references
 
-        Raises:
-          ValueError: raises exception if a type of hypothesis is different than the one of reference
-          ValueError: raises exception if a len of hypothesis is different than the one of reference
+        Raises
+        ------
+        ValueError
+            If a type of hypothesis is different than the one of reference or if a len
+            of hypothesis is different than the one of reference.
         """
         if isinstance(hypothesis, str):
             hypothesis, references = [hypothesis], [references]
@@ -581,7 +684,6 @@ class Rouge:
         )
         if has_rouge_n_metric:
             scores.update(self._get_scores_rouge_n(hypothesis, references))
-            # scores = {**scores, **self._get_scores_rouge_n(hypothesis, references)}
 
         has_rouge_l_metric = (
             len(
@@ -595,7 +697,6 @@ class Rouge:
         )
         if has_rouge_l_metric:
             scores.update(self._get_scores_rouge_l_or_w(hypothesis, references, False))
-            # scores = {**scores, **self._get_scores_rouge_l_or_w(hypothesis, references, False)}
 
         has_rouge_w_metric = (
             len(
@@ -609,20 +710,23 @@ class Rouge:
         )
         if has_rouge_w_metric:
             scores.update(self._get_scores_rouge_l_or_w(hypothesis, references, True))
-            # scores = {**scores, **self._get_scores_rouge_l_or_w(hypothesis, references, True)}
 
         return scores
 
     def _get_scores_rouge_n(self, all_hypothesis, all_references):
-        """
-        Computes precision, recall and f1 score between all hypothesis and references
+        """Computes precision, recall and f1 score between all hypothesis and references
 
-        Args:
-          hypothesis: hypothesis summary, string
-          references: reference summary/ies, either string or list of strings (if multiple)
+        Parameters
+        ----------
+        all_hypothesis: list of str
+            Hypothesis summaries.
+        all_references: list of str
+            Reference summary/ies, either string or list of strings (if multiple)
 
-        Returns:
-          Return precision, recall and f1 score between all hypothesis and references
+        Returns
+        -------
+        scores : dict
+            Return precision, recall and f1 score between all hypothesis and references
         """
         metrics = [metric for metric in self.metrics if metric.split("-")[-1].isdigit()]
 
@@ -739,15 +843,21 @@ class Rouge:
         return scores
 
     def _get_scores_rouge_l_or_w(self, all_hypothesis, all_references, use_w=False):
-        """
-        Computes precision, recall and f1 score between all hypothesis and references
+        """Computes precision, recall and f1 score between all hypothesis and references
 
-        Args:
-          hypothesis: hypothesis summary, string
-          references: reference summary/ies, either string or list of strings (if multiple)
+        Parameters
+        ----------
+        all_hypothesis: list of str
+            Hypothesis summaries.
+        all_references: list of str
+            Reference summary/ies, either string or list of strings (if multiple)
+        use_w : bool, optional
+            If true, compute ROUGE_W scores; otherwise ROUGE-L
 
-        Returns:
-          Return precision, recall and f1 score between all hypothesis and references
+        Returns
+        -------
+        scores : dict
+            Return precision, recall and f1 score between all hypothesis and references
         """
         metric = "rouge-w" if use_w else "rouge-l"
         if self.apply_avg or self.apply_best:
@@ -892,14 +1002,21 @@ class Rouge:
         return scores
 
     def _preprocess_summary_as_a_whole(self, summary):
-        """
-        Preprocessing (truncate text if enable, tokenization, stemming if enable, lowering) of a summary as a whole
+        """Preprocessing of a summary as a whole
 
-        Args:
-          summary: string of the summary
+        - truncate text if enabled
+        - tokenization
+        - stemming if enabled
+        - lowering
 
-        Returns:
-          Return the preprocessed summary (string)
+        Parameters
+        ----------
+        summary: str
+
+        Returns
+        -------
+        preprocessed_summary : list of str
+            The preprocessed summary.
         """
         sentences = Rouge.split_into_sentences(summary, self.ensure_compatibility)
 
@@ -934,8 +1051,9 @@ class Rouge:
 
         summary = Rouge.REMOVE_CHAR_PATTERN.sub(" ", summary.lower()).strip()
 
-        # Preprocess. Hack: because official ROUGE script bring "cannot" as "cannot" and "can not" as "can not",
-        # we have to hack nltk tokenizer to not transform "cannot/can not" to "can not"
+        # Preprocess. Hack: because official ROUGE script bring "cannot" as "cannot" and
+        # "can not" as "can not", we have to hack nltk tokenizer to not transform
+        # "cannot/can not" to "can not"
         if self.ensure_compatibility:
             tokens = self.tokenize_text(
                 Rouge.KEEP_CANNOT_IN_ONE_WORD.sub("_cannot_", summary)
@@ -956,14 +1074,21 @@ class Rouge:
         return preprocessed_summary
 
     def _preprocess_summary_per_sentence(self, summary):
-        """
-        Preprocessing (truncate text if enable, tokenization, stemming if enable, lowering) of a summary by sentences
+        """Preprocessing of a summary by sentences
 
-        Args:
-          summary: string of the summary
+        - truncate text if enabled
+        - tokenization
+        - stemming if enabled
+        - lowering
 
-        Returns:
-          Return the preprocessed summary (string)
+        Parameters
+        ----------
+        summary: str
+
+        Returns
+        -------
+        final_sentences : list of str
+            The preprocessed summary
         """
         sentences = Rouge.split_into_sentences(summary, self.ensure_compatibility)
 
@@ -1002,8 +1127,9 @@ class Rouge:
         for sentence in sentences:
             sentence = Rouge.REMOVE_CHAR_PATTERN.sub(" ", sentence.lower()).strip()
 
-            # Preprocess. Hack: because official ROUGE script bring "cannot" as "cannot" and "can not" as "can not",
-            # we have to hack nltk tokenizer to not transform "cannot/can not" to "can not"
+            # Preprocess. Hack: because official ROUGE script bring "cannot" as "cannot"
+            # and "can not" as "can not", we have to hack nltk tokenizer to not
+            # transform "cannot/can not" to "can not"
             if self.ensure_compatibility:
                 tokens = self.tokenize_text(
                     Rouge.KEEP_CANNOT_IN_ONE_WORD.sub("_cannot_", sentence)
@@ -1043,8 +1169,8 @@ def parse_args(args):
     parser = argparse.ArgumentParser(
         description=main.__doc__,
         epilog="""
-A ROUGE eval config file is of the following format. Hopefully your recipe
-(e.g. ggws.py) gives you a way to auto-generate this.
+A ROUGE eval config file is of the following format. Hopefully your recipe (e.g.
+ggws.py) gives you a way to auto-generate this.
 
   <ROUGE_EVAL version="1.5.5">
     <EVAL ID="<doc-id-1>">
@@ -1069,12 +1195,12 @@ A ROUGE eval config file is of the following format. Hopefully your recipe
 
 where
 - <doc-id-X> is a unique ID for one document you are summarizing
-- <system-id-X> is a unique ID specifying a single peer/hypothesis/ML system
-  that summarizes various documents
+- <system-id-X> is a unique ID specifying a single peer/hypothesis/ML system that
+  summarizes various documents
 - <model-id-X> is a unique ID specifying a single model/reference/gold-standard
   summarizer that summarizes various documents
-- <input-type> is one of "SEE", "SPL", or "ISI", though this script is currently
-  limited to "SPL"
+- <input-type> is one of "SEE", "SPL", or "ISI", though this script is currently limited
+  to "SPL"
 
 The "SPL" format is Sentence Per Line. That is, both the peer and model summaries are
 formatted such that sentences are delimited by newlines. Ex for
@@ -1112,7 +1238,7 @@ algorithms. Models are gold-standard summaries.
         "-n",
         type=get_ranged(0),
         default=0,
-        help="Calculate n-gram rouge up to and including n",
+        help="Calculate n-gram ROUGE up to and including n",
     )
     parser.add_argument(
         "-f",

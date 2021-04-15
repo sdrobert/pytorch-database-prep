@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-'''Common utilities for multiple setup scripts'''
+"""Common utilities for multiple setup scripts"""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -32,18 +32,18 @@ __email__ = "sdrobert@cs.toronto.edu"
 __license__ = "Apache 2.0"
 __copyright__ = "Copyright 2019 Sean Robertson"
 __all__ = [
-    'glob',
-    'mkdir',
-    'sort',
-    'cat',
-    'pipe_to',
-    'wc_l',
-    'chmod_u_plus_w',
-    'uniq',
+    "glob",
+    "mkdir",
+    "sort",
+    "cat",
+    "pipe_to",
+    "wc_l",
+    "chmod_u_plus_w",
+    "uniq",
 ]
 
 
-locale.setlocale(locale.LC_ALL, 'C')
+locale.setlocale(locale.LC_ALL, "C")
 
 
 def glob(root, pattern):
@@ -53,20 +53,20 @@ def glob(root, pattern):
 
 
 def mkdir(*dirs):
-    '''make a directory structures, ok if exists'''
+    """make a directory structures, ok if exists"""
     for dir_ in dirs:
         if not os.path.isdir(dir_):
             os.makedirs(dir_)
 
 
 def sort(in_stream):
-    '''yields sorted input stream'''
+    """yields sorted input stream"""
     for line in sorted(in_stream):
         yield line
 
 
 def uniq(in_stream):
-    '''yields input stream with duplicate subssequent lines suppressed'''
+    """yields input stream with duplicate subsequent lines suppressed"""
     last = None
     for line in in_stream:
         if line != last:
@@ -75,7 +75,7 @@ def uniq(in_stream):
 
 
 def cat(*paths):
-    '''yields lines of files in order'''
+    """yields lines of files in order"""
     for path in paths:
         if isinstance(path, str):
             with open(path) as f:
@@ -87,22 +87,22 @@ def cat(*paths):
 
 
 def pipe_to(in_stream, file_, append=False):
-    '''Write in_stream to file'''
+    """Write in_stream to file"""
     if isinstance(file_, str):
-        with open(file_, 'a' if append else 'w') as f:
+        with open(file_, "a" if append else "w") as f:
             pipe_to(in_stream, f)
     else:
         for line in in_stream:
             # unix-style line ends
-            print(line, file=file_, end='\n')
+            print(line, file=file_, end="\n")
 
 
 def wc_l(inp):
-    '''Output number of lines in file or stream'''
+    """Output number of lines in file or stream"""
     if isinstance(inp, str):
         with open(inp) as f:
             v = wc_l(f)
-        return '{} {}'.format(v, inp)
+        return "{} {}".format(v, inp)
     else:
         return sum(1 for x in inp)
 

@@ -36,13 +36,12 @@ import json
 from shutil import copy as copy_paths
 from tempfile import SpooledTemporaryFile
 
-import ngram_lm
-
 import pydrobert.torch.data
 import pydrobert.speech.util as speech_util
 import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
+from . import ngram_lm
 from pydrobert.speech.compute import FrameComputer
 from pydrobert.speech.util import alias_factory_subclass_from_arg
 
@@ -101,12 +100,16 @@ def timit_data_prep(timit, data_root):
         raise ValueError('"{}" is not a directory'.format(timit))
 
     test_dir = train_dir = None
-    for dir_ in glob.iglob(glob.escape(timit) + "/**/faks0", recursive=True):
+    for dir_ in glob.iglob(
+        glob.escape(timit) + "/**/[Ff][Aa][Kk][Ss]0", recursive=True
+    ):
         test_dir = os.path.dirname(os.path.dirname(dir_))
         break
     if test_dir is None:
         raise ValueError('Could not find "FAKS0" in {}'.format(timit))
-    for dir_ in glob.iglob(glob.escape(timit) + "/**/fcjf0", recursive=True):
+    for dir_ in glob.iglob(
+        glob.escape(timit) + "/**/[Ff][Cc][Jj][Ff]0", recursive=True
+    ):
         train_dir = os.path.dirname(os.path.dirname(dir_))
         break
     if train_dir is None:
@@ -122,9 +125,27 @@ def timit_data_prep(timit, data_root):
     utt2spk = dict()
     ctm = []
     stm = []
+    force_as = None
     for part, part_path in (("train", train_dir), ("test", test_dir)):
-        for path in glob.iglob(glob.escape(part_path) + "/**/*.WAV", recursive=True):
-            dur = len(speech_util.read_signal(path, force_as="sph")) / 16000
+        for path in glob.iglob(
+            glob.escape(part_path) + "/**/*.[Ww][Aa][Vv]", recursive=True
+        ):
+            if force_as is None:
+                try:
+                    # the default is a sphere file...
+                    sig = speech_util.read_signal(path, force_as="sph")
+                    force_as = "sph"
+                except OSError:
+                    # maybe the user converted the file to wav?
+                    sig = speech_util.read_signal(path, force_as="wav")
+                    force_as = "wav"
+            else:
+                try:
+                    sig = speech_util.read_signal(path, force_as="wav")
+                except OSError as e:
+                    raise OSError("Found both sphere and wav files!") from e
+            dur = len(sig) / 16000
+            del sig
             dname, bname = os.path.split(path.lower())
             prompt = bname.split(".")[0]
             dname, spk = os.path.split(dname)
@@ -211,6 +232,9 @@ def timit_data_prep(timit, data_root):
     with open(os.path.join(dir_, "all.ctm"), "w") as file_:
         for line in ctm:
             file_.write("{} {} {:.7f} {:.7f} {}\n".format(*line))
+
+    with open(os.path.join(dir_, "force_as.txt"), "w") as file_:
+        file_.write(force_as)
 
     for name, dict_ in (
         ("spk2dialect", spk2dialect),
@@ -422,6 +446,7 @@ def init_phn(options):
     os.makedirs(config_dir, exist_ok=True)
 
     for fn in (
+        "force_as.txt",
         "spk2dialect",
         "spk2gender",
         "spk2part",
@@ -637,13 +662,20 @@ def torch_dir(options):
     if dev_uttids:
         parts += (("dev", dev_uttids),)
 
+    force_as_path = os.path.join(config_dir, "force_as.txt")
+    if os.path.exists(force_as_path):
+        with open(force_as_path) as file_:
+            force_as = file_.read().strip()
+    else:
+        force_as = "sph"  # the default
+
     feat_optional_args = [
         "--channel",
         "-1",
         "--num-workers",
         str(torch.multiprocessing.cpu_count()),
         "--force-as",
-        "sph",
+        force_as,
         "--preprocess",
         options.preprocess,
         "--postprocess",

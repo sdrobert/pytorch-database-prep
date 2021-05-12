@@ -31,10 +31,6 @@
 
 """Command-line interface to prepare the WSJ CSR corpus for end to end ASR"""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import io
 import os
 import sys
@@ -49,12 +45,12 @@ import torch
 from collections import OrderedDict
 from shutil import copy as copy_paths
 
-import ngram_lm
 import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
-from unlzw import unlzw
-from common import glob, mkdir, sort, cat, pipe_to, wc_l
+from . import ngram_lm
+from .unlzw import unlzw
+from .common import glob, mkdir, sort, cat, pipe_to, wc_l
 
 import urllib.request as request
 
@@ -379,7 +375,8 @@ def wsj_data_prep(wsj_subdirs, data_root):
                 ndx2flist(
                     cat(
                         find_link_dir(
-                            wsj_subdirs, "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
+                            wsj_subdirs,
+                            "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
                         )
                     ),
                     wsj_subdirs,
@@ -401,10 +398,12 @@ def wsj_data_prep(wsj_subdirs, data_root):
                 ndx2flist(
                     cat(
                         find_link_dir(
-                            wsj_subdirs, "13-34.1/wsj1/doc/indices/si_tr_s.ndx",
+                            wsj_subdirs,
+                            "13-34.1/wsj1/doc/indices/si_tr_s.ndx",
                         ),
                         find_link_dir(
-                            wsj_subdirs, "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
+                            wsj_subdirs,
+                            "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
                         ),
                     ),
                     wsj_subdirs,
@@ -471,7 +470,8 @@ def wsj_data_prep(wsj_subdirs, data_root):
                     x.replace("13_32_1", "13_33_1")
                     for x in cat(
                         find_link_dir(
-                            wsj_subdirs, "13-32.1/wsj1/doc/indices/wsj1/eval/h1_p0.ndx",
+                            wsj_subdirs,
+                            "13-32.1/wsj1/doc/indices/wsj1/eval/h1_p0.ndx",
                         )
                     )
                 ),
@@ -491,7 +491,8 @@ def wsj_data_prep(wsj_subdirs, data_root):
                     x.replace("13_32_1", "13_33_1")
                     for x in cat(
                         find_link_dir(
-                            wsj_subdirs, "13-32.1/wsj1/doc/indices/wsj1/eval/h2_p0.ndx",
+                            wsj_subdirs,
+                            "13-32.1/wsj1/doc/indices/wsj1/eval/h2_p0.ndx",
                         )
                     )
                 ),
@@ -509,7 +510,12 @@ def wsj_data_prep(wsj_subdirs, data_root):
     pipe_to(
         sort(
             ndx2flist(
-                cat(find_link_dir(wsj_subdirs, "13-34.1/wsj1/doc/indices/h1_p0.ndx",)),
+                cat(
+                    find_link_dir(
+                        wsj_subdirs,
+                        "13-34.1/wsj1/doc/indices/h1_p0.ndx",
+                    )
+                ),
                 wsj_subdirs,
             )
         ),
@@ -863,7 +869,7 @@ def wsj_word_lm(wsj_subdirs, config_dir, max_order):
     assert os.path.isdir(train_data_root)
     train_data_files = []
     for subdir in ("87", "88", "89"):
-        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.z"))
+        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.[Zz]"))
     with gzip.open(cleaned_txt_gz, "wt") as out:
         for train_data_file in train_data_files:
             with open(train_data_file, "rb") as in_:
@@ -1031,7 +1037,7 @@ def wsj_char_lm(wsj_subdirs, config_dir, max_order, ngraph_order):
     assert os.path.isdir(train_data_root)
     train_data_files = []
     for subdir in ("87", "88", "89"):
-        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.z"))
+        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.[Zz]"))
     with gzip.open(cleaned_txt_gz, "wt") as out:
         for train_data_file in train_data_files:
             with open(train_data_file, "rb") as in_:
@@ -1195,7 +1201,7 @@ def wsj_init_subword_config(
     assert os.path.isdir(train_data_root)
     train_data_files = []
     for subdir in ("87", "88", "89"):
-        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.z"))
+        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.[Zz]"))
     with open(cleaned_txt, "w") as out:
         for train_data_file in train_data_files:
             with open(train_data_file, "rb") as in_:

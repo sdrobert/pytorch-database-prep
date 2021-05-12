@@ -30,7 +30,7 @@ from shutil import copy as copy_paths
 
 import pydrobert.torch.command_line as torch_cmd
 
-from common import mkdir
+from .common import mkdir
 
 __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"

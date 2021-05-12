@@ -54,11 +54,6 @@ from .common import glob, mkdir, sort, cat, pipe_to, wc_l
 
 import urllib.request as request
 
-__author__ = "Sean Robertson"
-__email__ = "sdrobert@cs.toronto.edu"
-__license__ = "Apache 2.0"
-__copyright__ = "Copyright 2020 Sean Robertson"
-
 
 locale.setlocale(locale.LC_ALL, "C")
 
@@ -1247,7 +1242,7 @@ def wsj_init_subword_config(
             word, _ = line.strip().split()
             # replace the control character that sentencepiece uses with an
             # underscore
-            word = word.replace(u"\u2581", "_")
+            word = word.replace("\u2581", "_")
             if word == "<unk>":
                 break  # last word, but don't use it
             t2id.write("{} {}\n".format(word, i))
@@ -1894,6 +1889,14 @@ def torch_dir(options):
         if not is_test and unk is not None:  # never write <UNK> for test
             args += ["--unk-symbol", unk]
         torch_cmd.trn_to_torch_token_data_dir(args)
+
+        # verify correctness (while storing info as a bonus)
+        args = [
+            part_dir,
+            os.path.join(ext, f"{partition}.info.ark"),
+            "--strict",
+        ]
+        assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
 
 def filter_(options):

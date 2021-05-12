@@ -1,6 +1,6 @@
 #! /usr/bin/env python
 
-# Copyright 2020 Sean Robertson
+# Copyright 2021 Sean Robertson
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,11 +31,6 @@ from shutil import copy as copy_paths
 import pydrobert.torch.command_line as torch_cmd
 
 from .common import mkdir
-
-__author__ = "Sean Robertson"
-__email__ = "sdrobert@cs.toronto.edu"
-__license__ = "Apache 2.0"
-__copyright__ = "Copyright 2020 Sean Robertson"
 
 
 locale.setlocale(locale.LC_ALL, "C")
@@ -73,7 +68,7 @@ def preamble(options):
                     # so that it doesn't muck with our use of underscore in
                     # subwords (the database hasn't been entirely sanitized of
                     # these anyway)
-                    line = line.replace(u"\u00A0", " ").replace("_", "&#95;")
+                    line = line.replace("\u00A0", " ").replace("_", "&#95;")
                     # replace 'UNK' in the test set with '<unk>' to be
                     # consistent with the training set. I prefer '<unk>'
                     # because it's quite clearly a control character
@@ -197,6 +192,7 @@ def torch_dir(options):
 
     for is_test, partition in enumerate(("train", "dev", "test")):
         both_args = []
+        part_dir = os.path.join(dir_, partition)
 
         if is_test:
             cur_token2id = dict(token2id)
@@ -212,7 +208,6 @@ def torch_dir(options):
         for type_ in ("sent", "head"):
             trn_src = os.path.join(config_dir, ".".join((partition, type_, "trn")))
             trn_dest = os.path.join(ext, ".".join((partition, type_, "trn")))
-            part_dir = os.path.join(dir_, partition)
             torch_dir_ = os.path.join(part_dir, "feat" if type_ == "sent" else "ref")
 
             copy_paths(trn_src, trn_dest)
@@ -226,9 +221,12 @@ def torch_dir(options):
                         trans.pop()  # remove sent id
                         for word in trans:
                             cur_token2id.setdefault(word, len(cur_token2id))
-                args += ["--skip-frame-times"]
             else:
-                args += ["--unk-symbol", "<unk>", "--feat-sizing"]
+                args += ["--unk-symbol", "<unk>"]
+            if type_ == "sent":
+                args += ["--feat-sizing"]
+            else:
+                args += ["--skip-frame-times"]
 
         if is_test:
             with open(cur_id2token_txt, "w") as id2t, open(
@@ -240,6 +238,15 @@ def torch_dir(options):
 
         for args in both_args:
             torch_cmd.trn_to_torch_token_data_dir(args)
+
+        # store info
+        # FIXME(sdrobert): pydrobert-pytorch should allow for reference sequences
+        # without a second dimension
+        args = [
+            part_dir,
+            os.path.join(ext, f"{partition}.info.ark"),
+        ]
+        assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
 
 def prefix_baseline(options):

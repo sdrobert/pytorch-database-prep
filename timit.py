@@ -45,11 +45,6 @@ from . import ngram_lm
 from pydrobert.speech.compute import FrameComputer
 from pydrobert.speech.util import alias_factory_subclass_from_arg
 
-__author__ = "Sean Robertson"
-__email__ = "sdrobert@cs.toronto.edu"
-__license__ = "Apache 2.0"
-__copyright__ = "Copyright 2020 Sean Robertson"
-
 
 locale.setlocale(locale.LC_ALL, "C")
 

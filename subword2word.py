@@ -17,11 +17,6 @@
 import argparse
 import sys
 
-__author__ = "Sean Robertson"
-__email__ = "sdrobert@cs.toronto.edu"
-__license__ = "Apache 2.0"
-__copyright__ = "Copyright 2021 Sean Robertson"
-
 
 def main(args=None):
 

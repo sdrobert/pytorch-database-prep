@@ -41,7 +41,7 @@ import pydrobert.speech.util as speech_util
 import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
-from . import ngram_lm
+import ngram_lm  # type: ignore (pylance might complain if in subdirectory)
 from pydrobert.speech.compute import FrameComputer
 from pydrobert.speech.util import alias_factory_subclass_from_arg
 

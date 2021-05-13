@@ -30,7 +30,7 @@ from shutil import copy as copy_paths
 
 import pydrobert.torch.command_line as torch_cmd
 
-from .common import mkdir
+from common import mkdir  # type: ignore (pylance might complain if in subdirectory)
 
 
 locale.setlocale(locale.LC_ALL, "C")

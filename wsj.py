@@ -41,19 +41,17 @@ import locale
 import gzip
 import itertools
 import torch
+import urllib.request as request
 
 from collections import OrderedDict
 from shutil import copy as copy_paths
 
+import ngram_lm  # type: ignore (pylance might complain if in subdirectory)
 import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
-from . import ngram_lm
-from .unlzw import unlzw
-from .common import glob, mkdir, sort, cat, pipe_to, wc_l
-
-import urllib.request as request
-
+from unlzw import unlzw  # type: ignore
+from common import glob, mkdir, sort, cat, pipe_to, wc_l  # type: ignore
 
 locale.setlocale(locale.LC_ALL, "C")
 
@@ -370,8 +368,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
                 ndx2flist(
                     cat(
                         find_link_dir(
-                            wsj_subdirs,
-                            "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
+                            wsj_subdirs, "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
                         )
                     ),
                     wsj_subdirs,
@@ -393,12 +390,10 @@ def wsj_data_prep(wsj_subdirs, data_root):
                 ndx2flist(
                     cat(
                         find_link_dir(
-                            wsj_subdirs,
-                            "13-34.1/wsj1/doc/indices/si_tr_s.ndx",
+                            wsj_subdirs, "13-34.1/wsj1/doc/indices/si_tr_s.ndx",
                         ),
                         find_link_dir(
-                            wsj_subdirs,
-                            "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
+                            wsj_subdirs, "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
                         ),
                     ),
                     wsj_subdirs,
@@ -465,8 +460,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
                     x.replace("13_32_1", "13_33_1")
                     for x in cat(
                         find_link_dir(
-                            wsj_subdirs,
-                            "13-32.1/wsj1/doc/indices/wsj1/eval/h1_p0.ndx",
+                            wsj_subdirs, "13-32.1/wsj1/doc/indices/wsj1/eval/h1_p0.ndx",
                         )
                     )
                 ),
@@ -486,8 +480,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
                     x.replace("13_32_1", "13_33_1")
                     for x in cat(
                         find_link_dir(
-                            wsj_subdirs,
-                            "13-32.1/wsj1/doc/indices/wsj1/eval/h2_p0.ndx",
+                            wsj_subdirs, "13-32.1/wsj1/doc/indices/wsj1/eval/h2_p0.ndx",
                         )
                     )
                 ),
@@ -505,12 +498,7 @@ def wsj_data_prep(wsj_subdirs, data_root):
     pipe_to(
         sort(
             ndx2flist(
-                cat(
-                    find_link_dir(
-                        wsj_subdirs,
-                        "13-34.1/wsj1/doc/indices/h1_p0.ndx",
-                    )
-                ),
+                cat(find_link_dir(wsj_subdirs, "13-34.1/wsj1/doc/indices/h1_p0.ndx",)),
                 wsj_subdirs,
             )
         ),

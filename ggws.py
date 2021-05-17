@@ -239,13 +239,7 @@ def torch_dir(options):
         for args in both_args:
             torch_cmd.trn_to_torch_token_data_dir(args)
 
-        # store info
-        # FIXME(sdrobert): pydrobert-pytorch should allow for reference sequences
-        # without a second dimension
-        args = [
-            part_dir,
-            os.path.join(ext, f"{partition}.info.ark"),
-        ]
+        args = [part_dir, os.path.join(ext, f"{partition}.info.ark"), "--strict"]
         assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
 

@@ -14,18 +14,10 @@
 
 """Common utilities for multiple setup scripts"""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 import locale
 import stat
-
-try:
-    import pathlib
-except ImportError:
-    import pathlib2 as pathlib
+import pathlib
 
 __author__ = "Sean Robertson"
 __email__ = "sdrobert@cs.toronto.edu"

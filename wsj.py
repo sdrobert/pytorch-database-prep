@@ -31,10 +31,6 @@
 
 """Command-line interface to prepare the WSJ CSR corpus for end to end ASR"""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import io
 import os
 import sys
@@ -45,24 +41,17 @@ import locale
 import gzip
 import itertools
 import torch
+import urllib.request as request
 
 from collections import OrderedDict
 from shutil import copy as copy_paths
 
-import ngram_lm
+import ngram_lm  # type: ignore (pylance might complain if in subdirectory)
 import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
-from unlzw import unlzw
-from common import glob, mkdir, sort, cat, pipe_to, wc_l
-
-import urllib.request as request
-
-__author__ = "Sean Robertson"
-__email__ = "sdrobert@cs.toronto.edu"
-__license__ = "Apache 2.0"
-__copyright__ = "Copyright 2020 Sean Robertson"
-
+from unlzw import unlzw  # type: ignore
+from common import glob, mkdir, sort, cat, pipe_to, wc_l  # type: ignore
 
 locale.setlocale(locale.LC_ALL, "C")
 
@@ -863,7 +852,7 @@ def wsj_word_lm(wsj_subdirs, config_dir, max_order):
     assert os.path.isdir(train_data_root)
     train_data_files = []
     for subdir in ("87", "88", "89"):
-        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.z"))
+        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.[Zz]"))
     with gzip.open(cleaned_txt_gz, "wt") as out:
         for train_data_file in train_data_files:
             with open(train_data_file, "rb") as in_:
@@ -1031,7 +1020,7 @@ def wsj_char_lm(wsj_subdirs, config_dir, max_order, ngraph_order):
     assert os.path.isdir(train_data_root)
     train_data_files = []
     for subdir in ("87", "88", "89"):
-        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.z"))
+        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.[Zz]"))
     with gzip.open(cleaned_txt_gz, "wt") as out:
         for train_data_file in train_data_files:
             with open(train_data_file, "rb") as in_:
@@ -1195,7 +1184,7 @@ def wsj_init_subword_config(
     assert os.path.isdir(train_data_root)
     train_data_files = []
     for subdir in ("87", "88", "89"):
-        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.z"))
+        train_data_files.extend(glob(os.path.join(train_data_root, subdir), r"*.[Zz]"))
     with open(cleaned_txt, "w") as out:
         for train_data_file in train_data_files:
             with open(train_data_file, "rb") as in_:
@@ -1241,7 +1230,7 @@ def wsj_init_subword_config(
             word, _ = line.strip().split()
             # replace the control character that sentencepiece uses with an
             # underscore
-            word = word.replace(u"\u2581", "_")
+            word = word.replace("\u2581", "_")
             if word == "<unk>":
                 break  # last word, but don't use it
             t2id.write("{} {}\n".format(word, i))
@@ -1888,6 +1877,14 @@ def torch_dir(options):
         if not is_test and unk is not None:  # never write <UNK> for test
             args += ["--unk-symbol", unk]
         torch_cmd.trn_to_torch_token_data_dir(args)
+
+        # verify correctness (while storing info as a bonus)
+        args = [
+            part_dir,
+            os.path.join(ext, f"{partition}.info.ark"),
+            "--strict",
+        ]
+        assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
 
 def filter_(options):

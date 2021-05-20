@@ -217,7 +217,7 @@ def torch_dir(options):
                 cur_token2id_txt,
                 torch_dir_,
                 "--num-workers",
-                str(get_num_avail_cores()),
+                str(get_num_avail_cores() - 1),
             ]
             both_args.append(args)
             if is_test:

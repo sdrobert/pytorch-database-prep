@@ -670,7 +670,7 @@ def torch_dir(options):
         "--channel",
         "-1",
         "--num-workers",
-        str(get_num_avail_cores()),
+        str(get_num_avail_cores() - 1),
         "--force-as",
         force_as,
         "--preprocess",

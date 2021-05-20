@@ -1797,7 +1797,7 @@ def torch_dir(options):
         "--channel",
         "-1",
         "--num-workers",
-        str(get_num_avail_cores()),
+        str(get_num_avail_cores() - 1),
         "--force-as",
         "sph",
         "--preprocess",
@@ -1878,7 +1878,7 @@ def torch_dir(options):
             cur_token2id_txt,
             ref_dir,
             "--num-workers",
-            str(get_num_avail_cores()),
+            str(get_num_avail_cores() - 1),
         ]
         if not is_test and unk is not None:  # never write <UNK> for test
             args += ["--unk-symbol", unk]

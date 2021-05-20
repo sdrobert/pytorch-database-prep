@@ -51,7 +51,7 @@ import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
 from unlzw import unlzw  # type: ignore
-from common import glob, mkdir, sort, cat, pipe_to, wc_l  # type: ignore
+from common import get_num_avail_cores, glob, mkdir, sort, cat, pipe_to, wc_l  # type: ignore
 
 locale.setlocale(locale.LC_ALL, "C")
 
@@ -1797,7 +1797,7 @@ def torch_dir(options):
         "--channel",
         "-1",
         "--num-workers",
-        str(torch.multiprocessing.cpu_count()),
+        str(get_num_avail_cores()),
         "--force-as",
         "sph",
         "--preprocess",
@@ -1873,7 +1873,13 @@ def torch_dir(options):
         else:
             cur_token2id_txt = token2id_txt
 
-        args = [trn_src, cur_token2id_txt, ref_dir]
+        args = [
+            trn_src,
+            cur_token2id_txt,
+            ref_dir,
+            "--num-workers",
+            str(get_num_avail_cores()),
+        ]
         if not is_test and unk is not None:  # never write <UNK> for test
             args += ["--unk-symbol", unk]
         torch_cmd.trn_to_torch_token_data_dir(args)

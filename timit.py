@@ -45,6 +45,8 @@ import ngram_lm  # type: ignore (pylance might complain if in subdirectory)
 from pydrobert.speech.compute import FrameComputer
 from pydrobert.speech.util import alias_factory_subclass_from_arg
 
+from common import get_num_avail_cores  # type: ignore
+
 
 locale.setlocale(locale.LC_ALL, "C")
 
@@ -136,7 +138,7 @@ def timit_data_prep(timit, data_root):
                     force_as = "wav"
             else:
                 try:
-                    sig = speech_util.read_signal(path, force_as="wav")
+                    sig = speech_util.read_signal(path, force_as=force_as)
                 except OSError as e:
                     raise OSError("Found both sphere and wav files!") from e
             dur = len(sig) / 16000
@@ -668,7 +670,7 @@ def torch_dir(options):
         "--channel",
         "-1",
         "--num-workers",
-        str(torch.multiprocessing.cpu_count()),
+        str(get_num_avail_cores()),
         "--force-as",
         force_as,
         "--preprocess",

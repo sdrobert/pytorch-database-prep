@@ -30,7 +30,7 @@ from shutil import copy as copy_paths
 
 import pydrobert.torch.command_line as torch_cmd
 
-from common import mkdir  # type: ignore (pylance might complain if in subdirectory)
+from common import mkdir, get_num_avail_cores  # type: ignore (pylance might complain if in subdirectory)
 
 
 locale.setlocale(locale.LC_ALL, "C")
@@ -212,7 +212,13 @@ def torch_dir(options):
 
             copy_paths(trn_src, trn_dest)
 
-            args = [trn_src, cur_token2id_txt, torch_dir_]
+            args = [
+                trn_src,
+                cur_token2id_txt,
+                torch_dir_,
+                "--num-workers",
+                str(get_num_avail_cores() - 1),
+            ]
             both_args.append(args)
             if is_test:
                 with open(trn_src) as file_:

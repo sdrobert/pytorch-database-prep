@@ -38,6 +38,13 @@ __all__ = [
 locale.setlocale(locale.LC_ALL, "C")
 
 
+def get_num_avail_cores() -> int:
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    else:
+        return os.cpu_count()
+
+
 def glob(root, pattern):
     path = pathlib.Path(root)
     for match in path.glob(pattern):

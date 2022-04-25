@@ -19,7 +19,7 @@ included in some other Git repository as a submodule and pinned to a specific
 commit, e.g.
 
 ``` sh
-git submodule https://github.com/sdrobert/pytorch-database-prep prep
+git submodule add https://github.com/sdrobert/pytorch-database-prep prep
 cd prep
 git checkout --detach  # current commit
 ```

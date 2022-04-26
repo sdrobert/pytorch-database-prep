@@ -644,11 +644,13 @@ def write_arpa(prob_list, out=sys.stdout):
         out.write("\\{}-grams:\n".format(idx + 1))
         if idx == len(entries_by_order) - 1:
             for entry in entries:
-                out.write("{} {}\n".format(" ".join(entry[0]), entry[1]))
+                out.write("{:f} {}\n".format(entry[1], " ".join(entry[0])))
         else:
             for entry in entries:
                 out.write(
-                    "{} {} {}\n".format(entry[1][0], " ".join(entry[0]), entry[1][1])
+                    "{:f} {} {:f}\n".format(
+                        entry[1][0], " ".join(entry[0]), entry[1][1]
+                    )
                 )
         out.write("\n")
     out.write("\\end\\\n")

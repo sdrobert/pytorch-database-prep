@@ -28,6 +28,7 @@ import argparse
 import glob
 import gzip
 import locale
+import math
 import os
 import sys
 import torch
@@ -519,7 +520,15 @@ def train_phn_lm(config_dir, max_order):
     # the number of times a given prompt occurred was controlled by the corpus
     # creators, so there's no reason a sentence that occurred three times is more
     # valuable than one that occurred only once. Drop duplicate entries
-    sents = set(sents)
+    sents = sorted(set(sents))
+
+    # write the training data to a gzipped trn file in case someone wants to train with
+    # it. We don't reuse utterance ids because we dropped duplicate entries previously.
+    num_digits = int(math.log10(len(sents)) + 1)
+    utt_format_str = f" (lm{{:0{num_digits}d}})\n"
+    with gzip.open(os.path.join(config_dir, "lm_train.trn.gz"), "wt") as file_:
+        for idx, sent in enumerate(sents):
+            file_.write(" ".join(sent) + utt_format_str.format(idx))
 
     ngram_counts = ngram_lm.sents_to_ngram_counts(
         sents, max_order, sos="<s>", eos="</s>"

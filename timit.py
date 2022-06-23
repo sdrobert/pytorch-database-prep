@@ -31,8 +31,8 @@ import locale
 import math
 import os
 import sys
-import torch
 import json
+import warnings
 
 from shutil import copy as copy_paths
 from tempfile import SpooledTemporaryFile
@@ -44,6 +44,7 @@ import pydrobert.torch.command_line as torch_cmd
 
 import ngram_lm  # type: ignore (pylance might complain if in subdirectory)
 from pydrobert.speech.compute import FrameComputer
+from pydrobert.speech.post import PostProcessor, Stack
 from pydrobert.speech.util import alias_factory_subclass_from_arg
 
 from common import get_num_avail_cores  # type: ignore
@@ -701,6 +702,33 @@ def torch_dir(options):
         frame_shift_ms = computer.frame_shift_ms
         del computer, json_
 
+    # FIXME(sdrobert): brittle. Needs to be manually updated with new postprocessors
+    # and preprocessors
+    do_strict = True
+    try:
+        with open(options.postprocess) as f:
+            json_ = json.load(f)
+    except IOError:
+        json_ = json.loads(options.postprocess)
+    postprocessors = []
+    if isinstance(json_, dict):
+        postprocessors.append(alias_factory_subclass_from_arg(PostProcessor, json_))
+    else:
+        for element in json_:
+            postprocessors.append(
+                alias_factory_subclass_from_arg(PostProcessor, element)
+            )
+    for postprocessor in postprocessors:
+        if isinstance(postprocessor, Stack):
+            if postprocessor._pad_mode is None:
+                warnings.warn(
+                    "Found a stack postprocessor with no pad_mode. This will likely "
+                    "mess up the segment boundaries. Disabling --strict check."
+                )
+                do_strict = False
+            frame_shift_ms *= postprocessor.num_vectors
+    del postprocessors, json_
+
     ctm_src = os.path.join(config_dir, "all.ctm")
     stm_src = os.path.join(config_dir, "all.stm")
     trn_src = os.path.join(config_dir, "all.trn")
@@ -770,8 +798,9 @@ def torch_dir(options):
         args = [
             part_dir,
             os.path.join(ext, f"{part}.info.ark"),
-            "--strict",
         ]
+        if do_strict:
+            args.append("--strict")
         assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
 

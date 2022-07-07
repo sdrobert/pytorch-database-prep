@@ -37,10 +37,8 @@ import sys
 import argparse
 import re
 import warnings
-import locale
 import gzip
 import itertools
-import torch
 import urllib.request as request
 
 from collections import OrderedDict
@@ -52,9 +50,6 @@ import pydrobert.torch.command_line as torch_cmd
 
 from unlzw import unlzw  # type: ignore
 from common import get_num_avail_cores, glob, mkdir, sort, cat, pipe_to, wc_l  # type: ignore
-
-locale.setlocale(locale.LC_ALL, "C")
-
 
 ALPHA = set(chr(x) for x in range(ord("A"), ord("Z") + 1))
 

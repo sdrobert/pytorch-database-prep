@@ -27,7 +27,6 @@
 import argparse
 import glob
 import gzip
-import locale
 import math
 import os
 import sys
@@ -49,8 +48,6 @@ from pydrobert.speech.util import alias_factory_subclass_from_arg
 
 from common import get_num_avail_cores  # type: ignore
 
-
-locale.setlocale(locale.LC_ALL, "C")
 
 RESOURCE_DIR = os.path.join(os.path.dirname(__file__), "resources", "timit")
 if not os.path.isdir(RESOURCE_DIR):

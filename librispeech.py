@@ -2,7 +2,7 @@
 
 # Copyright 2022 Sean Robertson
 #
-# Adapted from kaldi/egs/librispeech/s5/local/
+# The download and preamble steps were adapted from kaldi/egs/librispeech/s5/local/
 #                                   {data_prep,download_and_untar,download_lm}.sh
 #
 # Copyright 2014 Vassil Panayotov
@@ -280,11 +280,22 @@ def preamble(options):
             raise ValueError(f"'{root_dir}' does not exist or is not a directory")
 
     speakers_txt = find_file(root_dir, "SPEAKERS.TXT")
+    reader2gender = dict()
+    with open(speakers_txt) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith(";"):
+                continue
+            reader, gender, _ = line.split("|", 2)
+            reader, gender = reader.strip(), gender.strip().lower()
+            if gender not in {"m", "f"}:
+                raise ValueError(f"Unexpected gender '{gender}'")
+            reader2gender[reader] = gender
 
     for fname in AM_FNAMES:
         libri_dir = find_file(root_dir, fname)
         data_dir = os.path.join(local_dir, fname)
-        data_prep(libri_dir, data_dir, speakers_txt)
+        data_prep(libri_dir, data_dir, reader2gender)
 
     vocab_txt = find_file(root_dir, "librispeech-vocab.txt")
     shutil.copy(vocab_txt, os.path.join(local_dir, "librispeech-vocab.txt"))

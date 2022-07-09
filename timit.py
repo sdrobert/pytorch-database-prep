@@ -909,14 +909,14 @@ def build_init_phn_parser(subparsers):
     parser = subparsers.add_parser(
         "init_phn",
         help="Perform setup common to all phone-based parsing. "
-        "Needs to be done only once for a specific vocabulary size",
+        "Needs to be done only once for a specific vocabulary size (and language "
+        "model, if training one).",
     )
     parser.add_argument(
         "--config-subdir",
         default=None,
         help="Name of sub directory in data/local/ under which to store setup "
-        "specific to this vocabulary size. Defaults to "
-        "``phn<vocab_size>``",
+        "specific to this vocabulary size + lm. Defaults to 'phn<vocab_size>'",
     )
     parser.add_argument(
         "--vocab-size",

@@ -54,7 +54,7 @@ LM_FILES = (
     "3-gram.pruned.1e-7.arpa.gz",
     "3-gram.pruned.3e-7.arpa.gz",
     "4-gram.arpa.gz",
-    "librispeech-lexicon.txt",
+    # "librispeech-lexicon.txt",
     "librispeech-lm-norm.txt.gz",
 )
 
@@ -90,6 +90,10 @@ AM_URL_PATH = "resources/12"
 LM_URL_PATH = "resources/11"
 
 CHUNK_SIZE = 10240
+
+RESOURCE_DIR = os.path.join(os.path.dirname(__file__), "resources", "librispeech")
+if not os.path.isdir(RESOURCE_DIR):
+    raise ValueError('"{}" is not a directory'.format(RESOURCE_DIR))
 
 
 # https://stackoverflow.com/questions/3431825/generating-an-md5-checksum-of-a-file
@@ -205,7 +209,7 @@ def find_file(root, file_name):
     return paths.pop()
 
 
-def data_prep(libri_dir, data_dir, reader2gender):
+def data_prep(libri_dir, data_dir, reader2gender, speakers_are_readers):
     # FIXME(sdrobert): allow for reader to be speaker, not reader/chapter
     # combo. Kaldi uses the latter for practical reasons, but the former is
     # more accurate.
@@ -228,6 +232,8 @@ def data_prep(libri_dir, data_dir, reader2gender):
                 raise ValueError(f"Unexpected subdirectory name '{reader}'")
 
             reader_gender = reader2gender[reader]
+            if speakers_are_readers:
+                spk2gender.write(f"lbi-{reader} {reader_gender}\n")
 
             for chapter in sorted(os.listdir(reader_dir)):
                 chapter_dir = os.path.join(reader_dir, chapter)
@@ -259,27 +265,26 @@ def data_prep(libri_dir, data_dir, reader2gender):
                     for line in f:
                         trans.write("lbi-" + line)
                         uttid = "lbi-" + line.split(" ", 1)[0]
-                        utt2spk.write(f"{uttid} lbi-{reader}-{chapter}\n")
+                        if speakers_are_readers:
+                            utt2spk.write(f"{uttid} lbi-{reader}\n")
+                        else:
+                            utt2spk.write(f"{uttid} lbi-{reader}-{chapter}\n")
 
-                spk2gender.write(f"lbi-{reader}-{chapter} {reader_gender}\n")
+                if not speakers_are_readers:
+                    spk2gender.write(f"lbi-{reader}-{chapter} {reader_gender}\n")
 
 
 def preamble(options):
-    local_dir = os.path.join(options.data_root, "local")
+    data_dir = os.path.join(options.data_root, "local", "data")
     if options.librispeech_root is None:
-        root_dir = os.path.join(local_dir, "data")
-        if not os.path.isdir(root_dir):
-            raise ValueError(
-                f"'{root_dir}' does not exist or is not a directory. If you did not "
-                "download librispeech via the 'download' command but manually, specify "
-                "the download directory as a command-line argument."
-            )
+        libri_dir = data_dir
     else:
-        root_dir = options.librispeech_root
-        if not os.path.isdir(root_dir):
-            raise ValueError(f"'{root_dir}' does not exist or is not a directory")
+        libri_dir = options.librispeech_root
+    if not os.path.isdir(libri_dir):
+        raise ValueError(f"'{libri_dir}' does not exist or is not a directory")
+    find_file(libri_dir, "84-121123-0000.flac")
 
-    speakers_txt = find_file(root_dir, "SPEAKERS.TXT")
+    speakers_txt = find_file(libri_dir, "SPEAKERS.TXT")
     reader2gender = dict()
     with open(speakers_txt) as f:
         for line in f:
@@ -293,19 +298,63 @@ def preamble(options):
             reader2gender[reader] = gender
 
     for fname in AM_FNAMES:
-        libri_dir = find_file(root_dir, fname)
-        data_dir = os.path.join(local_dir, fname)
-        data_prep(libri_dir, data_dir, reader2gender)
+        libri_subdir = find_file(libri_dir, fname)
+        data_subdir = os.path.join(data_dir, fname.replace("-", "_"))
+        data_prep(
+            libri_subdir, data_subdir, reader2gender, options.speakers_are_readers
+        )
 
-    vocab_txt = find_file(root_dir, "librispeech-vocab.txt")
-    shutil.copy(vocab_txt, os.path.join(local_dir, "librispeech-vocab.txt"))
+    if not options.exclude_subsets:
+        clean_100_dir = os.path.join(data_dir, "train_clean_100")
+        for subset_name in ("train_2kshort", "train_5k", "train_10k"):
+            lst_file = os.path.join(RESOURCE_DIR, subset_name + ".lst")
+            if not os.path.exists(lst_file):
+                raise ValueError(f"Could not find '{lst_file}'")
+            subset_ids = set()
+            with open(lst_file) as f:
+                for line in f:
+                    subset_ids.add(line.strip())
+            subset_dir = os.path.join(data_dir, subset_name)
+            os.makedirs(subset_dir, exist_ok=True)
+            for file_ in ("text", "utt2spk", "wav.scp"):
+                with open(os.path.join(clean_100_dir, file_)) as src, open(
+                    os.path.join(subset_dir, file_), "w"
+                ) as dst:
+                    for line in src:
+                        utt_id = line[: line.index(" ")]
+                        if utt_id in subset_ids:
+                            dst.write(line)
+            with open(os.path.join(clean_100_dir, "spk2gender")) as src, open(
+                os.path.join(subset_dir, "spk2gender"), "w"
+            ) as dst:
+                for line in src:
+                    spk = line[: line.index(" ")]
+                    if any(x.startswith(spk) for x in subset_ids):
+                        dst.write(line)
 
-    for fname in LM_FILES:
-        try:
-            path = find_file(root_dir, fname)
-        except:
-            continue
-        shutil.copy(path, os.path.join(local_dir, fname))
+
+def init_word(options):
+
+    local_dir = os.path.join(options.data_root, "local")
+    data_dir = os.path.join(local_dir, "data")
+    if not os.path.isdir(data_dir):
+        raise ValueError("{} does not exist; call preamble first!".format(data_dir))
+    if options.librispeech_root is None:
+        libri_dir = data_dir
+    else:
+        libri_dir = options.librispeech_root
+
+    config_dir = os.path.join(local_dir, options.config_subdir)
+
+    vocab_txt = find_file(libri_dir, "librispeech-vocab.txt")
+    vocab = set()
+    with open(vocab_txt) as f:
+        for line in f:
+            vocab.add(line.strip())
+    vocab = sorted(vocab)
+    assert len(vocab) == 200_000
+
+    os.makedirs(config_dir, exist_ok=True)
 
 
 def build_parser():
@@ -318,6 +367,7 @@ def build_parser():
     subparsers = parser.add_subparsers(title="commands", required=True, dest="command")
     build_download_parser(subparsers)
     build_preamble_parser(subparsers)
+    build_init_word_parser(subparsers)
 
     return parser
 
@@ -380,6 +430,53 @@ def build_preamble_parser(subparsers):
         "'train-clean-360', etc. If unset, will check the 'local/data/' subfolder of "
         "the data folder (the default storage location of the 'download' command).",
     )
+    parser.add_argument(
+        "--speakers-are-readers",
+        action="store_true",
+        default=False,
+        help="Kaldi (and us by default) treats each reader,chapter pair as a speaker. "
+        "Setting this flag overrides this behaviour, equating speakers with readers.",
+    )
+    parser.add_argument(
+        "--exclude-subsets",
+        action="store_true",
+        default=False,
+        help="Kaldi (and us by default) creates subsets of the train-clean-100 tranch "
+        "of the 2k shortest, 5k uniformly-spaced, and 10k unifomly-spaced samples. "
+        "These can be gradually introduced to the model to simplify training, though "
+        "they contain no new training data. Setting this flag excludes these subsets "
+        "from being created.",
+    )
+
+
+def build_init_word_parser(subparsers):
+    parser = subparsers.add_parser(
+        "init_word",
+        help="Perform setup common to all word-based parsing. "
+        "Needs to be done only once for a specific language model.",
+    )
+    parser.add_argument(
+        "librispeech_root",
+        nargs="?",
+        type=os.path.abspath,
+        default=None,
+        help="The root of the librispeech data directory. Contains 'dev-clean', "
+        "'train-clean-360', etc. If unset, will check the 'local/data/' subfolder of "
+        "the data folder (the default storage location of the 'download' command).",
+    )
+    parser.add_argument(
+        "--config-subdir",
+        default="wrd",
+        help="Name of sub directory in data/local/ under which to store setup "
+        "specific to this lm. Defaults to 'wrd'.",
+    )
+    parser.add_argument(
+        "--lm-name",
+        default="4-gram",
+        choices=["4-gram", "3-gram", "3-gram.pruned.1e-7", "3-gram.pruned.3e-7"],
+        help="The LM to save in the configuration",
+    )
+    # TODO(sdrobert): Custom n-gram LM training, if desired.
 
 
 def main(args=None):
@@ -392,6 +489,10 @@ def main(args=None):
         download(options)
     elif options.command == "preamble":
         preamble(options)
+    elif options.command == "init_word":
+        init_word(options)
+    else:
+        raise NotImplementedError(f"Command {options.command} not implemented")
 
 
 if __name__ == "__main__":

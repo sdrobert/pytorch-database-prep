@@ -1,16 +1,16 @@
 name: pytorch-database-prep
 channels:
   - pytorch
-  - sdrobert
   - conda-forge
   - defaults
 dependencies:
-  - python=3.9
-  - pytorch=1.8.1
-  - pydrobert-speech=0.2.0
+  - python>=3.7
+  - pytorch>=1.8.1
   - sentencepiece=0.1.95
   - nltk=3.5
   - pip
   - pip:  # FIXME(sdrobert): Update to conda dep when pydrobert-pytorch releases >0.3.0
-      - "git+https://github.com/sdrobert/pydrobert-pytorch.git@df218d5358d53b3ee8daaf7a824e44205ae296ac"
-prefix: pytorch-database-prep
+    - pydrobert
+    - jiwer
+    - "git+https://github.com/sdrobert/pydrobert-speech.git@fd0c48d9db0e4ff189f37d6f655dcac6070c70dd"
+    - "git+https://github.com/sdrobert/pydrobert-pytorch.git@6b366f912222990f477617cc5cfb76abb0ea4a7a"

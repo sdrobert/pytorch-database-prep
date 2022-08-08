@@ -430,14 +430,16 @@ def init_phn(options):
 
     phone_map = get_phone_map()
     for key in set(phone_map):
-        if options.vocab_size == 61:
+        if options.vocab_size >= 60:
             phone_map[key] = phone_map[key][0]
         elif options.vocab_size == 48:
             phone_map[key] = phone_map[key][1]
         else:
             phone_map[key] = phone_map[key][2]
+    if options.vocab_size == 60:
+        phone_map['q'] = None
     phone_set = sorted(set(val for val in phone_map.values() if val is not None))
-    phone_set += ["</s>", "<s>"]
+    assert len(phone_set) == options.vocab_size
 
     os.makedirs(config_dir, exist_ok=True)
 
@@ -922,7 +924,7 @@ def build_init_phn_parser(subparsers):
         "--vocab-size",
         default=48,
         type=int,
-        choices=[48, 61, 39],
+        choices=[48, 60, 61, 39],
         help="The number of phones to train against. For smaller phone sets, a "
         "surjective mapping is applied. WARNING: stored labels for test data will "
         "have the same vocabulary size as the training data. You should NOT report "

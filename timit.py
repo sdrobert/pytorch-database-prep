@@ -437,7 +437,7 @@ def init_phn(options):
         else:
             phone_map[key] = phone_map[key][2]
     if options.vocab_size == 60:
-        phone_map['q'] = None
+        phone_map["q"] = None
     phone_set = sorted(set(val for val in phone_map.values() if val is not None))
     assert len(phone_set) == options.vocab_size
 
@@ -523,7 +523,8 @@ def train_phn_lm(config_dir, max_order):
     sents = sorted(set(sents))
 
     # write the training data to a gzipped trn file in case someone wants to train with
-    # it. We don't reuse utterance ids because we dropped duplicate entries previously.
+    # it. We don't reuse utterance ids because we've dropped duplicate entries
+    # previously.
     num_digits = int(math.log10(len(sents)) + 1)
     utt_format_str = f" (lm{{:0{num_digits}d}})\n"
     with gzip.open(os.path.join(config_dir, "lm_train.trn.gz"), "wt") as file_:

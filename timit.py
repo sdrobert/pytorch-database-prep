@@ -587,7 +587,7 @@ def torch_dir(options):
     ):
         copy_paths(os.path.join(config_dir, fn), os.path.join(ext, fn))
 
-    lm_arpa_gz = os.path.join(config_dir, "lm", "lm.arpa.gz")
+    lm_arpa_gz = os.path.join(config_dir, "lm.arpa.gz")
     if os.path.exists(lm_arpa_gz):
         copy_paths(lm_arpa_gz, ext)
 

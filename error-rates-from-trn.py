@@ -10,25 +10,25 @@ from pydrobert.torch.data import read_trn_iter
 
 
 def main(args=None):
-    """Determine error rates between two or more trn files
+    """\
+    Determine error rates between two or more trn files
 
-    An error rate measures the difference between reference (gold-standard) and
-    hypothesis (machine-generated) transcriptions by the number of single-token
-    insertions, deletions, and substitutions necessary to convert the hypothesis
-    transcription into the reference one.
+An error rate measures the difference between reference (gold-standard) and
+hypothesis (machine-generated) transcriptions by the number of single-token
+insertions, deletions, and substitutions necessary to convert the hypothesis
+transcription into the reference one.
 
-    A "trn" file is the standard transcription file without alignment information used
-    in the sclite (http://www1.icsi.berkeley.edu/Speech/docs/sctk-1.2/sclite.htm)
-    toolkit. It has the format
+A "trn" file is the standard transcription file without alignment information used
+in the sclite (http://www1.icsi.berkeley.edu/Speech/docs/sctk-1.2/sclite.htm)
+toolkit. It has the format
 
-        here is a transcription (utterance_a)
-        here is another (utterance_b)
+    here is a transcription (utterance_a)
+    here is another (utterance_b)
 
-    WARNING! this command uses jiwer (https://github.com/jitsi/jiwer) as a backend,
-    which assumes a uniform cost for instertions, deletions, and substitutions. This is
-    not suited to certain corpora. Consult the corpus-specific page on the wiki
-    (https://github.com/sdrobert/pytorch-database-prep/wiki) for more details.
-    """
+WARNING! this command uses jiwer (https://github.com/jitsi/jiwer) as a backend,
+which assumes a uniform cost for instertions, deletions, and substitutions. This is
+not suited to certain corpora. Consult the corpus-specific page on the wiki
+(https://github.com/sdrobert/pytorch-database-prep/wiki) for more details."""
 
     parser = argparse.ArgumentParser(
         description=main.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter

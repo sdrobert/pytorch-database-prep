@@ -52,12 +52,3 @@ For speech corpora such as WSJ, these "borrow" from
 The `rouge-1.5.5.py` script uses code from
 [py-rouge](https://github.com/Diego999/py-rouge), which is
 Apache 2.0 licensed.
-
-
-## Archs
-```
-https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=7178778
-4 layers 500 units
-https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=8268935
-5 layers 700 units
-```

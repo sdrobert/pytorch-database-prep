@@ -26,11 +26,23 @@ import os
 import sys
 import hashlib
 import urllib.parse
+import warnings
 import requests
 import shutil
 import tarfile
 import glob
+import json
 
+import pydrobert.speech.command_line as speech_cmd
+import pydrobert.torch.command_line as torch_cmd
+
+from pydrobert.speech.compute import FrameComputer
+from pydrobert.speech.util import alias_factory_subclass_from_arg
+from pydrobert.speech.post import PostProcessor, Stack
+
+from common import get_num_avail_cores, utt2spk_to_spk2utt
+
+# XXX(sdrobert): order important for torch_dir
 AM_FNAMES = (
     "dev-clean",
     "dev-other",
@@ -91,10 +103,11 @@ LM_URL_PATH = "resources/11"
 
 CHUNK_SIZE = 10240
 
+TRAIN_SUBSETS = ("train_2kshort", "train_5k", "train_10k")
+
 RESOURCE_DIR = os.path.join(os.path.dirname(__file__), "resources", "librispeech")
 if not os.path.isdir(RESOURCE_DIR):
-    raise ValueError('"{}" is not a directory'.format(RESOURCE_DIR))
-
+    raise ValueError(f"'{RESOURCE_DIR}' is not a directory")
 
 # https://stackoverflow.com/questions/3431825/generating-an-md5-checksum-of-a-file
 def get_file_md5(path, chunk_size):
@@ -200,25 +213,23 @@ def download(options):
                 raise ValueError(f"Downloaded '{path}' does not match md5sum!")
 
 
-def find_file(root, file_name):
+def find_file(root, file_name, allow_missing=False):
     paths = glob.glob(f"{glob.escape(root)}/**/{file_name}", recursive=True)
     if not len(paths):
+        if allow_missing:
+            return None
         raise ValueError(f"'{file_name}' not in '{root}'")
     elif len(paths) > 1:
         raise ValueError(f"More than one instance of '{file_name}' exists in '{root}'")
     return paths.pop()
 
 
-def data_prep(libri_dir, data_dir, reader2gender, speakers_are_readers):
-    # FIXME(sdrobert): allow for reader to be speaker, not reader/chapter
-    # combo. Kaldi uses the latter for practical reasons, but the former is
-    # more accurate.
-    os.makedirs(data_dir, exist_ok=True)
+def data_prep(libri_dir, data_prefix, reader2gender, speakers_are_readers):
 
-    with open(os.path.join(data_dir, "wav.scp"), "w") as wav_scp, open(
-        os.path.join(data_dir, "text"), "w"
-    ) as trans, open(os.path.join(data_dir, "utt2spk"), "w") as utt2spk, open(
-        os.path.join(data_dir, "spk2gender"), "w"
+    with open(data_prefix + ".wav.scp", "w") as wav_scp, open(
+        os.path.join(data_prefix + ".text"), "w"
+    ) as trans, open(data_prefix + ".utt2spk", "w") as utt2spk, open(
+        os.path.join(data_prefix + ".spk2gender"), "w"
     ) as spk2gender:
         for reader in sorted(os.listdir(libri_dir)):
             reader_dir = os.path.join(libri_dir, reader)
@@ -297,16 +308,35 @@ def preamble(options):
                 raise ValueError(f"Unexpected gender '{gender}'")
             reader2gender[reader] = gender
 
+    os.makedirs(data_dir, exist_ok=True)
+
     for fname in AM_FNAMES:
         libri_subdir = find_file(libri_dir, fname)
-        data_subdir = os.path.join(data_dir, fname.replace("-", "_"))
+        data_prefix = os.path.join(data_dir, fname.replace("-", "_"))
         data_prep(
-            libri_subdir, data_subdir, reader2gender, options.speakers_are_readers
+            libri_subdir, data_prefix, reader2gender, options.speakers_are_readers
         )
 
+    # don't be coy about it - these lists always end up aggregated
+    for file_ in ("spk2gender", "utt2spk"):
+        aggr = dict()
+        for fname in AM_FNAMES:
+            with open(
+                os.path.join(data_dir, fname.replace("-", "_") + "." + file_)
+            ) as in_:
+                for line in in_:
+                    key, value = line.strip().split(" ", maxsplit=1)
+                    assert aggr.setdefault(key, value) == value
+        with open(os.path.join(data_dir, file_), "w") as out:
+            for key, value in sorted(aggr.items()):
+                out.write(f"{key} {value}\n")
+    with open(os.path.join(data_dir, "spk2utt"), "w") as out:
+        for line in utt2spk_to_spk2utt(os.path.join(data_dir, "utt2spk")):
+            out.write(line + "\n")
+
     if not options.exclude_subsets:
-        clean_100_dir = os.path.join(data_dir, "train_clean_100")
-        for subset_name in ("train_2kshort", "train_5k", "train_10k"):
+        clean_100_prefix = os.path.join(data_dir, "train_clean_100")
+        for subset_name in TRAIN_SUBSETS:
             lst_file = os.path.join(RESOURCE_DIR, subset_name + ".lst")
             if not os.path.exists(lst_file):
                 raise ValueError(f"Could not find '{lst_file}'")
@@ -314,23 +344,15 @@ def preamble(options):
             with open(lst_file) as f:
                 for line in f:
                     subset_ids.add(line.strip())
-            subset_dir = os.path.join(data_dir, subset_name)
-            os.makedirs(subset_dir, exist_ok=True)
-            for file_ in ("text", "utt2spk", "wav.scp"):
-                with open(os.path.join(clean_100_dir, file_)) as src, open(
-                    os.path.join(subset_dir, file_), "w"
+            subset_prefix = os.path.join(data_dir, subset_name)
+            for file_ in (".text", ".wav.scp"):
+                with open(clean_100_prefix + file_) as src, open(
+                    os.path.join(subset_prefix + file_), "w"
                 ) as dst:
                     for line in src:
-                        utt_id = line[: line.index(" ")]
+                        utt_id = line.split(" ", maxsplit=1)[0]
                         if utt_id in subset_ids:
                             dst.write(line)
-            with open(os.path.join(clean_100_dir, "spk2gender")) as src, open(
-                os.path.join(subset_dir, "spk2gender"), "w"
-            ) as dst:
-                for line in src:
-                    spk = line[: line.index(" ")]
-                    if any(x.startswith(spk) for x in subset_ids):
-                        dst.write(line)
 
 
 def init_word(options):
@@ -347,14 +369,206 @@ def init_word(options):
     config_dir = os.path.join(local_dir, options.config_subdir)
 
     vocab_txt = find_file(libri_dir, "librispeech-vocab.txt")
-    vocab = set()
+    vocab = {"<s>", "</s>", "<UNK>"}
     with open(vocab_txt) as f:
         for line in f:
             vocab.add(line.strip())
     vocab = sorted(vocab)
-    assert len(vocab) == 200_000
+    assert len(vocab) == 200_003
 
     os.makedirs(config_dir, exist_ok=True)
+
+    with open(os.path.join(config_dir, "token2id.txt"), "w") as token2id, open(
+        os.path.join(config_dir, "id2token.txt"), "w"
+    ) as id2token:
+        for id_, token in enumerate(vocab):
+            token2id.write(f"{token} {id_}\n")
+            id2token.write(f"{id_} {token}\n")
+
+    for file_ in ("utt2spk", "spk2utt", "spk2gender"):
+        shutil.copy(os.path.join(data_dir, file_), os.path.join(config_dir, file_))
+
+    lm_path = find_file(libri_dir, options.lm_name + ".arpa.gz", True)
+    if os.path.isfile(lm_path):
+        shutil.copy(lm_path, os.path.join(config_dir, "lm.arpa.gz"))
+
+    for fname in AM_FNAMES + TRAIN_SUBSETS:
+        fname = fname.replace("-", "_")
+        config_prefix = os.path.join(config_dir, fname)
+        data_prefix = os.path.join(data_dir, fname)
+        text_file = data_prefix + ".text"
+        if not os.path.isfile(text_file):
+            if fname not in TRAIN_SUBSETS:
+                raise ValueError(
+                    f"'{text_file}' does not exist (did you finish preamble?)"
+                )
+            continue
+
+        with open(text_file) as in_, open(config_prefix + ".ref.trn", "w") as out:
+            for line in in_:
+                utt_id, transcript = line.strip().split(" ", maxsplit=1)
+                out.write(transcript + f" ({utt_id})\n")
+
+        shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
+
+
+def torch_dir(options):
+
+    local_dir = os.path.join(options.data_root, "local")
+    if options.config_subdir is None:
+        dirs = os.listdir(local_dir)
+        try:
+            dirs.remove("data")
+        except ValueError:
+            pass
+        if len(dirs) == 1:
+            config_dir = os.path.join(local_dir, dirs[0])
+        else:
+            raise ValueError(
+                'More than one directory ({}) besides "data" exists in "{}". '
+                "Cannot infer configuration. Please specify as a positional "
+                "argument".format(", ".join(dirs), local_dir)
+            )
+    else:
+        config_dir = os.path.join(local_dir, options.config_subdir)
+        if not os.path.isdir(config_dir):
+            raise ValueError('"{}" is not a directory'.format(config_dir))
+
+    dir_ = os.path.join(options.data_root, options.data_subdir)
+    ext = os.path.join(dir_, "ext")
+    os.makedirs(ext, exist_ok=True)
+
+    for file_ in ("utt2spk", "spk2utt", "spk2gender", "id2token.txt", "token2id.txt"):
+        shutil.copy(os.path.join(config_dir, file_), os.path.join(ext, file_))
+
+    lm_arpa_gz = os.path.join(config_dir, "lm.arpa.gz")
+    if os.path.exists(lm_arpa_gz):
+        shutil.copy(lm_arpa_gz, ext)
+
+    fnames = tuple(x.replace("-", "_") for x in AM_FNAMES)
+    if options.force_compute_subsets:
+        fnames = TRAIN_SUBSETS + fnames
+
+    feat_optional_args = [
+        "--channel",
+        "-1",
+        "--num-workers",
+        str(get_num_avail_cores() - 1),
+        "--preprocess",
+        options.preprocess,
+        "--postprocess",
+        options.postprocess,
+    ]
+    if options.seed is not None:
+        feat_optional_args.extend(["--seed", str(options.seed)])
+
+    if options.raw:
+        # 16 samps per ms = 1 / 16 ms per samp
+        frame_shift_ms = 1 / 16
+    else:
+        # more complicated. Have to build our feature computer
+        with open(options.computer_json) as file_:
+            json_ = json.load(file_)
+        computer: FrameComputer = alias_factory_subclass_from_arg(FrameComputer, json_)
+        frame_shift_ms = computer.frame_shift_ms
+        del computer, json_
+
+    # FIXME(sdrobert): brittle. Needs to be manually updated with new postprocessors
+    # and preprocessors
+    do_strict = True
+    try:
+        with open(options.postprocess) as f:
+            json_ = json.load(f)
+    except IOError:
+        json_ = json.loads(options.postprocess)
+    postprocessors = []
+    if isinstance(json_, dict):
+        postprocessors.append(alias_factory_subclass_from_arg(PostProcessor, json_))
+    else:
+        for element in json_:
+            postprocessors.append(
+                alias_factory_subclass_from_arg(PostProcessor, element)
+            )
+    for postprocessor in postprocessors:
+        if isinstance(postprocessor, Stack):
+            if postprocessor._pad_mode is None:
+                warnings.warn(
+                    "Found a stack postprocessor with no pad_mode. This will likely "
+                    "mess up the segment boundaries. Disabling --strict check."
+                )
+                do_strict = False
+            frame_shift_ms *= postprocessor.num_vectors
+    del postprocessors, json_
+
+    for fname in fnames:
+        wav_scp = os.path.join(config_dir, fname + ".wav.scp")
+        if not os.path.isfile(wav_scp):
+            raise ValueError(f"'{wav_scp}' not a file (did you finish init_*)?")
+
+        feat_dir = os.path.join(dir_, fname, "feat")
+        os.makedirs(feat_dir, exist_ok=True)
+
+        if options.feats_from is None:
+            args = [wav_scp, feat_dir] + feat_optional_args
+            if not options.raw:
+                args.insert(1, options.computer_json)
+            assert not speech_cmd.signals_to_torch_feat_dir(args)
+        else:
+            feat_src = os.path.join(
+                options.data_root, options.feats_from, fname, "feat"
+            )
+            if not os.path.isdir(feat_src):
+                raise ValueError(
+                    f"Specified --feats-from, but '{feat_src}' is not a directory"
+                )
+            for filename in os.listdir(feat_src):
+                src = os.path.join(feat_src, filename)
+                dest = os.path.join(feat_dir, filename)
+                shutil.copy(src, dest)
+
+        if fname.endswith(options.compute_up_to):
+            break
+
+    if not options.force_compute_subsets:
+        clean_dir = os.path.join(dir_, "train_clean_100", "feat")
+        for fname in TRAIN_SUBSETS:
+            wav_scp = os.path.join(config_dir, fname + ".wav.scp")
+            if not os.path.isfile(wav_scp):
+                raise ValueError(f"'{wav_scp}' not a file (did you finish init_*)?")
+
+            feat_dir = os.path.join(dir_, fname, "feat")
+            os.makedirs(feat_dir, exist_ok=True)
+
+            with open(wav_scp) as in_:
+                for line in in_:
+                    utt_id = line.split(" ", maxsplit=1)[0]
+                    file_ = utt_id + ".pt"
+                    shutil.copy(
+                        os.path.join(clean_dir, file_), os.path.join(feat_dir, file_)
+                    )
+        fnames = TRAIN_SUBSETS + fnames
+
+    token2id_txt = os.path.join(config_dir, "token2id.txt")
+    for fname in fnames:
+        ref_trn = os.path.join(config_dir, fname + ".ref.trn")
+        if not os.path.isfile(ref_trn):
+            raise ValueError(f"'{ref_trn}' not a file (did you finish init_*)?")
+
+        fname_dir = os.path.join(dir_, fname)
+        ref_dir = os.path.join(fname_dir, "ref")
+        os.makedirs(ref_dir, exist_ok=True)
+
+        args = [ref_trn, token2id_txt, ref_dir, "--unk-symbol=<UNK>"]
+        assert not torch_cmd.trn_to_torch_token_data_dir(args)
+
+        # verify correctness (while storing info as a bonus)
+        args = [fname_dir, os.path.join(ext, f"{fname}.info.ark")]
+        if do_strict:
+            args.append("--strict")
+        assert not torch_cmd.get_torch_spect_data_dir_info(args)
+
+        if fname.endswith(options.compute_up_to):
+            break
 
 
 def build_parser():
@@ -368,6 +582,7 @@ def build_parser():
     build_download_parser(subparsers)
     build_preamble_parser(subparsers)
     build_init_word_parser(subparsers)
+    build_torch_dir_parser(subparsers)
 
     return parser
 
@@ -479,6 +694,91 @@ def build_init_word_parser(subparsers):
     # TODO(sdrobert): Custom n-gram LM training, if desired.
 
 
+def build_torch_dir_parser(subparsers):
+    parser = subparsers.add_parser(
+        "torch_dir",
+        help="Write training, test, and extra data to subdirectories. The init_* "
+        "command must have been called previously. If more than one init_* call has "
+        "been made, the next positional argument must be specified.",
+    )
+    parser.add_argument(
+        "config_subdir",
+        nargs="?",
+        default=None,
+        help="The configuration in data/local/ which to build the directories "
+        "from. If init_* was called only once, it can be inferred from the "
+        "contents fo data/local",
+    )
+    parser.add_argument(
+        "data_subdir",
+        nargs="?",
+        default=".",
+        help="What subdirectory in data/ to store training, test, and extra "
+        "data subdirectories to. Defaults to directly in data/",
+    )
+    parser.add_argument(
+        "--preprocess",
+        default="[]",
+        help="JSON list of configurations for "
+        "``pydrobert.speech.pre.PreProcessor`` objects. Audio will be "
+        "preprocessed in the same order as the list",
+    )
+    parser.add_argument(
+        "--postprocess",
+        default="[]",
+        help="JSON List of configurations for "
+        "``pydrobert.speech.post.PostProcessor`` objects. Features will be "
+        "postprocessed in the same order as the list",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="A random seed used for determinism. This affects operations "
+        "like dithering. If unset, a seed will be generated at the moment",
+    )
+    parser.add_argument(
+        "--force-compute-subsets",
+        action="store_true",
+        default=False,
+        help="Compute features of subsets rather than copying them from 100h partition",
+    )
+    parser.add_argument(
+        "--compute-up-to",
+        default="500",
+        choices=["100", "360", "500"],
+        help="Compute features for up to the XXXh training partition. '100' is "
+        "'train-clean-100' only. '360' is 'train-clean-100' + 'train-clean-360'. "
+        "'500' is 'train-clean-100', 'train-clean-360', and 'train-other-500'. All "
+        "dev and test partitions are always computed.",
+    )
+
+    fbank_41_config = os.path.join(
+        os.path.dirname(__file__), "conf", "feats", "fbank_41.json"
+    )
+    feat_group = parser.add_mutually_exclusive_group()
+    feat_group.add_argument(
+        "--computer-json",
+        default=fbank_41_config,
+        help="Path to JSON configuration of a feature computer for "
+        "pydrobert-speech. Defaults to a 40-dimensional Mel-scaled triangular "
+        "overlapping filter bank + 1 energy coefficient every 10ms.",
+    )
+    feat_group.add_argument(
+        "--raw",
+        action="store_true",
+        default=False,
+        help="If specified, tensors of raw audio of shape (S, 1) will be "
+        "written instead of filter bank coefficients.",
+    )
+    feat_group.add_argument(
+        "--feats-from",
+        default=None,
+        help="If specified, rather than computing features, will copy the "
+        "feature folders from this subdirectory of data/",
+    )
+
+
 def main(args=None):
     """Prepare Librispeech data for end-to-end pytorch training"""
 
@@ -491,6 +791,8 @@ def main(args=None):
         preamble(options)
     elif options.command == "init_word":
         init_word(options)
+    elif options.command == "torch_dir":
+        torch_dir(options)
     else:
         raise NotImplementedError(f"Command {options.command} not implemented")
 

@@ -1,4 +1,4 @@
-# Copyright 2019 Sean Robertson
+# Copyright 2023 Sean Robertson
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,10 +19,6 @@ import locale
 import stat
 import pathlib
 
-__author__ = "Sean Robertson"
-__email__ = "sdrobert@cs.toronto.edu"
-__license__ = "Apache 2.0"
-__copyright__ = "Copyright 2019 Sean Robertson"
 __all__ = [
     "glob",
     "mkdir",
@@ -32,6 +28,7 @@ __all__ = [
     "wc_l",
     "chmod_u_plus_w",
     "uniq",
+    "utt2spk_to_spk2utt",
 ]
 
 
@@ -109,3 +106,15 @@ def wc_l(inp):
 def chmod_u_plus_w(*files):
     for file_ in files:
         os.chmod(file_, os.stat(file_).st_mode | stat.S_IWUSR)
+
+
+def utt2spk_to_spk2utt(in_stream):
+    if isinstance(in_stream, str):
+        yield from utt2spk_to_spk2utt(cat(in_stream))
+        return
+    spk2utt = dict()
+    for line in in_stream:
+        utt, spk = line.strip().split(" ")
+        spk2utt.setdefault(spk, []).append(utt)
+    for spk in sorted(spk2utt):
+        yield "{} {}".format(spk, " ".join(sorted(spk2utt[spk])))

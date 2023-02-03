@@ -41,7 +41,6 @@ import gzip
 import itertools
 import urllib.request as request
 
-from collections import OrderedDict
 from shutil import copy as copy_paths
 
 import ngram_lm  # type: ignore (pylance might complain if in subdirectory)
@@ -49,7 +48,16 @@ import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
 from unlzw import unlzw  # type: ignore
-from common import get_num_avail_cores, glob, mkdir, sort, cat, pipe_to, wc_l  # type: ignore
+from common import (
+    get_num_avail_cores,
+    glob,
+    mkdir,
+    sort,
+    cat,
+    pipe_to,
+    wc_l,
+    utt2spk_to_spk2utt,
+)
 
 ALPHA = set(chr(x) for x in range(ord("A"), ord("Z") + 1))
 
@@ -250,15 +258,6 @@ def normalize_transcript(in_stream, nsn, spn, lexical_equivs):
             w = w.replace(":", "").replace("!", "")
             out += " " + w
         yield out
-
-
-def utt2spk_to_spk2utt(in_stream):
-    spk_hash = OrderedDict()
-    for line in in_stream:
-        utt, spk = line.split(" ")
-        spk_hash.setdefault(spk, []).append(utt)
-    for spk, utts in spk_hash.items():
-        yield "{} {}".format(spk, " ".join(utts))
 
 
 def wsj_data_prep(wsj_subdirs, data_root):

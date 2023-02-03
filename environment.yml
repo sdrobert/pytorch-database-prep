@@ -5,12 +5,14 @@ channels:
   - sdrobert
   - defaults
 dependencies:
-  - python>=3.7
-  - pytorch>=1.8.1
-  - sentencepiece=0.1.95
   - nltk=3.5
   - pip
   - pydrobert-speech
+  - pysoundfile
+  - python>=3.7
+  - pytorch>=1.8.1
+  - requests
+  - sentencepiece=0.1.95
+  - jiwer
   - pip:  # FIXME(sdrobert): Update to conda dep when pydrobert-pytorch releases >0.3.0
-    - jiwer
-    - "git+https://github.com/sdrobert/pydrobert-pytorch.git@6b366f912222990f477617cc5cfb76abb0ea4a7a"
+    - "git+https://github.com/sdrobert/pydrobert-pytorch.git@74a761a"

@@ -4,8 +4,9 @@ Scripts to aid in the setup of various databases for PyTorch
 
 ## Databases
 
-- The Wall Street Journal Speech Corpus
 - Gigaword Abstractive Summary Corpus
+- Librispeech
+- The Wall Street Journal Speech Corpus
 - TIMIT Acoustic-Phonetic Continuous Speech Corpus
 
 Please consult the

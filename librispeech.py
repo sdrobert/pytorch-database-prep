@@ -390,7 +390,8 @@ def init_word(options):
 
     lm_path = find_file(libri_dir, options.lm_name + ".arpa.gz", True)
     if os.path.isfile(lm_path):
-        shutil.copy(lm_path, os.path.join(config_dir, "lm.arpa.gz"))
+        # we copy in the next step
+        os.link(lm_path, os.path.join(config_dir, "lm.arpa.gz"))
 
     for fname in AM_FNAMES + TRAIN_SUBSETS:
         fname = fname.replace("-", "_")
@@ -543,7 +544,7 @@ def torch_dir(options):
                 for line in in_:
                     utt_id = line.split(" ", maxsplit=1)[0]
                     file_ = utt_id + ".pt"
-                    shutil.copy(
+                    os.link(
                         os.path.join(clean_dir, file_), os.path.join(feat_dir, file_)
                     )
         fnames = TRAIN_SUBSETS + fnames
@@ -741,7 +742,7 @@ def build_torch_dir_parser(subparsers):
         "--force-compute-subsets",
         action="store_true",
         default=False,
-        help="Compute features of subsets rather than copying them from 100h partition",
+        help="Compute features of subsets rather than linking them from 100h partition",
     )
     parser.add_argument(
         "--compute-up-to",

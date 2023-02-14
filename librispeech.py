@@ -389,7 +389,7 @@ def init_word(options):
         shutil.copy(os.path.join(data_dir, file_), os.path.join(config_dir, file_))
 
     lm_path = find_file(libri_dir, options.lm_name + ".arpa.gz", True)
-    if os.path.isfile(lm_path):
+    if lm_path is not None and os.path.isfile(lm_path):
         # we copy in the next step
         os.link(lm_path, os.path.join(config_dir, "lm.arpa.gz"))
 

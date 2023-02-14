@@ -535,7 +535,8 @@ def torch_dir(options):
         for fname in TRAIN_SUBSETS:
             wav_scp = os.path.join(config_dir, fname + ".wav.scp")
             if not os.path.isfile(wav_scp):
-                raise ValueError(f"'{wav_scp}' not a file (did you finish init_*)?")
+                warnings.warn(f"'{wav_scp}' does not exist. Skipping {fname}")
+                continue
 
             feat_dir = os.path.join(dir_, fname, "feat")
             os.makedirs(feat_dir, exist_ok=True)
@@ -553,7 +554,12 @@ def torch_dir(options):
     for fname in fnames:
         ref_trn = os.path.join(config_dir, fname + ".ref.trn")
         if not os.path.isfile(ref_trn):
-            raise ValueError(f"'{ref_trn}' not a file (did you finish init_*)?")
+            if fname in TRAIN_SUBSETS and not os.path.isfile(
+                os.path.join(config_dir, fname + ".wav.scp")
+            ):
+                continue
+            else:
+                raise ValueError(f"'{ref_trn}' not a file (did you finish init_*)?")
 
         fname_dir = os.path.join(dir_, fname)
         ref_dir = os.path.join(fname_dir, "ref")

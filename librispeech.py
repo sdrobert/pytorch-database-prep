@@ -109,6 +109,7 @@ RESOURCE_DIR = os.path.join(os.path.dirname(__file__), "resources", "librispeech
 if not os.path.isdir(RESOURCE_DIR):
     raise ValueError(f"'{RESOURCE_DIR}' is not a directory")
 
+
 # https://stackoverflow.com/questions/3431825/generating-an-md5-checksum-of-a-file
 def get_file_md5(path, chunk_size):
     hasher = hashlib.md5()
@@ -130,7 +131,6 @@ def download_file(url, path, chunk_size):
 
 
 def download(options):
-
     if options.download_dir is None:
         download_dir = os.path.join(options.data_root, "local", "data")
     else:
@@ -145,7 +145,18 @@ def download(options):
 
     chunk_size = options.chunk_size
 
-    for fname in AM_FNAMES:
+    if options.files is not None:
+        am_fnames = sorted(set(x for x in AM_FNAMES if x + ".tar.gz" in options.files))
+        lm_files = sorted(
+            set(x for x in LM_FILES + ("librispeech-vocab.txt",) if x in options.files)
+        )
+    else:
+        am_fnames = AM_FNAMES
+        lm_files = ("librispeech-vocab.txt",)
+        if options.lm:
+            lm_files = lm_files + LM_FILES
+
+    for fname in am_fnames:
         subdir = os.path.join(download_dir, fname)
         complete_file = os.path.join(subdir, ".complete")
         if os.path.exists(complete_file) and all(
@@ -199,7 +210,7 @@ def download(options):
     lmdir = os.path.join(download_dir, "lm")
     os.makedirs(lmdir, exist_ok=True)
 
-    for file_ in ("librispeech-vocab.txt",) + (LM_FILES if options.lm else tuple()):
+    for file_ in lm_files:
         path = os.path.join(lmdir, file_)
         if os.path.exists(path) and FILE2MD5[file_] == get_file_md5(path, chunk_size):
             print(f"'{path}' already exists and has correct md5sum. Not redownloading")
@@ -225,7 +236,6 @@ def find_file(root, file_name, allow_missing=False):
 
 
 def data_prep(libri_dir, data_prefix, reader2gender, speakers_are_readers):
-
     with open(data_prefix + ".wav.scp", "w") as wav_scp, open(
         os.path.join(data_prefix + ".text"), "w"
     ) as trans, open(data_prefix + ".utt2spk", "w") as utt2spk, open(
@@ -356,7 +366,6 @@ def preamble(options):
 
 
 def init_word(options):
-
     local_dir = os.path.join(options.data_root, "local")
     data_dir = os.path.join(local_dir, "data")
     if not os.path.isdir(data_dir):
@@ -414,7 +423,6 @@ def init_word(options):
 
 
 def torch_dir(options):
-
     local_dir = os.path.join(options.data_root, "local")
     if options.config_subdir is None:
         dirs = os.listdir(local_dir)
@@ -616,11 +624,22 @@ def build_download_parser(subparsers):
         help="The size of the buffer to work with when downloading/extracting. Larger "
         "means more memory usage, but possibly faster.",
     )
-    parser.add_argument(
+    dl_grp = parser.add_mutually_exclusive_group()
+    dl_grp.add_argument(
+        "--files",
+        nargs="+",
+        metavar="FNAME",
+        choices=sorted(FILE2MD5),
+        default=None,
+        help="If passed, download (and extract, where appropriate) only the files "
+        f"specified here. Permitted: {', '.join(FILE2MD5)}",
+    )
+    dl_grp.add_argument(
         "--lm",
         action="store_true",
         default=False,
-        help="Also download language model resources.",
+        help="If set, download all language model resources in addition to the "
+        "audio corpus",
     )
 
     mirror_group = parser.add_mutually_exclusive_group()

@@ -328,6 +328,7 @@ def preamble(options):
             warnings.warn(
                 f"Could not find folder '{fname}' in '{libri_dir}'. Skipping partition"
             )
+            continue
         found_fnames.append(fname)
         data_prefix = os.path.join(data_dir, fname.replace("-", "_"))
         data_prep(

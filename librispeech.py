@@ -303,7 +303,6 @@ def preamble(options):
         libri_dir = options.librispeech_root
     if not os.path.isdir(libri_dir):
         raise ValueError(f"'{libri_dir}' does not exist or is not a directory")
-    find_file(libri_dir, "84-121123-0000.flac")
 
     speakers_txt = find_file(libri_dir, "SPEAKERS.TXT")
     reader2gender = dict()
@@ -320,8 +319,16 @@ def preamble(options):
 
     os.makedirs(data_dir, exist_ok=True)
 
+    found_fnames = []
     for fname in AM_FNAMES:
-        libri_subdir = find_file(libri_dir, fname)
+        libri_subdir = find_file(
+            libri_dir, fname, fname in {"train-clean-360", "train-other-500"}
+        )
+        if libri_subdir is None:
+            warnings.warn(
+                f"Could not find folder '{fname}' in '{libri_dir}'. Skipping partition"
+            )
+        found_fnames.append(fname)
         data_prefix = os.path.join(data_dir, fname.replace("-", "_"))
         data_prep(
             libri_subdir, data_prefix, reader2gender, options.speakers_are_readers
@@ -330,7 +337,7 @@ def preamble(options):
     # don't be coy about it - these lists always end up aggregated
     for file_ in ("spk2gender", "utt2spk"):
         aggr = dict()
-        for fname in AM_FNAMES:
+        for fname in found_fnames:
             with open(
                 os.path.join(data_dir, fname.replace("-", "_") + "." + file_)
             ) as in_:
@@ -400,7 +407,10 @@ def init_word(options):
     lm_path = find_file(libri_dir, options.lm_name + ".arpa.gz", True)
     if lm_path is not None and os.path.isfile(lm_path):
         # we copy in the next step
-        os.link(lm_path, os.path.join(config_dir, "lm.arpa.gz"))
+        dst = os.path.join(config_dir, "lm.arpa.gz")
+        if os.path.exists(dst):
+            os.unlink(dst)
+        os.link(lm_path, dst)
 
     for fname in AM_FNAMES + TRAIN_SUBSETS:
         fname = fname.replace("-", "_")
@@ -409,9 +419,12 @@ def init_word(options):
         text_file = data_prefix + ".text"
         if not os.path.isfile(text_file):
             if fname not in TRAIN_SUBSETS:
-                raise ValueError(
-                    f"'{text_file}' does not exist (did you finish preamble?)"
-                )
+                if fname in {"train_clean_360", "train_other_500"}:
+                    warnings.warn(f"'{text_file}' does not exist. Skipping partition")
+                else:
+                    raise ValueError(
+                        f"'{text_file}' does not exist (did you finish preamble?)"
+                    )
             continue
 
         with open(text_file) as in_, open(config_prefix + ".ref.trn", "w") as out:

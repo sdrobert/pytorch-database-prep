@@ -1,4 +1,6 @@
-# Copyright 2021 Sean Robertson
+#!/usr/bin/env python3
+
+# Copyright 2023 Sean Robertson
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+from typing import Dict, Generator, List, Literal, Optional, Sequence, Tuple, Union
 import warnings
 import sys
 import locale
@@ -25,16 +29,23 @@ import numpy as np
 
 __all__ = [
     "BackoffNGramLM",
-    "write_arpa",
-    "ngram_counts_to_prob_list_mle",
-    "ngram_counts_to_prob_list_add_k",
-    "ngram_counts_to_prob_list_simple_good_turing",
-    "ngram_counts_to_prob_list_katz_backoff",
+    "main",
     "ngram_counts_to_prob_list_absolute_discounting",
+    "ngram_counts_to_prob_list_add_k",
+    "ngram_counts_to_prob_list_katz_backoff",
     "ngram_counts_to_prob_list_kneser_ney",
-    "text_to_sents",
+    "ngram_counts_to_prob_list_mle",
+    "ngram_counts_to_prob_list_simple_good_turing",
     "sents_to_ngram_counts",
+    "text_to_sents",
+    "write_arpa",
 ]
+
+DEFT_SENT_END_EXPR = re.compile(r"[.?!]+")
+DEFT_WORD_DELIM_EXPR = re.compile(r"\W+")
+DEFT_EPS_LPROB = -99.999
+DEFT_ADD_K_K = 0.5
+DEFAULT_KATZ_THRESH = 7
 
 locale.setlocale(locale.LC_ALL, "C")
 warnings.simplefilter("error", RuntimeWarning)
@@ -590,7 +601,7 @@ class BackoffNGramLM(object):
         """
         self.trie.prune_by_threshold(lprob)
 
-    def prune_by_name(self, to_prune, eps_lprob=-99.999):
+    def prune_by_name(self, to_prune, eps_lprob=DEFT_EPS_LPROB):
         """Prune n-grams by name
 
         This method prunes n-grams of arbitrary order by name. For n-grams of order > 1,
@@ -656,7 +667,7 @@ def write_arpa(prob_list, out=sys.stdout):
     out.write("\\end\\\n")
 
 
-def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
+def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=DEFT_EPS_LPROB):
     r"""Determine probabilities based on MLE of observed n-gram counts
 
     For a given n-gram :math:`p, w`, where :math:`p` is a prefix, :math:`w` is the next
@@ -739,7 +750,9 @@ def _get_cond_mle(order, counts, vocab, k):
     )
 
 
-def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=0.5):
+def ngram_counts_to_prob_list_add_k(
+    ngram_counts, eps_lprob=DEFT_EPS_LPROB, k=DEFT_ADD_K_K
+):
     r"""MLE probabilities with constant discount factor added to counts
 
     Similar to :func:`ngram_counts_to_prob_list_mle`, but with a constant added to each
@@ -914,7 +927,9 @@ def _simple_good_turing_counts(counts, eps_lprob):
     return log_r_star
 
 
-def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999):
+def ngram_counts_to_prob_list_simple_good_turing(
+    ngram_counts, eps_lprob=DEFT_EPS_LPROB
+):
     r"""Determine probabilities based on n-gram counts using simple good-turing
 
     Simple Good-Turing smoothing discounts counts of n-grams according to the following
@@ -1009,7 +1024,7 @@ def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999
 
     References
     ----------
-    .. [gale1995] W. A. Gale and G. Sampson, "Good‐Turing frequency estimation without
+    .. [gale1995] W. A. Gale and G. Sampson, "Good-Turing frequency estimation without
        tears," Journal of Quantitative Linguistics, vol. 2, no. 3, pp. 217-237, Jan.
        1995.
     """
@@ -1087,7 +1102,7 @@ def _get_katz_discounted_counts(counts, k):
 
 
 def ngram_counts_to_prob_list_katz_backoff(
-    ngram_counts, k=7, eps_lprob=-99.999, _cmu_hacks=False
+    ngram_counts, thresh=DEFAULT_KATZ_THRESH, eps_lprob=DEFT_EPS_LPROB, _cmu_hacks=False
 ):
     r"""Determine probabilities based on Katz's backoff algorithm
 
@@ -1114,7 +1129,7 @@ def ngram_counts_to_prob_list_katz_backoff(
         in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
         (n-grams) of the appropriate length, with the exception of unigrams, whose keys
         are the tokens themselves. Values are the counts of those n-grams in the corpus.
-    k : int, optional
+    thresh : int, optional
         `k` is a threshold such that, if :math:`C(w) > k`, no discounting will be
         applied to the term. That is, the probability mass assigned for backoff will be
         entirely from n-grams s.t. :math:`C(w) \leq k`.
@@ -1164,7 +1179,7 @@ def ngram_counts_to_prob_list_katz_backoff(
     """
     if len(ngram_counts) < 1:
         raise ValueError("At least unigram counts must exist")
-    if k < 1:
+    if thresh < 1:
         raise ValueError("k too low")
     prob_list = []
     max_order = len(ngram_counts) - 1
@@ -1173,7 +1188,7 @@ def ngram_counts_to_prob_list_katz_backoff(
         probs = dict((ngram, (prob, 0.0)) for (ngram, prob) in probs.items())
     prob_list.append(probs)
     log_r_stars = [
-        _get_katz_discounted_counts(counts, k) for counts in ngram_counts[1:]
+        _get_katz_discounted_counts(counts, thresh) for counts in ngram_counts[1:]
     ]
     if _cmu_hacks:
         # A note on CMU compatibility. First, the standard non-ML estimate of
@@ -1191,7 +1206,7 @@ def ngram_counts_to_prob_list_katz_backoff(
             for ngram, count in ngram_counts[order].items():
                 prefix2children.setdefault(ngram[:-1], []).append(ngram)
             for prefix, children in prefix2children.items():
-                if len(children) == 1 and ngram_counts[order][children[0]] > k:
+                if len(children) == 1 and ngram_counts[order][children[0]] > thresh:
                     for oo in range(order):
                         pp = prefix[: oo + 1]
                         if not oo:
@@ -1636,7 +1651,7 @@ def ngram_counts_to_prob_list_kneser_ney(
        for language modeling," Computer Speech & Language, vol. 13, no. 4, pp. 359-394,
        Oct. 1999, doi: 10.1006/csla.1999.0128.
     .. [heafield2013] K. Heafield, I. Pouzyrevsky, J. H. Clark, and P. Koehn, "Scalable
-       modified Kneser-Ney language model estimation,” in Proceedings of the 51st Annual
+       modified Kneser-Ney language model estimation," in Proceedings of the 51st Annual
        Meeting of the Association for Computational Linguistics, Sofia, Bulgaria, 2013,
        vol. 2, pp. 690-696.
     """
@@ -1689,77 +1704,90 @@ def ngram_counts_to_prob_list_kneser_ney(
 
 
 def text_to_sents(
-    text,
-    sent_end_expr=r"[.?!]+",
-    word_delim_expr=r"\W+",
-    to_case="upper",
-    trim_empty_sents=False,
-):
+    text: str,
+    sent_end_expr: Union[str, re.Pattern] = DEFT_SENT_END_EXPR,
+    word_delim_expr: Union[str, re.Pattern] = DEFT_WORD_DELIM_EXPR,
+    to_case: Literal["upper", "lower", None] = "upper",
+    trim_empty_sents: bool = False,
+) -> List[Tuple[str, ...]]:
     """Convert a block of text to a list of sentences, each a list of words
 
     Parameters
     ----------
     text : str
         The text to parse
-    set_end_expr : str or re.Pattern, optional
+    set_end_expr
         A regular expression indicating an end of a sentence. By default, this is one or
         more of the characters ".?!"
-    word_delim_expr : str or re.Pattern, optional
+    word_delim_expr
         A regular expression used for splitting words. By default, it is one or more of
         any non-alphanumeric character (including ' and -). Any empty words are removed
         from the sentence
-    to_case : {'lower', 'upper', :obj:`None`}, optional
+    to_case
         Convert all words to a specific case: ``'lower'`` is lower case, ``'upper'`` is
         upper case, anything else performs no conversion
-    trim_empty_sents : bool, optional
+    trim_empty_sents
         If :obj:`True`, any sentences with no words in them will be removed from the
         return value. The exception is an empty final string, which is always removed.
 
     Returns
     -------
-    sents : list of tuples
+    sents : list of tuple of str
         A list of sentences from `text`. Each sentence/element is actually a tuple of
         the words in the sentences
     """
     if not isinstance(sent_end_expr, re.Pattern):
         sent_end_expr = re.compile(sent_end_expr)
+    sents = list(
+        titer_to_siter(
+            sent_end_expr.split(text), word_delim_expr, to_case, trim_empty_sents
+        )
+    )
+    if sents and not sents[-1]:
+        del sents[-1]
+    return sents
+
+
+def titer_to_siter(
+    titer: Iterable[str],
+    word_delim_expr: Union[str, re.Pattern] = DEFT_WORD_DELIM_EXPR,
+    to_case: Literal["lower", "upper", None] = "upper",
+    trim_empty_sents: bool = False,
+) -> Generator[Tuple[str, ...], None, None]:
     if not isinstance(word_delim_expr, re.Pattern):
         word_delim_expr = re.compile(word_delim_expr)
-    sents = sent_end_expr.split(text)
-    i = 0
-    while i < len(sents):
-        sent = word_delim_expr.split(sents[i])
+    for sent in titer:
+        sent = word_delim_expr.split(sent)
         sent = tuple(w for w in sent if w)
         if to_case == "lower":
             sent = tuple(w.lower() for w in sent)
         elif to_case == "upper":
             sent = tuple(w.upper() for w in sent)
         if trim_empty_sents and not sent:
-            del sents[i]
-        else:
-            sents[i] = sent
-            i += 1
-    if sents and not sents[-1]:
-        del sents[-1]
-    return sents
+            continue
+        yield sent
 
 
 def sents_to_ngram_counts(
-    sents, max_order, sos="<S>", eos="</S>", count_unigram_sos=False
-):
+    sents: Iterable[str],
+    max_order: int,
+    sos: str = "<S>",
+    eos: str = "</S>",
+    count_unigram_sos: bool = False,
+) -> List[Dict[str, int]]:
     """Count n-grams in sentence lists up to a maximum order
 
     Parameters
     ----------
-    sents : list of tuples
+    sents
         A list of sentences, where each sentence is a tuple of its words.
-    max_order : int
+    max_order
         The maximum order (inclusive) of n-gram to count.
-    sos : str, optional
+    sos
         A token representing the start-of-sequence.
-    eos : str, optional
+    eos
         A token representing the end-of-sequence.
-    count_unigram_sos : bool, optional
+    count_unigram_sos
         If :obj:`False`, the unigram count of the start-of-sequence token will always be
         zero (though higher-order n-grams beginning with the SOS can have counts).
 
@@ -1803,3 +1831,274 @@ def sents_to_ngram_counts(
                     sent[s : s + order] for s in range(len(sent) - order + 1)
                 )
     return ngram_counts
+
+
+def _pos_int(val):
+    val = int(val)
+    if val < 1:
+        raise ValueError("value not positive")
+    return val
+
+
+def _nonneg_int(val):
+    val = int(val)
+    if val < 0:
+        raise ValueError("value negative")
+    return val
+
+
+def main(args: Optional[Sequence[str]] = None):
+    """Construct an n-gram LM
+
+Convenient, but slow. You should prefer KenLM (https://github.com/kpu/kenlm).
+
+Example call:
+
+    gunzip -c text.gz | python ngram_lm.py -o 5 | gzip -c > text.arpa.gz
+"""
+
+    parser = argparse.ArgumentParser(
+        description=main.__doc__,
+        epilog="""Smoothing methods (--methods, -m):
+
+- abs: Absolute discounting
+    Special flags:
+    - --delta,-d: Absolute discount to apply to non-zero values. A single value will
+                  be applied to all orders; otherwise, one discount per order
+- add-k: Add k to counts, then MLE
+    Speckal flags:
+    - --k,-k: The amount to add
+- katz: Katz backoff
+    - --katz-threshold: Discounting will not be applied above this threshold
+- 
+""",
+    )
+    parser.add_argument(
+        "--max-order",
+        "-o",
+        metavar="P_INT",
+        type=_pos_int,
+        default=6,
+        help="Max order of n-gram in model",
+    )
+    parser.add_argument(
+        "--in-file",
+        "-f",
+        metavar="FILE",
+        type=argparse.FileType("r"),
+        default=sys.stdin,
+        help="If specified, reads from this file instead of stdin",
+    )
+    parser.add_argument(
+        "--out-file",
+        "-O",
+        metavar="FILE",
+        type=argparse.FileType("w"),
+        default=sys.stdout,
+        help="If specified, writes to this file instead of stdout",
+    )
+    parser.add_argument(
+        "--sos", "-s", metavar="STR", default="<s>", help="Start-of-sequence token"
+    )
+    parser.add_argument(
+        "--eos", "-e", metavar="STR", default="</s>", help="End-of-sequence token"
+    )
+    parser.add_argument(
+        "--sent-end-expr",
+        metavar="REGEX",
+        type=re.compile,
+        default=None,
+        help="If specified, the entire text file will be read at once, then split into "
+        "sentences according to this expression",
+    )
+    parser.add_argument(
+        "--word-delim-expr",
+        metavar="REGEX",
+        type=re.compile,
+        default=DEFT_WORD_DELIM_EXPR,
+        help="Delimiter to split sentences into tokens",
+    )
+    parser.add_argument(
+        "--to-case",
+        choices=("upper", "lower"),
+        default=None,
+        help="Convert all tokens to either upper or lower case",
+    )
+    parser.add_argument(
+        "--trim-empty-sents",
+        action="store_true",
+        default=False,
+        help="If specified, remove any empty sentences from counting",
+    )
+    parser.add_argument(
+        "--count-unigram-sos",
+        action="store_true",
+        default=False,
+        help="If specified, collect unigram counts of start-of-sequence-token",
+    )
+    parser.add_argument(
+        "--prune-by-lprob-threshold",
+        type=float,
+        default=None,
+        help="If specified, remove any n-grams with log-prob lte this threshold",
+    )
+    parser.add_argument(
+        "--prune-by-entropy-threshold",
+        type=float,
+        default=None,
+        help="If specified, prune by SRI's relative entropy criterion",
+    )
+    parser.add_argument(
+        "--prune-by-count-thresholds",
+        metavar="NN_INT",
+        type=_nonneg_int,
+        nargs="+",
+        default=None,
+        help="If specified, remove any n-grams with lte this count. If there are k "
+        "counts specified, the first k-1 counts will apply to the first k-1 orders of "
+        "n-gram, while the last count covers the remaing orders. E.g. 0 1 will not "
+        "prune unigrams but prune everything above with a count <= 1. Note that 0 will "
+        "not prune count-0 terms.",
+    )
+    parser.add_argument(
+        "--eps-lprob",
+        metavar="FLOAT",
+        type=float,
+        default=DEFT_EPS_LPROB,
+        help="Log-probability considered approx. 0",
+    )
+    parser.add_argument(
+        "--delta",
+        "-d",
+        metavar="FLOAT",
+        nargs="+",
+        type=float,
+        default=None,
+        help="See epilogue",
+    )
+    parser.add_argument(
+        "--k",
+        "-k",
+        metavar="FLOAT",
+        type=float,
+        default=DEFT_ADD_K_K,
+        help="See epilogue",
+    )
+    parser.add_argument(
+        "--katz-threshold",
+        metavar="PINT",
+        type=_pos_int,
+        default=DEFAULT_KATZ_THRESH,
+        help="See epilogue",
+    )
+    parser.add_argument(
+        "--method",
+        "-m",
+        choices=["abs", "add-k", "katz", "kn", "sgt", "mle"],
+        default="kn",
+        help="Smoothing method (see epilogue)",
+    )
+    prune = parser.add_mutually_exclusive_group()
+    prune.add_argument(
+        "--prune-by-name-list",
+        metavar="NGRAM",
+        nargs="+",
+        default=None,
+        help="Each argument to this flag is an n-gram (first word to last) to be "
+        "pruned. Same word delimiters as text",
+    )
+    prune.add_argument(
+        "--prune-by-name-file",
+        metavar="FILE",
+        type=argparse.FileType("r"),
+        default=None,
+        help="A file storing n-grams (first word to last) to be pruned as a series of "
+        "sentences. Same sentence and word delimeters as text",
+    )
+
+    options = parser.parse_args(args)
+
+    if options.prune_by_name_file is not None:
+        if options.sent_end_expr is None:
+            prune_names = (x.rstrip("\n") for x in options.prune_by_name_file)
+        else:
+            prune_names = options.sent_end_expr.split(options.prune_by_name_file.read())
+    elif options.prune_by_name_list is not None:
+        prune_names = options.prune_by_name_list
+    else:
+        prune_names = []
+    prune_names = (tuple(options.word_delim_expr.split(x)) for x in prune_names if x)
+    prune_names = {x[0] if len(x) == 1 else x for x in prune_names}
+
+    if options.sent_end_expr is None:
+        sents = (x.rstrip("\n") for x in options.in_file)
+    else:
+        sents = options.sent_end_expr.split(options.in_file.read())
+    sents = titer_to_siter(
+        sents, options.word_delim_expr, options.to_case, options.trim_empty_sents,
+    )
+
+    ngram_counts = sents_to_ngram_counts(
+        sents, options.max_order, options.sos, options.eos, options.count_unigram_sos
+    )
+    del sents
+
+    if options.prune_by_count_thresholds is not None:
+        k = len(options.prune_by_count_thresholds) - 1
+        for i, counts in enumerate(ngram_counts):
+            t = options.prune_by_count_thresholds[min(i, k)]
+            if t == 0:
+                continue
+            prune_names.update(k for (k, v) in counts.items() if v <= t)
+
+    if options.method == "abs":
+        if options.delta is not None and len(options.delta) == 1:
+            options.delta = options.delta[0]
+        prob_list = ngram_counts_to_prob_list_absolute_discounting(
+            ngram_counts, options.delta, prune_names
+        )
+        prune_names = set()
+    elif options.method == "add-k":
+        prob_list = ngram_counts_to_prob_list_add_k(
+            ngram_counts, options.eps_lprob, options.k
+        )
+    elif options.method == "katz":
+        prob_list = ngram_counts_to_prob_list_katz_backoff(
+            ngram_counts, options.katz_threshold, options.eps_lprob
+        )
+    elif options.method == "kn":
+        if options.delta is not None and len(options.delta) == 1:
+            options.delta = options.delta[0]
+        prob_list = ngram_counts_to_prob_list_kneser_ney(
+            ngram_counts, options.delta, options.sos, prune_names
+        )
+        prune_names = set()
+    elif options.method == "sgt":
+        prob_list = ngram_counts_to_prob_list_simple_good_turing(
+            ngram_counts, options.eps_lprob
+        )
+    else:  # mle
+        prob_list = ngram_counts_to_prob_list_mle(ngram_counts, options.eps_lprob)
+    del ngram_counts
+
+    if (
+        options.prune_by_entropy_threshold is not None
+        or options.prune_by_lprob_threshold is not None
+        or prune_names
+    ):
+        ngram_lm = BackoffNGramLM(prob_list, options.sos, options.eos)
+        if prune_names:
+            ngram_lm.prune_by_name(prune_names, options.eps_lprob)
+        if options.prune_by_lprob_threshold is not None:
+            ngram_lm.prune_by_threshold(options.prune_by_lprob_threshold)
+        if options.prune_by_entropy_threshold is not None:
+            ngram_lm.relative_entropy_pruning(options.prune_by_entropy_threshold)
+        ngram_lm.renormalize_backoffs()
+        prob_list = ngram_lm.to_prob_list()
+        del ngram_lm
+
+    write_arpa(prob_list, options.out_file)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

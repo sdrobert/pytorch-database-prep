@@ -31,14 +31,10 @@ import requests
 import shutil
 import tarfile
 import glob
-import json
+import zlib
 
 import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
-
-from pydrobert.speech.compute import FrameComputer
-from pydrobert.speech.util import alias_factory_subclass_from_arg
-from pydrobert.speech.post import PostProcessor, Stack
 
 from common import get_num_avail_cores, utt2spk_to_spk2utt
 
@@ -485,44 +481,6 @@ def torch_dir(options):
     if options.seed is not None:
         feat_optional_args.extend(["--seed", str(options.seed)])
 
-    if options.raw:
-        # 16 samps per ms = 1 / 16 ms per samp
-        frame_shift_ms = 1 / 16
-    else:
-        # more complicated. Have to build our feature computer
-        with open(options.computer_json) as file_:
-            json_ = json.load(file_)
-        computer: FrameComputer = alias_factory_subclass_from_arg(FrameComputer, json_)
-        frame_shift_ms = computer.frame_shift_ms
-        del computer, json_
-
-    # FIXME(sdrobert): brittle. Needs to be manually updated with new postprocessors
-    # and preprocessors
-    do_strict = True
-    try:
-        with open(options.postprocess) as f:
-            json_ = json.load(f)
-    except IOError:
-        json_ = json.loads(options.postprocess)
-    postprocessors = []
-    if isinstance(json_, dict):
-        postprocessors.append(alias_factory_subclass_from_arg(PostProcessor, json_))
-    else:
-        for element in json_:
-            postprocessors.append(
-                alias_factory_subclass_from_arg(PostProcessor, element)
-            )
-    for postprocessor in postprocessors:
-        if isinstance(postprocessor, Stack):
-            if postprocessor._pad_mode is None:
-                warnings.warn(
-                    "Found a stack postprocessor with no pad_mode. This will likely "
-                    "mess up the segment boundaries. Disabling --strict check."
-                )
-                do_strict = False
-            frame_shift_ms *= postprocessor.num_vectors
-    del postprocessors, json_
-
     for fname in fnames:
         wav_scp = os.path.join(config_dir, fname + ".wav.scp")
         if not os.path.isfile(wav_scp):
@@ -533,6 +491,9 @@ def torch_dir(options):
 
         if options.feats_from is None:
             args = [wav_scp, feat_dir] + feat_optional_args
+            hash_ = zlib.adler32("\0".join(args).encode("utf-8"))
+            manifest_path = os.path.join(config_dir, f"{fname}.{hash_}.manifest")
+            args += ["--manifest", manifest_path]
             if not options.raw:
                 args.insert(1, options.computer_json)
             assert not speech_cmd.signals_to_torch_feat_dir(args)
@@ -591,9 +552,7 @@ def torch_dir(options):
         assert not torch_cmd.trn_to_torch_token_data_dir(args)
 
         # verify correctness (while storing info as a bonus)
-        args = [fname_dir, os.path.join(ext, f"{fname}.info.ark")]
-        if do_strict:
-            args.append("--strict")
+        args = [fname_dir, os.path.join(ext, f"{fname}.info.ark"), "--strict"]
         assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
         if fname.endswith(options.compute_up_to):

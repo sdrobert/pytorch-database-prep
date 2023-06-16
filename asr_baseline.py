@@ -14,9 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import abc
 
 from typing import Callable, Collection, Dict, Optional, Sequence, Tuple
 from typing_extensions import Literal
+from itertools import chain
 
 import param
 import torch
@@ -36,7 +38,7 @@ def check_positive(name: str, val, nonnegative=False):
         raise ValueError(f"Expected {name} to be {pos}; got {val}")
 
 
-class Encoder(torch.nn.Module):
+class Encoder(torch.nn.Module, metaclass=abc.ABCMeta):
     """Encoder module
 
     The encoder is the part of the baseline which, given some input, always performs
@@ -76,15 +78,61 @@ class Encoder(torch.nn.Module):
     def reset_parameters(self):
         pass
 
+    @abc.abstractmethod
     def forward(
         self, input: torch.Tensor, lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return input, lens
+        ...
 
     __call__: Callable[[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]
 
 
+class FeedForwardEncoder(Encoder):
+    """Encoder is a simple feed-forward network"""
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int = 1,
+        bias: bool = True,
+        dropout: float = 0.0,
+    ):
+        check_positive("num_layers", num_layers)
+        check_positive("dropout", dropout, nonnegative=True)
+        super().__init__(input_size, hidden_size)
+        drop = torch.nn.Dropout(dropout)
+        self.stack = torch.nn.Sequential(
+            torch.nn.Linear(input_size, hidden_size, bias),
+            drop,
+            *chain(
+                *(
+                    (torch.nn.Linear(hidden_size, hidden_size, bias), drop)
+                    for _ in range(num_layers - 1)
+                )
+            ),
+        )
+
+    def reset_parameters(self):
+        super().reset_parameters()
+        for n in range(0, len(self.stack), 2):
+            self.stack[n].reset_parameters()
+
+    def forward(
+        self, input: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.stack(input), lens
+
+
 class RecurrentEncoder(Encoder):
+    """Recurrent encoder
+
+    Warnings
+    --------
+    If `bidirectional` is :obj:`True`, `hidden_size` must be divisible by 2. Each
+    direction's hidden_state
+    """
+
     rnn: torch.nn.RNNBase
 
     def __init__(
@@ -99,6 +147,14 @@ class RecurrentEncoder(Encoder):
         check_positive("num_layers", num_layers)
         check_in("recurrent_type", recurrent_type, {"lstm", "rnn", "gru"})
         check_positive("dropout", dropout, nonnegative=True)
+        check_positive("hidden_size", hidden_size)
+        if bidirectional:
+            if hidden_size % 2:
+                raise ValueError(
+                    "for bidirectional encoder, hidden_size must be divisible by 2; "
+                    f"got {hidden_size}"
+                )
+            hidden_size //= 2
         super().__init__(input_size, hidden_size)
         if recurrent_type == "lstm":
             class_ = torch.nn.LSTM
@@ -134,14 +190,12 @@ class RecurrentEncoder(Encoder):
 class RecurrentDecoderWithAttention(MixableSequentialLanguageModel):
     def __init__(
         self,
-        input_size: int,
-        vocab_size: int,
         hidden_size: int,
+        vocab_size: int,
         embed_size: int = 128,
         dropout: float = 0.0,
     ):
         check_positive("vocab_size", vocab_size)
-        check_positive("input_size", input_size)
         check_positive("hidden_size", hidden_size)
         check_positive("embed_size", embed_size)
         check_positive("dropout", dropout, nonnegative=True)
@@ -150,9 +204,9 @@ class RecurrentDecoderWithAttention(MixableSequentialLanguageModel):
             vocab_size + 1, embed_size, padding_idx=vocab_size
         )
         self.attn = ConcatSoftAttention(
-            hidden_size, input_size, hidden_size=hidden_size
+            hidden_size, hidden_size, hidden_size=hidden_size
         )
-        self.cell = torch.nn.LSTMCell(input_size + embed_size, hidden_size)
+        self.cell = torch.nn.LSTMCell(hidden_size + embed_size, hidden_size)
         self.ff = torch.nn.Linear(hidden_size, vocab_size)
 
     def reset_parameters(self):
@@ -241,16 +295,35 @@ class RecurrentDecoderWithAttention(MixableSequentialLanguageModel):
         )
 
 
+class RecurrentEncoderParameters(param.Parameterized):
+    num_layers: int = param.Integer(2, bounds=(1, None), doc="Number of layers")
+    recurrent_type: Literal["lstm", "gru", "rnn"] = param.ObjectSelector(
+        "lstm", ["lstm", "gru", "rnn"], doc="Type of recurrent cell"
+    )
+    bidirectional: bool = param.Boolean(
+        True,
+        doc="Whether layers are bidirectional. If so, each direction has "
+        "a hidden size of half the parameterized hidden_size. In this case, the "
+        "parameter must be divisible by 2",
+    )
+
+
 class BaselineParameters(param.Parameterized):
     """All parameters for a baseline model"""
 
     input_size: int = param.Integer(
         41, bounds=(1, None), doc="Size of input feature vectors"
     )
+    hidden_size: int = param.Integer(
+        512, bounds=(1, None), doc="Size of hidden states, including encoder output"
+    )
     vocab_size: int = param.Integer(
         32, bounds=(1, None), doc="Size of output vocabulary"
     )
 
+    encoder_type: Literal["recur", "id"] = param.ObjectSelector(
+        "recur", ["recur", "id"], doc="What encoder structure to use"
+    )
     transducer_type: Literal["ctc", "encdec"] = param.ObjectSelector(
         "ctc", ["ctc", "encdec"], doc="How to perform audio -> text transduction"
     )

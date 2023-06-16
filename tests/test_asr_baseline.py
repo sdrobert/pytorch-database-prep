@@ -17,19 +17,20 @@ import pytest
 import asr_baseline
 
 
-@pytest.mark.parametrize("encoder_type", ["id", "recur"])
+@pytest.mark.parametrize("encoder_type", ["recur", "ff"])
 def test_encoder_batched_matches_full(encoder_type, device):
-    T, N, I, H = 100, 10, 30, 5
+    T, N, I, H = 100, 10, 30, 4
     input = torch.randn(T, N, I, device=device)
     lens = torch.randint(1, T + 1, (N,), device=device)
-    if encoder_type == "id":
-        encoder = asr_baseline.Encoder(I, H)
-    elif encoder_type == "recur":
+    if encoder_type == "recur":
         encoder = asr_baseline.RecurrentEncoder(I, H)
+    elif encoder_type == "ff":
+        encoder = asr_baseline.FeedForwardEncoder(I, H, 2)
     else:
         assert False, f"no encoder of type {encoder_type}"
     encoder.to(device)
     output_act, lens_act = encoder(input, lens)
+    assert output_act.shape[1:] == (N, H)
     for n in range(N):
         lens_n = lens[n : n + 1]
         input_n = input[: lens[n], n : n + 1]
@@ -41,11 +42,11 @@ def test_encoder_batched_matches_full(encoder_type, device):
 
 
 def test_recurrent_decoder_with_attention(device):
-    T, S, N, V, I, H = 10, 20, 30, 40, 50, 60
+    T, S, N, V, I = 10, 20, 30, 40, 50
     input = torch.randn(T, N, I, device=device)
     lens = torch.randint(1, T + 1, (N,), device=device)
     hist = torch.randint(0, V, (S, N), device=device)
-    decoder = asr_baseline.RecurrentDecoderWithAttention(I, V, H).to(device)
+    decoder = asr_baseline.RecurrentDecoderWithAttention(I, V).to(device)
     log_probs_exp = []
     for n in range(N):
         input_n, hist_n = input[: lens[n], n : n + 1], hist[:, n : n + 1]

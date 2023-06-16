@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 import ngram_lm
 
-from pydrobert.torch.util import parse_arpa_lm
+from pydrobert.torch.data import parse_arpa_lm
 
 
 KK_DIR = os.path.join(os.path.dirname(__file__), "kneser_ney")
@@ -74,7 +74,7 @@ def test_katz_discounts(katz_ngram_counts):
         )
         act_dc = act_dc[1:]  # exclude r=0
         act_dc -= np.log10(np.arange(1, len(act_dc) + 1))
-        act_dc = 10 ** act_dc
+        act_dc = 10**act_dc
         assert np.allclose(act_dc[len(exp_dc) :], 1.0)
         # discount ratios have been rounded to precision 2 in arpa file
         assert np.allclose(act_dc[: len(exp_dc)], exp_dc, atol=1e-2)

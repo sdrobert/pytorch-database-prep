@@ -19,7 +19,6 @@ from zlib import adler32
 import torch
 import pytest
 
-torch.use_deterministic_algorithms(True)
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 

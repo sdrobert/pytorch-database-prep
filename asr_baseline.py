@@ -14,13 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import abc
 
-from typing import Callable, Collection, Optional, Sequence, Tuple
+from typing import Callable, Collection, Dict, Optional, Sequence, Tuple
 from typing_extensions import Literal
 
 import param
 import torch
+
+from pydrobert.torch.modules import MixableSequentialLanguageModel, ConcatSoftAttention
 
 
 def check_in(name: str, val: str, choices: Collection[str]):
@@ -35,12 +36,13 @@ def check_positive(name: str, val, nonnegative=False):
         raise ValueError(f"Expected {name} to be {pos}; got {val}")
 
 
-class Frontend(torch.nn.Module, metaclass=abc.ABCMeta):
-    """Frontend ABC
+class Encoder(torch.nn.Module):
+    """Encoder module
 
-    The frontend is the part of the baseline which, given some input, always performs
-    the same computations in the same order. That is, it is not influenced by the
-    transduction process.
+    The encoder is the part of the baseline which, given some input, always performs
+    the same computations in the same order. It contains no auto-regressive connections.
+
+    This class serves both as a base class for encoders and
 
     Call Parameters
     ---------------
@@ -71,18 +73,18 @@ class Frontend(torch.nn.Module, metaclass=abc.ABCMeta):
         self.input_size = input_size
         self.hidden_size = hidden_size
 
-    @abc.abstractmethod
+    def reset_parameters(self):
+        pass
+
     def forward(
         self, input: torch.Tensor, lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        ...
+        return input, lens
 
     __call__: Callable[[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]
 
 
-class RecurrentFrontend(Frontend):
-    """Frontend with a recurrent architecture"""
-
+class RecurrentEncoder(Encoder):
     rnn: torch.nn.RNNBase
 
     def __init__(
@@ -112,6 +114,10 @@ class RecurrentFrontend(Frontend):
             bidirectional=bidirectional,
         )
 
+    def reset_parameters(self):
+        super().reset_parameters()
+        self.rnn.reset_parameters()
+
     def forward(
         self, input: torch.Tensor, lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -123,6 +129,116 @@ class RecurrentFrontend(Frontend):
             self.rnn(input)[0], total_length=T
         )
         return output, lens_.to(lens)
+
+
+class RecurrentDecoderWithAttention(MixableSequentialLanguageModel):
+    def __init__(
+        self,
+        input_size: int,
+        vocab_size: int,
+        hidden_size: int,
+        embed_size: int = 128,
+        dropout: float = 0.0,
+    ):
+        check_positive("vocab_size", vocab_size)
+        check_positive("input_size", input_size)
+        check_positive("hidden_size", hidden_size)
+        check_positive("embed_size", embed_size)
+        check_positive("dropout", dropout, nonnegative=True)
+        super().__init__(vocab_size)
+        self.embed = torch.nn.Embedding(
+            vocab_size + 1, embed_size, padding_idx=vocab_size
+        )
+        self.attn = ConcatSoftAttention(
+            hidden_size, input_size, hidden_size=hidden_size
+        )
+        self.cell = torch.nn.LSTMCell(input_size + embed_size, hidden_size)
+        self.ff = torch.nn.Linear(hidden_size, vocab_size)
+
+    def reset_parameters(self):
+        self.embed.reset_parameters()
+        self.attn.reset_parameters()
+        self.cell.reset_parameters()
+        self.ff.reset_parameters()
+
+    @torch.jit.export
+    def extract_by_src(
+        self, prev: Dict[str, torch.Tensor], src: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        return {
+            "input": prev["input"].index_select(1, src),
+            "mask": prev["mask"].index_select(1, src),
+            "hidden": prev["hidden"].index_select(0, src),
+            "cell": prev["cell"].index_select(0, src),
+        }
+
+    @torch.jit.export
+    def mix_by_mask(
+        self,
+        prev_true: Dict[str, torch.Tensor],
+        prev_false: Dict[str, torch.Tensor],
+        mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        mask = mask.unsqueeze(1)
+        return {
+            "input": prev_true["input"],
+            "mask": prev_true["mask"],
+            "hidden": torch.where(mask, prev_true["hidden"], prev_false["hidden"]),
+            "cell": torch.where(mask, prev_true["cell"], prev_false["cell"]),
+        }
+
+    @torch.jit.export
+    def update_input(
+        self, prev: Dict[str, torch.Tensor], hist: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        if "input" not in prev:
+            raise RuntimeError("'input' must be in prev")
+        input = prev["input"]
+        if "mask" not in prev:
+            if "lens" in prev:
+                prev["mask"] = (
+                    torch.arange(input.size(0), device=input.device).unsqueeze(1)
+                    < prev["lens"]
+                )
+            else:
+                prev["mask"] = input.new_ones(input.shape[:-1], dtype=torch.bool)
+        if "hidden" in prev and "cell" in prev:
+            return prev
+        N = hist.size(1)
+        zeros = self.ff.weight.new_zeros((N, self.attn.query_size))
+        return {
+            "input": input,
+            "mask": prev["mask"],
+            "hidden": zeros,
+            "cell": zeros,
+        }
+
+    @torch.jit.export
+    def calc_idx_log_probs(
+        self, hist: torch.Tensor, prev: Dict[str, torch.Tensor], idx: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        input, mask, h_0 = prev["input"], prev["mask"], prev["hidden"]
+        i = self.attn(h_0, input, input, mask)  # (N, I)
+        idx_zero = idx == 0
+        if idx_zero.all():
+            x = torch.full(
+                (hist.size(1),), self.vocab_size, dtype=hist.dtype, device=hist.device
+            )
+        else:
+            x = hist.gather(
+                0, (idx - 1).expand(hist.shape[1:]).clamp_min(0).unsqueeze(0)
+            ).squeeze(
+                0
+            )  # (N,)
+            x = x.masked_fill(idx_zero.expand(x.shape), self.vocab_size)
+        x = self.embed(x)  # (N, E)
+        x = torch.cat([i, x], 1)  # (N, I + E)
+        h_1, c_1 = self.cell(x, (h_0, prev["cell"]))
+        logits = self.ff(h_1)
+        return (
+            torch.nn.functional.log_softmax(logits, -1),
+            {"input": input, "mask": mask, "hidden": h_1, "cell": c_1},
+        )
 
 
 class BaselineParameters(param.Parameterized):

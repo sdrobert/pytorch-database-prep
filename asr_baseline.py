@@ -16,7 +16,7 @@
 
 import abc
 
-from typing import Callable, Collection, Dict, Optional, Sequence, Tuple
+from typing import Callable, Collection, Dict, Optional, Sequence, Tuple, Union
 from typing_extensions import Literal
 from itertools import chain
 
@@ -34,12 +34,17 @@ from pydrobert.torch.modules import (
 )
 
 __all__ = [
+    "BaselineParams",
+    "construct_baseline",
     "CTCSpeechRecognizer",
     "Encoder",
     "EncoderDecoderSpeechRecognizer",
     "FeedForwardEncoder",
+    "FeedForwardEncoderParams",
     "RecurrentDecoderWithAttention",
+    "RecurrentDecoderWithAttentionParams",
     "RecurrentEncoder",
+    "RecurrentEncoderParams",
     "SpeechRecognizer",
 ]
 
@@ -186,7 +191,6 @@ class RecurrentEncoder(Encoder):
                     "for bidirectional encoder, hidden_size must be divisible by 2; "
                     f"got {hidden_size}"
                 )
-            hidden_size //= 2
         super().__init__(input_size, hidden_size)
         if recurrent_type == "lstm":
             class_ = torch.nn.LSTM
@@ -196,7 +200,7 @@ class RecurrentEncoder(Encoder):
             class_ = torch.nn.RNN
         self.rnn = class_(
             input_size,
-            hidden_size,
+            hidden_size // 2 if bidirectional else hidden_size,
             num_layers,
             dropout=dropout,
             bidirectional=bidirectional,
@@ -225,21 +229,26 @@ class RecurrentDecoderWithAttention(MixableSequentialLanguageModel):
         hidden_size: int,
         vocab_size: int,
         embed_size: int = 128,
+        decoder_hidden_size: Optional[int] = None,
         dropout: float = 0.0,
     ):
-        check_positive("vocab_size", vocab_size)
         check_positive("hidden_size", hidden_size)
+        check_positive("vocab_size", vocab_size)
         check_positive("embed_size", embed_size)
         check_positive("dropout", dropout, nonnegative=True)
+        if decoder_hidden_size is None:
+            decoder_hidden_size = hidden_size
+        else:
+            check_positive("decoder_hidden_size", decoder_hidden_size)
         super().__init__(vocab_size)
         self.embed = torch.nn.Embedding(
             vocab_size + 1, embed_size, padding_idx=vocab_size
         )
         self.attn = ConcatSoftAttention(
-            hidden_size, hidden_size, hidden_size=hidden_size
+            decoder_hidden_size, hidden_size, hidden_size=decoder_hidden_size
         )
-        self.cell = torch.nn.LSTMCell(hidden_size + embed_size, hidden_size)
-        self.ff = torch.nn.Linear(hidden_size, vocab_size)
+        self.cell = torch.nn.LSTMCell(hidden_size + embed_size, decoder_hidden_size)
+        self.ff = torch.nn.Linear(decoder_hidden_size, vocab_size)
 
     def reset_parameters(self):
         self.embed.reset_parameters()
@@ -455,7 +464,7 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
         encoded_name: str = "input",
         encoded_lens_name: str = "lens",
         pad_value: int = config.INDEX_PAD_VALUE,
-        max_iters: int = 10_000,
+        max_iters: int = 200,
     ) -> None:
         check_positive("beam_width", beam_width)
         if lm is not None:
@@ -508,9 +517,12 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
 class FeedForwardEncoderParams(param.Parameterized):
     num_layers: int = param.Integer(2, bounds=(1, None), doc="Number of layers")
     bias: bool = param.Boolean(True, doc="Whether to add a bias vector")
+    nonlinearity: Literal["relu", "tanh", "sigmoid"] = param.ObjectSelector(
+        "relu", ["relu", "tanh", "sigmoid"], doc="Nonlinearities after linear layers"
+    )
 
 
-class RecurrentEncoderParameters(param.Parameterized):
+class RecurrentEncoderParams(param.Parameterized):
     num_layers: int = param.Integer(2, bounds=(1, None), doc="Number of layers")
     recurrent_type: Literal["lstm", "gru", "rnn"] = param.ObjectSelector(
         "lstm", ["lstm", "gru", "rnn"], doc="Type of recurrent cell"
@@ -523,25 +535,137 @@ class RecurrentEncoderParameters(param.Parameterized):
     )
 
 
-class BaselineParameters(param.Parameterized):
-    """All parameters for a baseline model"""
+class RecurrentDecoderWithAttentionParams(param.Parameterized):
+    embed_size: int = param.Integer(
+        128, bounds=(1, None), doc="Size of token embedding vectors"
+    )
+    hidden_size: int = param.Integer(
+        512, bounds=(1, None), doc="Size of decoder hidden states"
+    )
 
+
+class BaselineParams(param.Parameterized):
     input_size: int = param.Integer(
         41, bounds=(1, None), doc="Size of input feature vectors"
     )
     hidden_size: int = param.Integer(
-        512, bounds=(1, None), doc="Size of hidden states, including encoder output"
+        512, bounds=(1, None), doc="Size of encoder hidden states/output"
     )
     vocab_size: int = param.Integer(
-        32, bounds=(1, None), doc="Size of output vocabulary"
+        32, bounds=(1, None), doc="Size of output vocabulary (excluding eos and blank)"
     )
 
-    encoder_type: Literal["recur", "id"] = param.ObjectSelector(
-        "recur", ["recur", "id"], doc="What encoder structure to use"
+    encoder_type: Literal["recur", "ff"] = param.ObjectSelector(
+        "recur", ["recur", "ff"], doc="What encoder structure to use"
     )
     transducer_type: Literal["ctc", "encdec"] = param.ObjectSelector(
         "ctc", ["ctc", "encdec"], doc="How to perform audio -> text transduction"
     )
+    decoder_type: Literal["rwa"] = param.ObjectSelector(
+        "rwa",
+        ["rwa"],
+        doc="What decoder structure to use (if transducer_type = 'encdec')",
+    )
+
+    recur_encoder: Optional[RecurrentEncoderParams] = param.ClassSelector(
+        RecurrentEncoderParams,
+        instantiate=False,
+        doc="Parameters for recurrent encoded (if encoder_type = 'recur')",
+    )
+    ff_encoder: Optional[FeedForwardEncoderParams] = param.ClassSelector(
+        FeedForwardEncoderParams,
+        instantiate=False,
+        doc="Parameters for feed-forward encoder (if encoder_type = 'ff')",
+    )
+
+    rwa_decoder: Optional[RecurrentDecoderWithAttentionParams] = param.ClassSelector(
+        RecurrentDecoderWithAttentionParams,
+        instantiate=False,
+        doc="Parameters for recurrent decoder w/ attention (if transducer_type = "
+        "'encdec' and decoder_type = 'rwa')",
+    )
+
+    def initialize_missing(self):
+        if self.recur_encoder is None:
+            self.recur_encoder = RecurrentEncoderParams(name="recur_encoder")
+        if self.ff_encoder is None:
+            self.ff_encoder = FeedForwardEncoderParams(name="ff_encoder")
+        if self.rwa_decoder is None:
+            self.rwa_decoder = RecurrentDecoderWithAttentionParams(name="rwa_decoder")
+
+
+def construct_baseline(
+    params: BaselineParams,
+    lm: Optional[ExtractableSequentialLanguageModel] = None,
+    beta: float = 0.0,
+    beam_width: int = 8,
+    dropout: float = 0.0,
+    max_iters: int = 200,
+):
+    if params.encoder_type == "ff":
+        if params.ff_encoder is None:
+            raise ValueError(
+                "encoder_type is 'ff' but ff_encoder has not been initialized"
+            )
+        encoder = FeedForwardEncoder(
+            params.input_size,
+            params.hidden_size,
+            params.ff_encoder.num_layers,
+            params.ff_encoder.bias,
+            params.ff_encoder.nonlinearity,
+            dropout,
+        )
+    elif params.encoder_type == "recur":
+        if params.recur_encoder is None:
+            raise ValueError(
+                "encoder_type is 'recur' but recur_encoder has not been initialized"
+            )
+        encoder = RecurrentEncoder(
+            params.input_size,
+            params.hidden_size,
+            params.recur_encoder.num_layers,
+            params.recur_encoder.bidirectional,
+            params.recur_encoder.recurrent_type,
+            dropout,
+        )
+    else:
+        raise NotImplementedError(
+            f"encoder_type '{params.encoder_type}' not implemented"
+        )
+    if params.transducer_type == "ctc":
+        if lm is not None and not isinstance(lm, MixableSequentialLanguageModel):
+            raise ValueError(
+                "ctc transducers require MixableSequentialLanguageModel instances "
+                "for shallow fusion"
+            )
+        recognizer = CTCSpeechRecognizer(
+            params.vocab_size, encoder, beam_width, lm, beta
+        )
+    elif params.transducer_type == "encdec":
+        if params.decoder_type == "rwa":
+            if params.rwa_decoder is None:
+                raise ValueError(
+                    "decoder_type = 'rwa' but rwa_decoder is not initialized"
+                )
+            decoder = RecurrentDecoderWithAttention(
+                params.hidden_size,
+                params.vocab_size + 1,
+                params.rwa_decoder.embed_size,
+                params.rwa_decoder.hidden_size,
+                dropout,
+            )
+        else:
+            raise NotImplementedError(
+                f"decoder_type '{params.decoder_type}' not implemented"
+            )
+        recognizer = EncoderDecoderSpeechRecognizer(
+            encoder, decoder, beam_width, lm, beta, max_iters=max_iters
+        )
+    else:
+        raise NotImplementedError(
+            f"transducer_type = '{params.transducer_type}' is not implemented"
+        )
+    return recognizer
 
 
 def main(args: Optional[Sequence[str]] = None):

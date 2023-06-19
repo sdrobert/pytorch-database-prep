@@ -45,11 +45,11 @@ def test_encoder_batched_matches_full(encoder_type, device):
 
 
 def test_recurrent_decoder_with_attention(device):
-    T, S, N, V, I = 10, 20, 30, 40, 50
+    T, S, N, V, I, H = 10, 20, 30, 40, 50, 60
     input = torch.randn(T, N, I, device=device)
     lens = torch.randint(1, T + 1, (N,), device=device)
     hist = torch.randint(0, V, (S, N), device=device)
-    decoder = RecurrentDecoderWithAttention(I, V).to(device)
+    decoder = RecurrentDecoderWithAttention(I, V, decoder_hidden_size=H).to(device)
     log_probs_exp = []
     for n in range(N):
         input_n, hist_n = input[: lens[n], n : n + 1], hist[:, n : n + 1]
@@ -138,3 +138,25 @@ def test_recognizer(device, recognizer, with_lm):
 
     loss_act = loss_act / denom
     assert torch.allclose(loss_exp, loss_act)
+
+
+@pytest.mark.parametrize("with_lm", [True, False], ids=["w/ lm", "w/o lm"])
+@pytest.mark.parametrize("encoder_type", ["recur", "ff"])
+@pytest.mark.parametrize("transducer_type", ["ctc", "encdec"])
+def test_construct_baseline(with_lm, encoder_type, transducer_type):
+    T, N, V, I = 5, 10, 15, 20
+    feats = torch.rand(T, N, I)
+    lens = torch.randint(1, T + 1, (N,))
+    lm = DummyLM(V + int(transducer_type == "encdec")) if with_lm else None
+    params = BaselineParams(
+        encoder_type=encoder_type,
+        transducer_type=transducer_type,
+        vocab_size=V,
+        input_size=I,
+    )
+    params.initialize_missing()
+    recognizer = construct_baseline(params, lm)
+    hyps, hyp_lens = recognizer(feats, lens)
+    assert hyp_lens.shape == lens.shape
+    assert hyps.size(0) >= hyp_lens.max()
+    assert hyps.size(1) == N

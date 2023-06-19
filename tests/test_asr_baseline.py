@@ -99,17 +99,26 @@ class DummyLM(MixableSequentialLanguageModel):
 
 
 @pytest.mark.parametrize("with_lm", [True, False], ids=["w/ lm", "w/o lm"])
-@pytest.mark.parametrize("recognizer", ["ctc"])
+@pytest.mark.parametrize("recognizer", ["ctc", "encdec"])
 def test_recognizer(device, recognizer, with_lm):
-    T, S, N, V, I, H = 50, 40, 30, 20, 10, 5
+    T, N, V, I, H = 50, 20, 20, 10, 5
     feats = torch.randn(T, N, I, device=device)
     lens = torch.randint(1, T + 1, (N,), device=device)
-    refs = torch.randint(0, V, (S, N), device=device)
-    ref_lens = torch.randint(1, (S + 1), (N,), device=device)
+    refs = torch.randint(0, V, (T, N), device=device)
+    ref_lens = (torch.rand(N, device=device) * lens).clamp_min_(1).long()
     lm = DummyLM(V) if with_lm else None
     encoder = FeedForwardEncoder(I, H)
     if recognizer == "ctc":
         recognizer = CTCSpeechRecognizer(V, encoder, lm=lm).to(device)
+        # CTC loss averages over reference lengths per batch element, THEN batch
+        # elements
+        nums, denom = [1] * N, N
+    elif recognizer == "encdec":
+        decoder = RecurrentDecoderWithAttention(H, V)
+        recognizer = EncoderDecoderSpeechRecognizer(
+            encoder, decoder, lm=lm, max_iters=2 * T
+        ).to(device)
+        nums, denom = ref_lens, ref_lens.sum()
     else:
         assert False, f"unknown recognizer {recognizer}"
     loss_exp = recognizer.train_loss(feats, lens, refs, ref_lens)
@@ -121,11 +130,11 @@ def test_recognizer(device, recognizer, with_lm):
         hyps_n_exp = hyps_exp[: hyp_lens_exp[n], n : n + 1]
         hyp_lens_n_exp = hyp_lens_exp[n : n + 1]
         loss_n_act = recognizer.train_loss(feats_n, lens_n, refs_n, ref_lens_n)
-        loss_act = loss_act + ref_lens_n.item() * loss_n_act
+        loss_act = loss_act + nums[n] * loss_n_act
         hyps_n_act, hyp_lens_n_act = recognizer.decode(feats_n, lens_n)
-        assert hyp_lens_n_exp == hyp_lens_n_act
+        assert hyp_lens_n_exp == hyp_lens_n_act, n
         hyps_n_act = hyps_n_act[: hyps_n_exp.size(0)]
-        assert (hyps_n_exp == hyps_n_act).all()
+        assert (hyps_n_exp == hyps_n_act).all(), n
 
-    loss_act = loss_act / ref_lens_n.sum().item()
+    loss_act = loss_act / denom
     assert torch.allclose(loss_exp, loss_act)

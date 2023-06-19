@@ -23,15 +23,20 @@ from itertools import chain
 import param
 import torch
 
+import pydrobert.torch.config as config
 from pydrobert.torch.modules import (
-    MixableSequentialLanguageModel,
+    BeamSearch,
     ConcatSoftAttention,
     CTCPrefixSearch,
+    ExtractableSequentialLanguageModel,
+    ExtractableShallowFusionLanguageModel,
+    MixableSequentialLanguageModel,
 )
 
 __all__ = [
     "CTCSpeechRecognizer",
     "Encoder",
+    "EncoderDecoderSpeechRecognizer",
     "FeedForwardEncoder",
     "RecurrentDecoderWithAttention",
     "RecurrentEncoder",
@@ -114,18 +119,27 @@ class FeedForwardEncoder(Encoder):
         hidden_size: int,
         num_layers: int = 1,
         bias: bool = True,
+        nonlinearity: Literal["relu", "tanh", "sigmoid"] = "relu",
         dropout: float = 0.0,
     ):
         check_positive("num_layers", num_layers)
         check_positive("dropout", dropout, nonnegative=True)
+        check_in("nonlinearity", nonlinearity, {"relu", "tanh", "sigmoid"})
         super().__init__(input_size, hidden_size)
         drop = torch.nn.Dropout(dropout)
+        if nonlinearity == "relu":
+            nonlin = torch.nn.ReLU()
+        elif nonlinearity == "tanh":
+            nonlin = torch.nn.Tanh()
+        else:
+            nonlin = torch.nn.Sigmoid()
         self.stack = torch.nn.Sequential(
             torch.nn.Linear(input_size, hidden_size, bias),
+            nonlin,
             drop,
             *chain(
                 *(
-                    (torch.nn.Linear(hidden_size, hidden_size, bias), drop)
+                    (torch.nn.Linear(hidden_size, hidden_size, bias), nonlin, drop)
                     for _ in range(num_layers - 1)
                 )
             ),
@@ -316,16 +330,22 @@ class RecurrentDecoderWithAttention(MixableSequentialLanguageModel):
 class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
     """ABC for ASR"""
 
-    __constants__ = ("vocab_size",)
-
     encoder: Encoder
 
-    def __init__(self, vocab_size: int, encoder: Encoder) -> None:
-        check_positive("vocab_size", vocab_size)
+    def __init__(self, encoder: Encoder) -> None:
         super().__init__()
-        self.vocab_size, self.encoder = vocab_size, encoder
+        self.encoder = encoder
 
     @abc.abstractmethod
+    def train_loss_from_encoded(
+        self,
+        input: torch.Tensor,
+        lens: torch.Tensor,
+        refs: torch.Tensor,
+        ref_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        ...
+
     def train_loss(
         self,
         feats: torch.Tensor,
@@ -333,13 +353,24 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
         refs: torch.Tensor,
         ref_lens: torch.Tensor,
     ) -> torch.Tensor:
-        ...
+        input, lens = self.encoder(feats, lens)
+        return self.train_loss_from_encoded(input, lens, refs, ref_lens)
 
     @abc.abstractmethod
-    def decode(self, feats: torch.Tensor, lens: torch.Tensor) -> torch.Tensor:
+    def decode_from_encoded(
+        self, input: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         ...
 
-    def forward(self, feats: torch.Tensor, lens: torch.Tensor) -> torch.Tensor:
+    def decode(
+        self, feats: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        input, lens = self.encoder(feats, lens)
+        return self.decode_from_encoded(input, lens)
+
+    def forward(
+        self, feats: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.decode(feats, lens)
 
     __call__: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
@@ -361,10 +392,11 @@ class CTCSpeechRecognizer(SpeechRecognizer):
         lm: Optional[MixableSequentialLanguageModel] = None,
         beta: float = 0.0,
     ) -> None:
+        check_positive("vocab_size", vocab_size)
         check_positive("beam_width", beam_width)
         if lm is not None:
             check_equals("lm.vocab_size", lm.vocab_size, vocab_size)
-        super().__init__(vocab_size, encoder)
+        super().__init__(encoder)
         self.ff = torch.nn.Linear(encoder.hidden_size, vocab_size + 1)
         self.search = CTCPrefixSearch(beam_width, beta, lm)
         self.ctc_loss = torch.nn.CTCLoss(vocab_size)
@@ -374,24 +406,103 @@ class CTCSpeechRecognizer(SpeechRecognizer):
         self.ff.reset_parameters()
         self.search.reset_parameters()
 
-    def train_loss(
+    def train_loss_from_encoded(
         self,
-        feats: torch.Tensor,
+        input: torch.Tensor,
         lens: torch.Tensor,
         refs: torch.Tensor,
         ref_lens: torch.Tensor,
     ) -> torch.Tensor:
-        x, lens = self.encoder(feats, lens)
-        log_probs = torch.nn.functional.log_softmax(self.ff(x), 2)
+        log_probs = torch.nn.functional.log_softmax(self.ff(input), 2)
         return self.ctc_loss(log_probs, refs.T, lens, ref_lens)
 
-    def decode(
-        self, feats: torch.Tensor, lens: torch.Tensor
+    def decode_from_encoded(
+        self, input: torch.Tensor, lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x, lens = self.encoder(feats, lens)
-        logits = self.ff(x)
+        logits = self.ff(input)
         beam, lens, _ = self.search(logits, lens)
         return beam[..., 0], lens[..., 0]  # most probable
+
+
+class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
+    """Encoder/decoder speech recognizer
+
+    The end-of-speech token is assumed to be ``decoder.vocab_size - 1``.
+    """
+
+    __constants__ = (
+        "encoded_name_train",
+        "encoded_lens_name_train",
+        "encoded_name_decode",
+        "encoded_lens_name_decode",
+        "max_iters",
+    )
+    encoded_name_train: str
+    encoded_lens_name_train: str
+    encoded_name_decode: str
+    encoded_lens_name_decode: str
+    max_iters: int
+
+    decoder: ExtractableSequentialLanguageModel
+
+    def __init__(
+        self,
+        encoder: Encoder,
+        decoder: ExtractableSequentialLanguageModel,
+        beam_width: int = 8,
+        lm: Optional[ExtractableSequentialLanguageModel] = None,
+        beta: float = 0.0,
+        encoded_name: str = "input",
+        encoded_lens_name: str = "lens",
+        pad_value: int = config.INDEX_PAD_VALUE,
+        max_iters: int = 10_000,
+    ) -> None:
+        check_positive("beam_width", beam_width)
+        if lm is not None:
+            check_equals("lm.vocab_size", lm.vocab_size, decoder.vocab_size)
+        check_positive("max_iters", max_iters)
+        super().__init__(encoder)
+        self.decoder = decoder
+        self.encoded_name_train = self.encoded_name_decode = encoded_name
+        self.encoded_lens_name_train = self.encoded_lens_name_decode = encoded_lens_name
+        self.max_iters = max_iters
+        if lm is None:
+            lm = decoder
+        else:
+            lm = ExtractableShallowFusionLanguageModel(
+                decoder, lm, beta, first_prefix="first."
+            )
+            self.encoded_name_decode = "first." + encoded_name
+            self.encoded_lens_name_decode = "first." + encoded_lens_name
+
+        self.search = BeamSearch(
+            lm,
+            beam_width,
+            eos=decoder.vocab_size - 1,
+            pad_value=pad_value,
+        )
+        self.ce_loss = torch.nn.CrossEntropyLoss(ignore_index=pad_value)
+
+    def train_loss_from_encoded(
+        self,
+        input: torch.Tensor,
+        lens: torch.Tensor,
+        refs: torch.Tensor,
+        ref_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = torch.arange(refs.size(0), device=refs.device).unsqueeze(1) >= ref_lens
+        refs = refs.masked_fill(mask, self.search.pad_value)
+        prev = {self.encoded_name_train: input, self.encoded_lens_name_train: lens}
+        log_probs = self.decoder(refs[:-1].clamp_min(0), prev)
+        assert log_probs.shape[:-1] == refs.shape
+        return self.ce_loss(log_probs.flatten(0, 1), refs.flatten())
+
+    def decode_from_encoded(
+        self, input: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        prev = {self.encoded_name_decode: input, self.encoded_lens_name_decode: lens}
+        hyps, lens, _ = self.search(prev, input.size(1), self.max_iters)
+        return hyps[..., 0], lens[..., 0]  # most probable
 
 
 class FeedForwardEncoderParams(param.Parameterized):

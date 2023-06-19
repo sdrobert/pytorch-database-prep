@@ -23,7 +23,20 @@ from itertools import chain
 import param
 import torch
 
-from pydrobert.torch.modules import MixableSequentialLanguageModel, ConcatSoftAttention
+from pydrobert.torch.modules import (
+    MixableSequentialLanguageModel,
+    ConcatSoftAttention,
+    CTCPrefixSearch,
+)
+
+__all__ = [
+    "CTCSpeechRecognizer",
+    "Encoder",
+    "FeedForwardEncoder",
+    "RecurrentDecoderWithAttention",
+    "RecurrentEncoder",
+    "SpeechRecognizer",
+]
 
 
 def check_in(name: str, val: str, choices: Collection[str]):
@@ -36,6 +49,11 @@ def check_positive(name: str, val, nonnegative=False):
     pos = "non-negative" if nonnegative else "positive"
     if val < 0 or (val == 0 and not nonnegative):
         raise ValueError(f"Expected {name} to be {pos}; got {val}")
+
+
+def check_equals(name: str, val, other):
+    if val != other:
+        raise ValueError(f"Expected {name} to be equal to {other}; got {val}")
 
 
 class Encoder(torch.nn.Module, metaclass=abc.ABCMeta):
@@ -293,6 +311,92 @@ class RecurrentDecoderWithAttention(MixableSequentialLanguageModel):
             torch.nn.functional.log_softmax(logits, -1),
             {"input": input, "mask": mask, "hidden": h_1, "cell": c_1},
         )
+
+
+class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
+    """ABC for ASR"""
+
+    __constants__ = ("vocab_size",)
+
+    encoder: Encoder
+
+    def __init__(self, vocab_size: int, encoder: Encoder) -> None:
+        check_positive("vocab_size", vocab_size)
+        super().__init__()
+        self.vocab_size, self.encoder = vocab_size, encoder
+
+    @abc.abstractmethod
+    def train_loss(
+        self,
+        feats: torch.Tensor,
+        lens: torch.Tensor,
+        refs: torch.Tensor,
+        ref_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        ...
+
+    @abc.abstractmethod
+    def decode(self, feats: torch.Tensor, lens: torch.Tensor) -> torch.Tensor:
+        ...
+
+    def forward(self, feats: torch.Tensor, lens: torch.Tensor) -> torch.Tensor:
+        return self.decode(feats, lens)
+
+    __call__: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+class CTCSpeechRecognizer(SpeechRecognizer):
+    """ASR + CTC transduction
+
+    Warning
+    -------
+    The blank token will be taken to be the index `vocab_size`, not :obj:`0`.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        encoder: Encoder,
+        beam_width: int = 8,
+        lm: Optional[MixableSequentialLanguageModel] = None,
+        beta: float = 0.0,
+    ) -> None:
+        check_positive("beam_width", beam_width)
+        if lm is not None:
+            check_equals("lm.vocab_size", lm.vocab_size, vocab_size)
+        super().__init__(vocab_size, encoder)
+        self.ff = torch.nn.Linear(encoder.hidden_size, vocab_size + 1)
+        self.search = CTCPrefixSearch(beam_width, beta, lm)
+        self.ctc_loss = torch.nn.CTCLoss(vocab_size)
+
+    def reset_parameters(self):
+        self.encoder.reset_parameters()
+        self.ff.reset_parameters()
+        self.search.reset_parameters()
+
+    def train_loss(
+        self,
+        feats: torch.Tensor,
+        lens: torch.Tensor,
+        refs: torch.Tensor,
+        ref_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        x, lens = self.encoder(feats, lens)
+        log_probs = torch.nn.functional.log_softmax(self.ff(x), 2)
+        return self.ctc_loss(log_probs, refs.T, lens, ref_lens)
+
+    def decode(
+        self, feats: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x, lens = self.encoder(feats, lens)
+        logits = self.ff(x)
+        beam, lens, _ = self.search(logits, lens)
+        return beam[..., 0], lens[..., 0]  # most probable
+
+
+class FeedForwardEncoderParams(param.Parameterized):
+    num_layers: int = param.Integer(2, bounds=(1, None), doc="Number of layers")
+    bias: bool = param.Boolean(True, doc="Whether to add a bias vector")
 
 
 class RecurrentEncoderParameters(param.Parameterized):

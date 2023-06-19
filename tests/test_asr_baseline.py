@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Dict, Tuple
 import torch
 import pytest
-import asr_baseline
+
+from pydrobert.torch.modules import MixableSequentialLanguageModel
+from asr_baseline import *
 
 
 @pytest.mark.parametrize("encoder_type", ["recur", "ff"])
@@ -23,9 +26,9 @@ def test_encoder_batched_matches_full(encoder_type, device):
     input = torch.randn(T, N, I, device=device)
     lens = torch.randint(1, T + 1, (N,), device=device)
     if encoder_type == "recur":
-        encoder = asr_baseline.RecurrentEncoder(I, H)
+        encoder = RecurrentEncoder(I, H)
     elif encoder_type == "ff":
-        encoder = asr_baseline.FeedForwardEncoder(I, H, 2)
+        encoder = FeedForwardEncoder(I, H, 2)
     else:
         assert False, f"no encoder of type {encoder_type}"
     encoder.to(device)
@@ -46,7 +49,7 @@ def test_recurrent_decoder_with_attention(device):
     input = torch.randn(T, N, I, device=device)
     lens = torch.randint(1, T + 1, (N,), device=device)
     hist = torch.randint(0, V, (S, N), device=device)
-    decoder = asr_baseline.RecurrentDecoderWithAttention(I, V).to(device)
+    decoder = RecurrentDecoderWithAttention(I, V).to(device)
     log_probs_exp = []
     for n in range(N):
         input_n, hist_n = input[: lens[n], n : n + 1], hist[:, n : n + 1]
@@ -56,3 +59,73 @@ def test_recurrent_decoder_with_attention(device):
     log_probs_act = decoder(hist, {"input": input, "lens": lens})
     assert log_probs_exp.shape == log_probs_act.shape
     assert torch.allclose(log_probs_exp, log_probs_act, atol=1e-5)
+
+
+class DummyLM(MixableSequentialLanguageModel):
+    def __init__(self, vocab_size: int):
+        super().__init__(vocab_size)
+        self.embedding = torch.nn.Embedding(vocab_size + 1, vocab_size, vocab_size)
+
+    def calc_idx_log_probs(
+        self, hist: torch.Tensor, prev: Dict[str, torch.Tensor], idx: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        idx_zero = idx == 0
+        if idx_zero.all():
+            x = torch.full(
+                (hist.size(1),), self.vocab_size, dtype=hist.dtype, device=hist.device
+            )
+        else:
+            x = hist.gather(
+                0, (idx - 1).expand(hist.shape[1:]).clamp_min(0).unsqueeze(0)
+            ).squeeze(
+                0
+            )  # (N,)
+            x = x.masked_fill(idx_zero.expand(x.shape), self.vocab_size)
+        x = torch.nn.functional.log_softmax(self.embedding(x), 1)
+        return x, prev
+
+    def extract_by_src(
+        self, prev: Dict[str, torch.Tensor], src: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        return prev
+
+    def mix_by_mask(
+        self,
+        prev_true: Dict[str, torch.Tensor],
+        prev_false: Dict[str, torch.Tensor],
+        mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        return prev_true
+
+
+@pytest.mark.parametrize("with_lm", [True, False], ids=["w/ lm", "w/o lm"])
+@pytest.mark.parametrize("recognizer", ["ctc"])
+def test_recognizer(device, recognizer, with_lm):
+    T, S, N, V, I, H = 50, 40, 30, 20, 10, 5
+    feats = torch.randn(T, N, I, device=device)
+    lens = torch.randint(1, T + 1, (N,), device=device)
+    refs = torch.randint(0, V, (S, N), device=device)
+    ref_lens = torch.randint(1, (S + 1), (N,), device=device)
+    lm = DummyLM(V) if with_lm else None
+    encoder = FeedForwardEncoder(I, H)
+    if recognizer == "ctc":
+        recognizer = CTCSpeechRecognizer(V, encoder, lm=lm).to(device)
+    else:
+        assert False, f"unknown recognizer {recognizer}"
+    loss_exp = recognizer.train_loss(feats, lens, refs, ref_lens)
+    hyps_exp, hyp_lens_exp = recognizer.decode(feats, lens)
+    loss_act = 0.0
+    for n in range(N):
+        feats_n, lens_n = feats[: lens[n], n : n + 1], lens[n : n + 1]
+        refs_n, ref_lens_n = refs[: ref_lens[n], n : n + 1], ref_lens[n : n + 1]
+        hyps_n_exp = hyps_exp[: hyp_lens_exp[n], n : n + 1]
+        hyp_lens_n_exp = hyp_lens_exp[n : n + 1]
+        loss_n_act = recognizer.train_loss(feats_n, lens_n, refs_n, ref_lens_n)
+        loss_act = loss_act + ref_lens_n.item() * loss_n_act
+        hyps_n_act, hyp_lens_n_act = recognizer.decode(feats_n, lens_n)
+        assert hyp_lens_n_exp == hyp_lens_n_act
+        hyps_n_act = hyps_n_act[: hyps_n_exp.size(0)]
+        assert (hyps_n_exp == hyps_n_act).all()
+
+    loss_act = loss_act / ref_lens_n.sum().item()
+    assert torch.allclose(loss_exp, loss_act)

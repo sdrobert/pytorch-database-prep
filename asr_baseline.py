@@ -813,6 +813,13 @@ def train(options: argparse.Namespace):
 
     init_epoch = controller.get_last_epoch() + 1
     total_epochs = (tparams.num_epochs + 1) if tparams.num_epochs else 10_000
+
+    if options.mvn_path is None:
+        feat_mean = feat_std = None
+    else:
+        dict_ = torch.load(options.mvn_path, "cpu")
+        feat_mean, feat_std = dict_["mean"], dict_["std"]
+
     tdl = SpectDataLoader(
         options.train_dir,
         dparams,
@@ -823,9 +830,17 @@ def train(options: argparse.Namespace):
         init_epoch=init_epoch,
         suppress_alis=True,
         seed=tparams.seed,
+        feat_mean=feat_mean,
+        feat_std=feat_std,
     )
     vdl = SpectDataLoader(
-        options.val_dir, dparams, shuffle=False, suppress_alis=True, batch_first=False
+        options.val_dir,
+        dparams,
+        shuffle=False,
+        suppress_alis=True,
+        batch_first=False,
+        feat_mean=feat_mean,
+        feat_std=feat_std,
     )
     if options.quiet:
         get_tdl, get_vdl = (lambda: tdl), (lambda: vdl)

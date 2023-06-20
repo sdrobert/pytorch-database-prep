@@ -15,22 +15,37 @@
 # limitations under the License.
 
 import abc
+import argparse
+import os
 
-from typing import Callable, Collection, Dict, Optional, Sequence, Tuple, Union
+from typing import Callable, Collection, Dict, Optional, Sequence, Tuple
 from typing_extensions import Literal
 from itertools import chain
 
 import param
 import torch
 
+from tqdm import tqdm
 import pydrobert.torch.config as config
 from pydrobert.torch.modules import (
     BeamSearch,
     ConcatSoftAttention,
     CTCPrefixSearch,
+    ErrorRate,
     ExtractableSequentialLanguageModel,
     ExtractableShallowFusionLanguageModel,
     MixableSequentialLanguageModel,
+)
+from pydrobert.param.argparse import (
+    add_serialization_group_to_parser,
+    add_deserialization_group_to_parser,
+)
+from pydrobert.torch.training import TrainingStateParams as _TrainingStateParams
+from pydrobert.torch.training import TrainingStateController
+from pydrobert.torch.data import (
+    SpectDataLoaderParams,
+    SpectDataSetParams,
+    SpectDataLoader,
 )
 
 __all__ = [
@@ -47,6 +62,19 @@ __all__ = [
     "RecurrentEncoderParams",
     "SpeechRecognizer",
 ]
+
+
+TRAIN_DATA_LOADER_PARAMS_SUBSET = {
+    "batch_size",
+    "drop_last",
+    "num_length_buckets",
+    "size_batch_by_length",
+    "subset_ids",
+    "delta_order",
+    "do_mvn",
+}
+
+DECODE_DATA_SET_PARAMS_SUBSET = {"subset_ids", "delta_order", "do_mvn"}
 
 
 def check_in(name: str, val: str, choices: Collection[str]):
@@ -345,6 +373,9 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
         super().__init__()
         self.encoder = encoder
 
+    def reset_parameters(self):
+        self.encoder.reset_parameters()
+
     @abc.abstractmethod
     def train_loss_from_encoded(
         self,
@@ -411,7 +442,7 @@ class CTCSpeechRecognizer(SpeechRecognizer):
         self.ctc_loss = torch.nn.CTCLoss(vocab_size)
 
     def reset_parameters(self):
-        self.encoder.reset_parameters()
+        super().reset_parameters()
         self.ff.reset_parameters()
         self.search.reset_parameters()
 
@@ -491,6 +522,11 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
             pad_value=pad_value,
         )
         self.ce_loss = torch.nn.CrossEntropyLoss(ignore_index=pad_value)
+
+    def reset_parameters(self):
+        super().reset_parameters()
+        if hasattr(self.decoder, "reset_parameters"):
+            self.decoder.reset_parameters()
 
     def train_loss_from_encoded(
         self,
@@ -592,6 +628,7 @@ class BaselineParams(param.Parameterized):
             self.ff_encoder = FeedForwardEncoderParams(name="ff_encoder")
         if self.rwa_decoder is None:
             self.rwa_decoder = RecurrentDecoderWithAttentionParams(name="rwa_decoder")
+        return self
 
 
 def construct_baseline(
@@ -601,7 +638,7 @@ def construct_baseline(
     beam_width: int = 8,
     dropout: float = 0.0,
     max_iters: int = 200,
-):
+) -> SpeechRecognizer:
     if params.encoder_type == "ff":
         if params.ff_encoder is None:
             raise ValueError(
@@ -668,5 +705,298 @@ def construct_baseline(
     return recognizer
 
 
+class TrainingStateParams(_TrainingStateParams):
+    dropout: float = param.Magnitude(0.0, doc="Dropout probability")
+    optimizer: Literal["adam", "sgd"] = param.ObjectSelector(
+        "adam", ["adam", "sgd"], doc="Which optimizer to train with"
+    )
+
+
+def existing_dir(val: str) -> str:
+    if not os.path.isdir(val):
+        raise ValueError(f"'{val}' is not a directory")
+    return os.path.normpath(val)
+
+
+def _train_for_epoch(
+    recognizer: SpeechRecognizer,
+    optimizer: torch.optim.Optimizer,
+    dl: SpectDataLoader,
+    device: torch.device,
+) -> float:
+    recognizer.train()
+
+    total_loss = 0.0
+    total_elems = 0
+    for feats, refs, lens, ref_lens in dl:
+        N = ref_lens.size(0)
+        feats, lens = feats.to(device), lens.to(device)
+        refs, ref_lens = refs.to(device), ref_lens.to(device)
+
+        optimizer.zero_grad()
+
+        loss = recognizer.train_loss(feats, lens, refs, ref_lens)
+        loss.backward()
+
+        optimizer.step()
+
+        total_loss += N * loss.item()
+        total_elems += N
+        del feats, lens, refs, ref_lens, loss
+
+    return total_loss / N
+
+
+def _val_for_epoch(
+    recognizer: SpeechRecognizer, dl: SpectDataLoader, eos: int, device: torch.device
+) -> float:
+    recognizer.eval()
+
+    total_er = 0
+    total_ref_tokens = 0
+    er_func = ErrorRate(eos, norm=False)
+    eos_pad = torch.full((N,), eos, device=device, dtype=torch.long)
+    with torch.no_grad():
+        for feats, refs, lens, ref_lens in dl:
+            N = ref_lens.size(0)
+            feats, lens = feats.to(device), lens.to(device)
+            refs, ref_lens = refs.to(device), ref_lens.to(device)
+
+            hyps, hyp_lens = recognizer.decode(feats, lens)
+            del feats, lens
+
+            hyps = torch.cat([hyps, eos_pad], 0)
+            mask = torch.arange(hyps.size(0), device=device).unsqueeze(1) >= hyp_lens
+            hyps = hyps.masked_fill_(mask, eos)
+            refs = torch.cat([refs, eos_pad], 0)
+            mask = torch.arange(refs.size(0), device=device).unsqueeze(1) >= hyp_lens
+            refs = refs.masked_fill_(mask, eos)
+
+            er = er_func(refs, hyps).sum().item()
+            ref_tokens = ref_lens.sum().item()
+            total_er += er
+            total_ref_tokens += ref_tokens
+            del hyps, hyp_lens, refs, ref_lens
+
+    return total_er / total_ref_tokens
+
+
+def train(options: argparse.Namespace):
+    bparams: BaselineParams = options.bparams
+    tparams: TrainingStateParams = options.tparams
+    dparams: SpectDataLoaderParams = options.dparams
+    bparams.initialize_missing()
+
+    recognizer = construct_baseline(bparams, beam_width=1, dropout=tparams.dropout)
+    recognizer.to(options.device)
+
+    eos = bparams.vocab_size
+    if isinstance(recognizer, EncoderDecoderSpeechRecognizer):
+        dparams.eos = eos
+
+    if tparams.optimizer == "adam":
+        Optimizer = torch.optim.Adam
+    elif tparams.optimizer == "sgd":
+        Optimizer = torch.optim.SGD
+    else:
+        raise NotImplementedError(f"optimizer '{tparams.optimizer}' not implemented")
+    if tparams.log10_learning_rate is None:
+        optimizer = Optimizer(recognizer.parameters())
+    else:
+        optimizer = Optimizer(
+            recognizer.parameters(), lr=10**tparams.log10_learning_rate
+        )
+    controller = TrainingStateController(
+        tparams, options.state_csv_path, options.state_dir
+    )
+    controller.load_model_and_optimizer_for_epoch(recognizer, optimizer)
+
+    init_epoch = controller.get_last_epoch() + 1
+    total_epochs = (tparams.num_epochs + 1) if tparams.num_epochs else 10_000
+    tdl = SpectDataLoader(
+        options.train_dir,
+        dparams,
+        shuffle=True,
+        batch_first=False,
+        pin_memory=options.device.type == "cuda",
+        num_workers=options.num_workers,
+        init_epoch=init_epoch,
+        suppress_alis=True,
+        seed=tparams.seed,
+    )
+    vdl = SpectDataLoader(
+        options.val_dir, dparams, shuffle=False, suppress_alis=True, batch_first=False
+    )
+    if options.quiet:
+        get_tdl, get_vdl = (lambda: tdl), (lambda: vdl)
+        print_ = lambda x: None
+    else:
+        get_tdl, get_vdl = (lambda: tqdm(tdl)), (lambda: tqdm(vdl))
+        print_ = print
+
+    for epoch in range(init_epoch, total_epochs):
+        print_(f"Training for epoch {epoch}...")
+        train_loss = _train_for_epoch(recognizer, optimizer, get_tdl(), options.device)
+        print_(f"Validating for epoch {epoch}...")
+        val_err = _val_for_epoch(recognizer, get_vdl(), eos, options.device)
+        print_(
+            f"Epoch {epoch} training loss was {train_loss:.02f}, "
+            f"validation error was {val_err:.02%}"
+        )
+        print_("Saving and checking if continuing...")
+        if not controller.update_for_epoch(
+            recognizer, optimizer, train_loss, val_err, epoch
+        ):
+            print_("Controller says we're done")
+            break
+        print_("Continuing training")
+
+    recognizer.cpu()
+    if options.last:
+        print_(f"Saving last model to '{options.best}'...")
+    else:
+        print_(f"Saving best model to '{options.best}'...")
+        controller.load_model_for_epoch(recognizer, controller.get_best_epoch())
+    state_dict = recognizer.state_dict()
+    torch.save(state_dict, options.best)
+    print_("Done saving")
+
+
 def main(args: Optional[Sequence[str]] = None):
-    pass
+    """Train and decode baseline, supervised speech recognizers"""
+
+    parser = argparse.ArgumentParser(
+        description=main.__doc__,
+    )
+    add_serialization_group_to_parser(
+        parser,
+        BaselineParams(name="baseline").initialize_missing(),
+        flag_format_str="--print-model-{file_format}",
+        reckless=True,
+    )
+    add_deserialization_group_to_parser(
+        parser,
+        BaselineParams(name="baseline"),
+        "bparams",
+        flag_format_str="--read-model-{file_format}",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        type=torch.device,
+        help="Device to perform operations on. Default is to use cuda if available",
+    )
+    parser.add_argument(
+        "--mvn-path",
+        type=argparse.FileType("r"),
+        default=None,
+        help="Path to corpus-level mean-variance stats for normalization",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Number of data workers. Default (0) is on main thread",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Whether to perform operations quietly",
+    )
+
+    subparsers = parser.add_subparsers(
+        dest="cmd", description="Whether to train or decode", required=True
+    )
+
+    train_parser = subparsers.add_parser("train", description="Train a model")
+    add_serialization_group_to_parser(
+        train_parser,
+        TrainingStateParams(name="training"),
+        flag_format_str="--print-training-{file_format}",
+    )
+    add_deserialization_group_to_parser(
+        train_parser,
+        TrainingStateParams(name="training"),
+        "tparams",
+        flag_format_str="--read-training-{file_format}",
+    )
+    add_serialization_group_to_parser(
+        train_parser,
+        SpectDataLoaderParams(name="data"),
+        subset=TRAIN_DATA_LOADER_PARAMS_SUBSET,
+        flag_format_str="--print-data-{file_format}",
+    )
+    add_deserialization_group_to_parser(
+        train_parser,
+        SpectDataLoaderParams(name="data"),
+        "dparams",
+        subset=TRAIN_DATA_LOADER_PARAMS_SUBSET,
+        flag_format_str="--read-data-{file_format}",
+    )
+    train_parser.add_argument(
+        "--last",
+        action="store_true",
+        default=False,
+        help="Save last epoch's state dict (rather than best)",
+    )
+    train_parser.add_argument(
+        "--state-dir", default=None, help="Where to store intermediary state dicts"
+    )
+    train_parser.add_argument(
+        "--state-csv-path", default=None, help="Path to CSV to log per-epoch stats"
+    )
+    train_parser.add_argument(
+        "train_dir", type=existing_dir, help="Training SpectDataSet"
+    )
+    train_parser.add_argument(
+        "val_dir", type=existing_dir, help="Validation/dev SpectDataSet"
+    )
+    train_parser.add_argument(
+        "best",
+        help="Where to save the state dict frome the epoch with the lowest error rate",
+    )
+
+    decode_parser = subparsers.add_parser(
+        "decode", description="Use a trained model to decode features"
+    )
+    add_serialization_group_to_parser(
+        decode_parser,
+        SpectDataSetParams(name="data"),
+        subset=DECODE_DATA_SET_PARAMS_SUBSET,
+        flag_format_str="--print-data-{file_format}",
+    )
+    add_deserialization_group_to_parser(
+        decode_parser,
+        SpectDataSetParams(name="data"),
+        "dparams",
+        subset=DECODE_DATA_SET_PARAMS_SUBSET,
+        flag_format_str="--read-data-{file_format}",
+    )
+    decode_parser.add_argument(
+        "model",
+        type=argparse.FileType("rb"),
+        help="Path to the state dictionary of the model to load",
+    )
+    decode_parser.add_argument(
+        "data_dir", type=existing_dir, help="SpectDataSet directory of input"
+    )
+    decode_parser.add_argument(
+        "hyp_dir", help="Directory to store hypothesis transcriptions"
+    )
+
+    options = parser.parse_args()
+    if options.device is None:
+        if torch.cuda.is_available():
+            options.device = torch.device(torch.cuda.current_device())
+        else:
+            options.device = torch.device("cpu")
+
+    if options.cmd == "train":
+        train(options)
+    else:
+        raise NotImplementedError(f"command 'cmd' not implemented")
+
+
+if __name__ == "__main__":
+    main()

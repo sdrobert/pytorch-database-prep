@@ -32,7 +32,9 @@ import shutil
 import tarfile
 import glob
 import zlib
+import gzip
 
+import ngram_lm
 import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
@@ -431,6 +433,127 @@ def init_word(options):
 
         shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
 
+    if options.custom_lm_max_order > 0:
+        create_lm(
+            config_dir,
+            vocab,
+            options.custom_lm_max_order,
+            options.custom_lm_prune_count,
+        )
+
+
+def create_lm(config_dir, vocab, max_order, prune_count):
+    sents = []
+    for fname in TRAIN_SUBSETS:
+        fname = fname.replace("-", "_")
+        trn_path = os.path.join(config_dir, fname + ".ref.trn")
+        if not os.path.exists(trn_path):
+            warnings.warn(
+                f"'{trn_path}' does not exist, so not using to train LM. If the file "
+                "is added later, you'll get a different LM if you rerun this stage. "
+                "You've been warned!"
+            )
+            continue
+        with open(trn_path) as f:
+            for line in f:
+                sent = line.strip().split()
+                sent.pop()  # utterance id
+                sents.append(sent)
+
+        # count n-grams in sentences
+    ngram_counts = ngram_lm.sents_to_ngram_counts(
+        sents, max_order, sos="<S>", eos="</S>"
+    )
+    # ensure all vocab terms have unigram counts (even if 0) for zeroton
+    # interpolation
+    for v in vocab:
+        ngram_counts[0].setdefault(v, 0)
+    del sents
+
+    to_prune = set(ngram_counts[0]) - vocab
+    for i, ngram_count in enumerate(ngram_counts[1:]):
+        if i:
+            to_prune |= set(
+                k
+                for (k, v) in ngram_count.items()
+                if k[:-1] in to_prune or k[-1] in to_prune or v <= prune_count
+            )
+        else:
+            to_prune |= set(
+                k
+                for (k, v) in ngram_count.items()
+                if k[0] in to_prune or k[1] in to_prune or v <= prune_count
+            )
+
+    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
+        ngram_counts, sos="<S>", to_prune=to_prune
+    )
+
+    # remove start-of-sequence probability mass
+    lm = ngram_lm.BackoffNGramLM(prob_list, sos="<S>", eos="</S>", unk="<UNK>")
+    lm.prune_by_name({"<S>"})
+    prob_list = lm.to_prob_list()
+
+    # save it
+    with gzip.open(os.path.join(config_dir, "lm.arpa.gz"), "wt") as file_:
+        ngram_lm.write_arpa(prob_list, file_)
+
+
+def init_char(options):
+    local_dir = os.path.join(options.data_root, "local")
+    data_dir = os.path.join(local_dir, "data")
+    if not os.path.isdir(data_dir):
+        raise ValueError("{} does not exist; call preamble first!".format(data_dir))
+    if options.librispeech_root is None:
+        libri_dir = data_dir
+    else:
+        libri_dir = options.librispeech_root
+
+    config_dir = os.path.join(local_dir, options.config_subdir)
+
+    vocab_txt = find_file(libri_dir, "librispeech-vocab.txt")
+    vocab = {"<s>", "</s>", "<UNK>", "_"}
+    with open(vocab_txt) as f:
+        for line in f:
+            vocab.update(line.strip())
+    vocab = sorted(vocab)
+
+    os.makedirs(config_dir, exist_ok=True)
+
+    with open(os.path.join(config_dir, "token2id.txt"), "w") as token2id, open(
+        os.path.join(config_dir, "id2token.txt"), "w"
+    ) as id2token:
+        for id_, token in enumerate(vocab):
+            token2id.write(f"{token} {id_}\n")
+            id2token.write(f"{id_} {token}\n")
+
+    for file_ in ("utt2spk", "spk2utt", "spk2gender"):
+        shutil.copy(os.path.join(data_dir, file_), os.path.join(config_dir, file_))
+
+    for fname in AM_FNAMES + TRAIN_SUBSETS:
+        fname = fname.replace("-", "_")
+        config_prefix = os.path.join(config_dir, fname)
+        data_prefix = os.path.join(data_dir, fname)
+        text_file = data_prefix + ".text"
+        if not os.path.isfile(text_file):
+            if fname not in TRAIN_SUBSETS:
+                if fname in {"train_clean_360", "train_other_500"}:
+                    warnings.warn(f"'{text_file}' does not exist. Skipping partition")
+                else:
+                    raise ValueError(
+                        f"'{text_file}' does not exist (did you finish preamble?)"
+                    )
+            continue
+
+        with open(text_file) as in_, open(config_prefix + ".ref.trn", "w") as out:
+            for line in in_:
+                utt_id, transcript = line.strip().split(" ", maxsplit=1)
+                transcript = transcript.replace(" ", "_")
+                transcript = " ".join(transcript)
+                out.write(transcript + f" ({utt_id})\n")
+
+        shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
+
 
 def torch_dir(options):
     local_dir = os.path.join(options.data_root, "local")
@@ -505,10 +628,18 @@ def torch_dir(options):
                 raise ValueError(
                     f"Specified --feats-from, but '{feat_src}' is not a directory"
                 )
-            for filename in os.listdir(feat_src):
-                src = os.path.join(feat_src, filename)
-                dest = os.path.join(feat_dir, filename)
-                shutil.copy(src, dest)
+            if os.path.normpath(os.path.abspath(feat_src)) == os.path.normpath(
+                os.path.abspath(feat_dir)
+            ):
+                warnings.warn(
+                    f"feature source ('{feat_src}') and dest ('{feat_dir}') "
+                    "are the same. Not moving anything"
+                )
+            else:
+                for filename in os.listdir(feat_src):
+                    src = os.path.join(feat_src, filename)
+                    dest = os.path.join(feat_dir, filename)
+                    shutil.copy(src, dest)
 
         if fname.endswith(options.compute_up_to):
             break
@@ -570,6 +701,7 @@ def build_parser():
     build_download_parser(subparsers)
     build_preamble_parser(subparsers)
     build_init_word_parser(subparsers)
+    build_init_char_parser(subparsers)
     build_torch_dir_parser(subparsers)
 
     return parser
@@ -693,6 +825,44 @@ def build_init_word_parser(subparsers):
     # TODO(sdrobert): Custom n-gram LM training, if desired.
 
 
+def build_init_char_parser(subparsers):
+    parser = subparsers.add_parser(
+        "init_char",
+        help="Perform setup common to all char-based parsing. "
+        "Needs to be done only once for a specific language model.",
+    )
+    parser.add_argument(
+        "librispeech_root",
+        nargs="?",
+        type=os.path.abspath,
+        default=None,
+        help="The root of the librispeech data directory. Contains 'dev-clean', "
+        "'train-clean-360', etc. If unset, will check the 'local/data/' subfolder of "
+        "the data folder (the default storage location of the 'download' command).",
+    )
+    parser.add_argument(
+        "--config-subdir",
+        default="char",
+        help="Name of sub directory in data/local/ under which to store setup "
+        "specific to this lm. Defaults to 'char'.",
+    )
+    parser.add_argument(
+        "--custom-lm-max-order",
+        type=int,
+        default=0,
+        help="If > 0, an n-gram LM with Modified Kneser-Ney smoothing will be created "
+        "from whatever training partition transcripts we have. NOTE: the n-gram LMs "
+        "available from OpenSLR train on much more text!",
+    )
+    parser.add_argument(
+        "--custom-lm-prune-count",
+        type=int,
+        default=0,
+        help="If this and --custom-lm-max-order are > 0, any n-grams of fewer "
+        "than this count will be pruned during smoothing",
+    )
+
+
 def build_torch_dir_parser(subparsers):
     parser = subparsers.add_parser(
         "torch_dir",
@@ -790,6 +960,8 @@ def main(args=None):
         preamble(options)
     elif options.command == "init_word":
         init_word(options)
+    elif options.command == "init_char":
+        init_char(options)
     elif options.command == "torch_dir":
         torch_dir(options)
     else:

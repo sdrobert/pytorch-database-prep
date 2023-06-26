@@ -35,12 +35,13 @@ from pydrobert.torch.modules import (
     ExtractableSequentialLanguageModel,
     ExtractableShallowFusionLanguageModel,
     MixableSequentialLanguageModel,
+    SpecAugment,
 )
 from pydrobert.param.argparse import (
     add_serialization_group_to_parser,
     add_deserialization_group_to_parser,
 )
-from pydrobert.torch.training import TrainingStateParams as _TrainingStateParams
+from pydrobert.torch.training import TrainingStateParams
 from pydrobert.torch.training import TrainingStateController
 from pydrobert.torch.data import (
     SpectDataLoaderParams,
@@ -70,11 +71,12 @@ TRAIN_DATA_LOADER_PARAMS_SUBSET = {
     "num_length_buckets",
     "size_batch_by_length",
     "subset_ids",
+    "eos",
     "delta_order",
     "do_mvn",
 }
 
-DECODE_DATA_SET_PARAMS_SUBSET = {"subset_ids", "delta_order", "do_mvn"}
+DECODE_DATA_SET_PARAMS_SUBSET = {"subset_ids", "delta_order", "do_mvn", "eos"}
 
 
 def check_in(name: str, val: str, choices: Collection[str]):
@@ -92,6 +94,12 @@ def check_positive(name: str, val, nonnegative=False):
 def check_equals(name: str, val, other):
     if val != other:
         raise ValueError(f"Expected {name} to be equal to {other}; got {val}")
+
+
+def check_less_than(name: str, val, other, equal=False):
+    lt = "less than or equal to" if equal else "less than"
+    if val > other or (val == other and not equal):
+        raise ValueError(f"Expected {name} to be {lt} {other}; got {val}")
 
 
 class Encoder(torch.nn.Module, metaclass=abc.ABCMeta):
@@ -465,10 +473,7 @@ class CTCSpeechRecognizer(SpeechRecognizer):
 
 
 class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
-    """Encoder/decoder speech recognizer
-
-    The end-of-speech token is assumed to be ``decoder.vocab_size - 1``.
-    """
+    """Encoder/decoder speech recognizer"""
 
     __constants__ = (
         "encoded_name_train",
@@ -495,12 +500,15 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
         encoded_name: str = "input",
         encoded_lens_name: str = "lens",
         pad_value: int = config.INDEX_PAD_VALUE,
+        eos: Optional[int] = None,
         max_iters: int = 200,
     ) -> None:
         check_positive("beam_width", beam_width)
         if lm is not None:
             check_equals("lm.vocab_size", lm.vocab_size, decoder.vocab_size)
         check_positive("max_iters", max_iters)
+        if eos is not None:
+            check_less_than("eos", eos, decoder.vocab_size)
         super().__init__(encoder)
         self.decoder = decoder
         self.encoded_name_train = self.encoded_name_decode = encoded_name
@@ -518,7 +526,7 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
         self.search = BeamSearch(
             lm,
             beam_width,
-            eos=decoder.vocab_size - 1,
+            eos=eos,
             pad_value=pad_value,
         )
         self.ce_loss = torch.nn.CrossEntropyLoss(ignore_index=pad_value)
@@ -637,6 +645,7 @@ def construct_baseline(
     beta: float = 0.0,
     beam_width: int = 8,
     dropout: float = 0.0,
+    eos: Optional[int] = None,
     max_iters: int = 200,
 ) -> SpeechRecognizer:
     if params.encoder_type == "ff":
@@ -696,7 +705,7 @@ def construct_baseline(
                 f"decoder_type '{params.decoder_type}' not implemented"
             )
         recognizer = EncoderDecoderSpeechRecognizer(
-            encoder, decoder, beam_width, lm, beta, max_iters=max_iters
+            encoder, decoder, beam_width, lm, beta, eos=eos, max_iters=max_iters
         )
     else:
         raise NotImplementedError(
@@ -705,10 +714,51 @@ def construct_baseline(
     return recognizer
 
 
-class TrainingStateParams(_TrainingStateParams):
+class MyTrainingStateParams(TrainingStateParams):
     dropout: float = param.Magnitude(0.0, doc="Dropout probability")
     optimizer: Literal["adam", "sgd"] = param.ObjectSelector(
         "adam", ["adam", "sgd"], doc="Which optimizer to train with"
+    )
+
+    spec_aug_max_time_warp: float = param.Number(
+        80.0, bounds=(0.0, None), doc="SpecAugment: maximum frames warping can shift"
+    )
+    spec_aug_max_freq_warp: float = param.Number(
+        0.0,
+        bounds=(0.0, None),
+        doc="SpecAugment: maximum feat coeffs warping can shift",
+    )
+    spec_aug_max_time_mask: int = param.Integer(
+        100,
+        bounds=(0, None),
+        doc="SpecAugment: absolute max number of consecutive frames to mask",
+    )
+    spec_aug_max_freq_mask: int = param.Integer(
+        27,
+        bounds=(0, None),
+        doc="SpecAugment: absolute max number of consecutive feat coeffs to mask",
+    )
+    spec_aug_max_time_mask_proportion: float = param.Magnitude(
+        0.04, doc="SpecAugment: relative max number of consecutive frames to mask"
+    )
+    spec_aug_max_freq_mask_proportion: float = param.Magnitude(
+        0.04, doc="SpecAugment: relative max number of consecutive feat coeffs to mask"
+    )
+    spec_aug_num_time_mask: int = param.Integer(
+        20,
+        bounds=(0, None),
+        doc="SpecAugment: absolute max number of frame masks to apply",
+    )
+    spec_aug_num_time_mask_proportion: float = param.Magnitude(
+        0.04, doc="SpecAgument: relative max number of frame masks to apply"
+    )
+    spec_aug_num_freq_mask: int = param.Integer(
+        2,
+        bounds=(0, None),
+        doc="SpecAugment: absolute max number of feat coeff masks to apply",
+    )
+    spec_aug_interpolation_order: int = param.Integer(
+        1, bounds=(1, None), doc="SpecAugment: warping interpolation order"
     )
 
 
@@ -721,6 +771,7 @@ def existing_dir(val: str) -> str:
 def _train_for_epoch(
     recognizer: SpeechRecognizer,
     optimizer: torch.optim.Optimizer,
+    spec_aug: SpecAugment,
     dl: SpectDataLoader,
     device: torch.device,
 ) -> float:
@@ -729,9 +780,12 @@ def _train_for_epoch(
     total_loss = 0.0
     total_elems = 0
     for feats, refs, lens, ref_lens in dl:
+        # batch first = True for spec_aug
         N = ref_lens.size(0)
-        feats, lens = feats.to(device), lens.to(device)
-        refs, ref_lens = refs.to(device), ref_lens.to(device)
+        refs, ref_lens = refs.transpose(0, 1).to(device), ref_lens.to(device)
+        with torch.no_grad():
+            feats = spec_aug(feats, lens).transpose(0, 1).to(device)
+            lens = lens.to(device)
 
         optimizer.zero_grad()
 
@@ -758,6 +812,7 @@ def _val_for_epoch(
     eos_pad = torch.full((N,), eos, device=device, dtype=torch.long)
     with torch.no_grad():
         for feats, refs, lens, ref_lens in dl:
+            # batch_first = False
             N = ref_lens.size(0)
             feats, lens = feats.to(device), lens.to(device)
             refs, ref_lens = refs.to(device), ref_lens.to(device)
@@ -783,12 +838,21 @@ def _val_for_epoch(
 
 def train(options: argparse.Namespace):
     bparams: BaselineParams = options.bparams
-    tparams: TrainingStateParams = options.tparams
+    tparams: MyTrainingStateParams = options.tparams
     dparams: SpectDataLoaderParams = options.dparams
     bparams.initialize_missing()
 
-    recognizer = construct_baseline(bparams, beam_width=1, dropout=tparams.dropout)
+    recognizer = construct_baseline(
+        bparams, beam_width=1, dropout=tparams.dropout, eos=dparams.eos
+    )
     recognizer.to(options.device)
+
+    if options.distributed_backend is not None:
+        torch.distributed.init_process_group(options.distributed_backend)
+        local_rank = os.environ.get("LOCAL_RANK")
+        recognizer = torch.nn.parallel.DistributedDataParallel(
+            recognizer, [local_rank], local_rank
+        )
 
     eos = bparams.vocab_size
     if isinstance(recognizer, EncoderDecoderSpeechRecognizer):
@@ -817,14 +881,14 @@ def train(options: argparse.Namespace):
     if options.mvn_path is None:
         feat_mean = feat_std = None
     else:
-        dict_ = torch.load(options.mvn_path, "cpu")
+        dict_ = torch.load(options.mvn_path)
         feat_mean, feat_std = dict_["mean"], dict_["std"]
 
     tdl = SpectDataLoader(
         options.train_dir,
         dparams,
         shuffle=True,
-        batch_first=False,
+        batch_first=True,
         pin_memory=options.device.type == "cuda",
         num_workers=options.num_workers,
         init_epoch=init_epoch,
@@ -849,9 +913,24 @@ def train(options: argparse.Namespace):
         get_tdl, get_vdl = (lambda: tqdm(tdl)), (lambda: tqdm(vdl))
         print_ = print
 
+    spec_aug = SpecAugment(
+        tparams.spec_aug_max_time_warp,
+        tparams.spec_aug_max_freq_warp,
+        tparams.spec_aug_max_time_mask,
+        tparams.spec_aug_max_freq_mask,
+        tparams.spec_aug_max_time_mask_proportion,
+        tparams.spec_aug_num_time_mask,
+        tparams.spec_aug_num_time_mask_proportion,
+        tparams.spec_aug_num_freq_mask,
+        tparams.spec_aug_interpolation_order,
+    )
+    spec_aug.train()
+
     for epoch in range(init_epoch, total_epochs):
         print_(f"Training for epoch {epoch}...")
-        train_loss = _train_for_epoch(recognizer, optimizer, get_tdl(), options.device)
+        train_loss = _train_for_epoch(
+            recognizer, optimizer, spec_aug, get_tdl(), options.device
+        )
         print_(f"Validating for epoch {epoch}...")
         val_err = _val_for_epoch(recognizer, get_vdl(), eos, options.device)
         print_(
@@ -891,9 +970,10 @@ def main(args: Optional[Sequence[str]] = None):
     )
     add_deserialization_group_to_parser(
         parser,
-        BaselineParams(name="baseline"),
+        BaselineParams(name="baseline").initialize_missing(),
         "bparams",
         flag_format_str="--read-model-{file_format}",
+        reckless=True,
     )
     parser.add_argument(
         "--device",
@@ -903,7 +983,7 @@ def main(args: Optional[Sequence[str]] = None):
     )
     parser.add_argument(
         "--mvn-path",
-        type=argparse.FileType("r"),
+        type=argparse.FileType("rb"),
         default=None,
         help="Path to corpus-level mean-variance stats for normalization",
     )
@@ -913,12 +993,6 @@ def main(args: Optional[Sequence[str]] = None):
         default=0,
         help="Number of data workers. Default (0) is on main thread",
     )
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        default=False,
-        help="Whether to perform operations quietly",
-    )
 
     subparsers = parser.add_subparsers(
         dest="cmd", description="Whether to train or decode", required=True
@@ -927,12 +1001,12 @@ def main(args: Optional[Sequence[str]] = None):
     train_parser = subparsers.add_parser("train", description="Train a model")
     add_serialization_group_to_parser(
         train_parser,
-        TrainingStateParams(name="training"),
+        MyTrainingStateParams(name="training"),
         flag_format_str="--print-training-{file_format}",
     )
     add_deserialization_group_to_parser(
         train_parser,
-        TrainingStateParams(name="training"),
+        MyTrainingStateParams(name="training"),
         "tparams",
         flag_format_str="--read-training-{file_format}",
     )
@@ -960,6 +1034,19 @@ def main(args: Optional[Sequence[str]] = None):
     )
     train_parser.add_argument(
         "--state-csv-path", default=None, help="Path to CSV to log per-epoch stats"
+    )
+    train_parser.add_argument(
+        "--distributed-backend",
+        default=None,
+        choices=["mpi", "gloo", "nccl", "ucc"],
+        help="Backend for torch.distributed. If set, script should be called with "
+        "torchrun. If unset, will be run in serial",
+    )
+    train_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Whether to perform training quietly",
     )
     train_parser.add_argument(
         "train_dir", type=existing_dir, help="Training SpectDataSet"

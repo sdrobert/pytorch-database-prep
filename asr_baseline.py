@@ -34,6 +34,7 @@ from pydrobert.torch.modules import (
     ErrorRate,
     ExtractableSequentialLanguageModel,
     ExtractableShallowFusionLanguageModel,
+    LookupLanguageModel,
     MixableSequentialLanguageModel,
     SpecAugment,
 )
@@ -44,9 +45,10 @@ from pydrobert.param.argparse import (
 from pydrobert.torch.training import TrainingStateParams
 from pydrobert.torch.training import TrainingStateController
 from pydrobert.torch.data import (
-    SpectDataLoaderParams,
-    SpectDataSetParams,
     SpectDataLoader,
+    SpectDataLoaderParams,
+    SpectDataParams,
+    SpectDataSet,
 )
 
 __all__ = [
@@ -878,12 +880,6 @@ def train(options: argparse.Namespace):
     init_epoch = controller.get_last_epoch() + 1
     total_epochs = (tparams.num_epochs + 1) if tparams.num_epochs else 10_000
 
-    if options.mvn_path is None:
-        feat_mean = feat_std = None
-    else:
-        dict_ = torch.load(options.mvn_path)
-        feat_mean, feat_std = dict_["mean"], dict_["std"]
-
     tdl = SpectDataLoader(
         options.train_dir,
         dparams,
@@ -894,8 +890,8 @@ def train(options: argparse.Namespace):
         init_epoch=init_epoch,
         suppress_alis=True,
         seed=tparams.seed,
-        feat_mean=feat_mean,
-        feat_std=feat_std,
+        feat_mean=options.feat_mean,
+        feat_std=options.feat_std,
     )
     vdl = SpectDataLoader(
         options.val_dir,
@@ -903,8 +899,8 @@ def train(options: argparse.Namespace):
         shuffle=False,
         suppress_alis=True,
         batch_first=False,
-        feat_mean=feat_mean,
-        feat_std=feat_std,
+        feat_mean=options.feat_mean,
+        feat_std=options.feat_std,
     )
     if options.quiet:
         get_tdl, get_vdl = (lambda: tdl), (lambda: vdl)
@@ -954,6 +950,41 @@ def train(options: argparse.Namespace):
     state_dict = recognizer.state_dict()
     torch.save(state_dict, options.best)
     print_("Done saving")
+
+
+def decode(options: argparse.Namespace):
+    bparams: BaselineParams = options.bparams
+    dparams: SpectDataParams = options.dparams
+
+    if options.lookup_lm_state_dict is not None:
+        lm_state_dict: dict = torch.load(options.lookup_lm_state_dict)
+        sos = lm_state_dict["sos"]
+        vocab_size = lm_state_dict.pop("vocab_size", None)
+        if vocab_size is None:
+            vocab_size = bparams.vocab_size
+        else:
+            check_equals(
+                "state dict in --lookup-lm-state-dict", vocab_size, bparams.vocab_size
+            )
+        lm = LookupLanguageModel(vocab_size, sos)
+        lm.load_state_dict(lm_state_dict)
+        del lm_state_dict
+    else:
+        lm = None
+
+    recognizer = construct_baseline(
+        bparams,
+        lm,
+        options.beta,
+        options.beam_width,
+        0,
+        dparams.eos,
+        options.max_hyp_len,
+    )
+    recognizer.to(options.device)
+    recognizer.eval()
+
+    ds = SpectDataSet(options.data_dir, params=dparams, feat_mean=options.feat_mean, feat_std=options.feat_std, suppress_alis=True, suppress_uttids=False)
 
 
 def main(args: Optional[Sequence[str]] = None):
@@ -1064,16 +1095,42 @@ def main(args: Optional[Sequence[str]] = None):
     )
     add_serialization_group_to_parser(
         decode_parser,
-        SpectDataSetParams(name="data"),
+        SpectDataParams(name="data"),
         subset=DECODE_DATA_SET_PARAMS_SUBSET,
         flag_format_str="--print-data-{file_format}",
     )
     add_deserialization_group_to_parser(
         decode_parser,
-        SpectDataSetParams(name="data"),
+        SpectDataParams(name="data"),
         "dparams",
         subset=DECODE_DATA_SET_PARAMS_SUBSET,
         flag_format_str="--read-data-{file_format}",
+    )
+    decode_parser.add_argument(
+        "--beam-width",
+        type=int,
+        default=8,
+        help="Number of prefixes to keep track of in search",
+    )
+    decode_parser.add_argument(
+        "--max-hyp-len",
+        type=int,
+        default=1000,
+        help="Maximum length of hypothesis to output (ensures termination)",
+    )
+    decode_parser.add_argument(
+        "--beta",
+        float=0.0,
+        help="Shallow fusion mixing coefficient (only applies if "
+        "--lookup-lm-state-dict is set)",
+    )
+    decode_parser.add_argument(
+        "--lookup-lm-state-dict",
+        default=None,
+        type=argparse.FileType("rb"),
+        help="The resulting state file of calling arpa-lm-to-state-dict.py on an "
+        "arpa LM. The start-of-sequence id should be saved in the state dict, i.e. "
+        "the '--save-sos' flag should have been set",
     )
     decode_parser.add_argument(
         "model",
@@ -1093,9 +1150,17 @@ def main(args: Optional[Sequence[str]] = None):
             options.device = torch.device(torch.cuda.current_device())
         else:
             options.device = torch.device("cpu")
+    
+    if options.mvn_path is None:
+        options.feat_mean = options.feat_std = None
+    else:
+        dict_ = torch.load(options.mvn_path)
+        options.feat_mean, options.feat_std = dict_["mean"], dict_["std"]
 
     if options.cmd == "train":
         train(options)
+    elif options.cmd == "decode":
+        decode(options)
     else:
         raise NotImplementedError(f"command 'cmd' not implemented")
 

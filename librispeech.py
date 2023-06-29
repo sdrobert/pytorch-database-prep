@@ -433,18 +433,10 @@ def init_word(options):
 
         shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
 
-    if options.custom_lm_max_order > 0:
-        create_lm(
-            config_dir,
-            vocab,
-            options.custom_lm_max_order,
-            options.custom_lm_prune_count,
-        )
 
-
-def create_lm(config_dir, vocab, max_order, prune_count):
+def train_custom_lm(config_dir, vocab, max_order, prune_counts, delta=None):
     sents = []
-    for fname in TRAIN_SUBSETS:
+    for fname in AM_FNAMES:
         fname = fname.replace("-", "_")
         trn_path = os.path.join(config_dir, fname + ".ref.trn")
         if not os.path.exists(trn_path):
@@ -460,9 +452,9 @@ def create_lm(config_dir, vocab, max_order, prune_count):
                 sent.pop()  # utterance id
                 sents.append(sent)
 
-        # count n-grams in sentences
+    # count n-grams in sentences
     ngram_counts = ngram_lm.sents_to_ngram_counts(
-        sents, max_order, sos="<S>", eos="</S>"
+        sents, max_order, sos="<s>", eos="</s>"
     )
     # ensure all vocab terms have unigram counts (even if 0) for zeroton
     # interpolation
@@ -472,6 +464,10 @@ def create_lm(config_dir, vocab, max_order, prune_count):
 
     to_prune = set(ngram_counts[0]) - vocab
     for i, ngram_count in enumerate(ngram_counts[1:]):
+        if i >= len(prune_counts):
+            prune_count = prune_counts[-1]
+        else:
+            prune_count = prune_counts[i]
         if i:
             to_prune |= set(
                 k
@@ -486,12 +482,12 @@ def create_lm(config_dir, vocab, max_order, prune_count):
             )
 
     prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-        ngram_counts, sos="<S>", to_prune=to_prune
+        ngram_counts, sos="<s>", to_prune=to_prune, delta=delta
     )
 
     # remove start-of-sequence probability mass
-    lm = ngram_lm.BackoffNGramLM(prob_list, sos="<S>", eos="</S>", unk="<UNK>")
-    lm.prune_by_name({"<S>"})
+    lm = ngram_lm.BackoffNGramLM(prob_list, sos="<s>", eos="</s>", unk="<s>")
+    lm.prune_by_name({"<s>"})
     prob_list = lm.to_prob_list()
 
     # save it
@@ -512,7 +508,7 @@ def init_char(options):
     config_dir = os.path.join(local_dir, options.config_subdir)
 
     vocab_txt = find_file(libri_dir, "librispeech-vocab.txt")
-    vocab = {"<s>", "</s>", "<UNK>", "_"}
+    vocab = {"<s>", "</s>", "_", "<UNK>"}
     with open(vocab_txt) as f:
         for line in f:
             vocab.update(line.strip())
@@ -553,6 +549,16 @@ def init_char(options):
                 out.write(transcript + f" ({utt_id})\n")
 
         shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
+
+    if options.custom_lm_max_order > 0:
+        # XXX(sdrobert): see wsj.py for details on deltas
+        train_custom_lm(
+            config_dir,
+            set(vocab),
+            options.custom_lm_max_order,
+            options.custom_lm_prune_counts,
+            [(0.5, 1.0, 1.5)] * options.custom_lm_max_order,
+        )
 
 
 def torch_dir(options):
@@ -855,11 +861,18 @@ def build_init_char_parser(subparsers):
         "available from OpenSLR train on much more text!",
     )
     parser.add_argument(
-        "--custom-lm-prune-count",
+        "--custom-lm-prune-counts",
         type=int,
-        default=0,
-        help="If this and --custom-lm-max-order are > 0, any n-grams of fewer "
-        "than this count will be pruned during smoothing",
+        nargs="+",
+        default=[0],
+        help="Applies when --custom-lm-max_order is greater than 0. Prunes n-grams "
+        "less than or equal to this counts before saving the custom lm. The first "
+        "value passed is the threshold for bigrams, the second for trigrams, and so "
+        "on (unigrams are not pruned). If there are fewer counts than "
+        "--custom-lm-max-order, the last count is duplicated for the higher-order "
+        "n-grams. E.g. '--custom-lm-prune-counts 1 2 3' prunes bigrams with a count in "
+        "0-1, trigrams with a count in 0-2, and everything higher with a count of 3 or "
+        "less",
     )
 
 

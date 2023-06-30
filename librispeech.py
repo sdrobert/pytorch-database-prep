@@ -694,7 +694,39 @@ def torch_dir(options):
 
         if fname.endswith(options.compute_up_to):
             break
-
+    
+    if options.aggregate_by_copy:
+        cp = shutil.copy2
+    elif options.aggregate_by_symlink:
+        cp = os.symlink
+    elif options.aggregate_by_link:
+        cp = os.link
+    else:
+        return
+    src_subdirs = ['train_clean_100', 'train_clean_360']
+    if options.compute_up_to == '500':
+        dest_subdir = 'train_all_960'
+        src_subdirs.append('train_other_500')
+    elif options.compute_up_to == '360':
+        dest_subdir = 'train_clean_460'
+    else:
+        warnings.warn(
+            "'--aggregate-by-*' flag was specified, but so was '--compute-up-to 100'. "
+            "There is only one training partition to aggregate, so skipping"
+        )
+        return
+    dst_dir = os.path.join(dir_, dest_subdir)
+    os.makedirs(dst_dir, exist_ok=True)
+    for src_subdir in src_subdirs:
+        src_dir = os.path.join(dir_, src_subdir)
+        shutil.copytree(
+            src_dir,
+            dst_dir,
+            copy_function=cp,
+            dirs_exist_ok=True,
+            ignore_dangling_symlinks=True,
+            ignore=shutil.ignore_patterns('ali*')
+        )
 
 def build_parser():
     parser = argparse.ArgumentParser(description=main.__doc__)
@@ -933,6 +965,26 @@ def build_torch_dir_parser(subparsers):
         "'train-clean-100' only. '360' is 'train-clean-100' + 'train-clean-360'. "
         "'500' is 'train-clean-100', 'train-clean-360', and 'train-other-500'. All "
         "dev and test partitions are always computed.",
+    )
+    aggregate_group = parser.add_mutually_exclusive_group()
+    aggregate_common_text = (
+        "Aggregates all computed training partitions into a single partition. "
+        "Usually this will produce the partition 'train_all_960', but, if used in "
+        "concert with '--compute-up-to 360', this will produce the partition "
+        "'train_clean_460'. This version of '--aggregate-*' {} all files from "
+        "the source partition"
+    )
+    aggregate_group.add_argument(
+        "--aggregate-by-copy", action='store_true', default=False,
+        help=aggregate_common_text.format('copies')
+    )
+    aggregate_group.add_argument(
+        "--aggregate-by-symlink", action='store_true', default=False,
+        help=aggregate_common_text.format('symbolically links')
+    )
+    aggregate_group.add_argument(
+        "--aggregate-by-link", action='store_true', default=False,
+        help=aggregate_common_text.format('(hard) links')
     )
 
     fbank_41_config = os.path.join(

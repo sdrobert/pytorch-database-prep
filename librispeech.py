@@ -586,6 +586,7 @@ def torch_dir(options):
     ext = os.path.join(dir_, "ext")
     os.makedirs(ext, exist_ok=True)
 
+    print("Copying files to ext...")
     for file_ in ("utt2spk", "spk2utt", "spk2gender", "id2token.txt", "token2id.txt"):
         shutil.copy(os.path.join(config_dir, file_), os.path.join(ext, file_))
 
@@ -597,11 +598,12 @@ def torch_dir(options):
     if options.force_compute_subsets:
         fnames = TRAIN_SUBSETS + fnames
 
+    num_workers = str(get_num_avail_cores() - 1)
     feat_optional_args = [
         "--channel",
         "-1",
         "--num-workers",
-        str(get_num_avail_cores() - 1),
+        num_workers,
         "--preprocess",
         options.preprocess,
         "--postprocess",
@@ -625,8 +627,10 @@ def torch_dir(options):
             args += ["--manifest", manifest_path]
             if not options.raw:
                 args.insert(1, options.computer_json)
+            print(f"Generating features in {fname}...")
             assert not speech_cmd.signals_to_torch_feat_dir(args)
         else:
+            print(f"Copying features into {fname}")
             feat_src = os.path.join(
                 options.data_root, options.feats_from, fname, "feat"
             )
@@ -661,6 +665,7 @@ def torch_dir(options):
             feat_dir = os.path.join(dir_, fname, "feat")
             os.makedirs(feat_dir, exist_ok=True)
 
+            print(f"linking features in {fname}...")
             with open(wav_scp) as in_:
                 for line in in_:
                     utt_id = line.split(" ", maxsplit=1)[0]
@@ -685,16 +690,27 @@ def torch_dir(options):
         ref_dir = os.path.join(fname_dir, "ref")
         os.makedirs(ref_dir, exist_ok=True)
 
-        args = [ref_trn, token2id_txt, ref_dir, "--unk-symbol=<UNK>"]
+        print(f"building refs for {fname}...")
+        args = [
+            ref_trn,
+            token2id_txt,
+            ref_dir,
+            "--unk-symbol=<UNK>",
+            "--num-workers",
+            num_workers,
+            "--skip-frame-times",
+        ]
         assert not torch_cmd.trn_to_torch_token_data_dir(args)
 
-        # verify correctness (while storing info as a bonus)
-        args = [fname_dir, os.path.join(ext, f"{fname}.info.ark"), "--strict"]
-        assert not torch_cmd.get_torch_spect_data_dir_info(args)
+        if not options.skip_verify:
+            # verify correctness (while storing info as a bonus)
+            print(f"Verifying {fname} is correct...")
+            args = [fname_dir, os.path.join(ext, f"{fname}.info.ark"), "--strict"]
+            assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
-        if fname.endswith(options.compute_up_to):
-            break
-    
+            if fname.endswith(options.compute_up_to):
+                break
+
     if options.aggregate_by_copy:
         cp = shutil.copy2
     elif options.aggregate_by_symlink:
@@ -703,12 +719,12 @@ def torch_dir(options):
         cp = os.link
     else:
         return
-    src_subdirs = ['train_clean_100', 'train_clean_360']
-    if options.compute_up_to == '500':
-        dest_subdir = 'train_all_960'
-        src_subdirs.append('train_other_500')
-    elif options.compute_up_to == '360':
-        dest_subdir = 'train_clean_460'
+    src_subdirs = ["train_clean_100", "train_clean_360"]
+    if options.compute_up_to == "500":
+        dest_subdir = "train_all_960"
+        src_subdirs.append("train_other_500")
+    elif options.compute_up_to == "360":
+        dest_subdir = "train_clean_460"
     else:
         warnings.warn(
             "'--aggregate-by-*' flag was specified, but so was '--compute-up-to 100'. "
@@ -718,6 +734,7 @@ def torch_dir(options):
     dst_dir = os.path.join(dir_, dest_subdir)
     os.makedirs(dst_dir, exist_ok=True)
     for src_subdir in src_subdirs:
+        print(f"Aggregating {src_subdir}...")
         src_dir = os.path.join(dir_, src_subdir)
         shutil.copytree(
             src_dir,
@@ -725,8 +742,9 @@ def torch_dir(options):
             copy_function=cp,
             dirs_exist_ok=True,
             ignore_dangling_symlinks=True,
-            ignore=shutil.ignore_patterns('ali*')
+            ignore=shutil.ignore_patterns("ali*"),
         )
+
 
 def build_parser():
     parser = argparse.ArgumentParser(description=main.__doc__)
@@ -966,6 +984,14 @@ def build_torch_dir_parser(subparsers):
         "'500' is 'train-clean-100', 'train-clean-360', and 'train-other-500'. All "
         "dev and test partitions are always computed.",
     )
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        default=False,
+        help="Skip the (very slow) verification/info step for each partition. This "
+        "may be done later using the command 'get-torch-spect-data-dir-info' "
+        "command on each partition",
+    )
     aggregate_group = parser.add_mutually_exclusive_group()
     aggregate_common_text = (
         "Aggregates all computed training partitions into a single partition. "
@@ -975,16 +1001,22 @@ def build_torch_dir_parser(subparsers):
         "the source partition"
     )
     aggregate_group.add_argument(
-        "--aggregate-by-copy", action='store_true', default=False,
-        help=aggregate_common_text.format('copies')
+        "--aggregate-by-copy",
+        action="store_true",
+        default=False,
+        help=aggregate_common_text.format("copies"),
     )
     aggregate_group.add_argument(
-        "--aggregate-by-symlink", action='store_true', default=False,
-        help=aggregate_common_text.format('symbolically links')
+        "--aggregate-by-symlink",
+        action="store_true",
+        default=False,
+        help=aggregate_common_text.format("symbolically links"),
     )
     aggregate_group.add_argument(
-        "--aggregate-by-link", action='store_true', default=False,
-        help=aggregate_common_text.format('(hard) links')
+        "--aggregate-by-link",
+        action="store_true",
+        default=False,
+        help=aggregate_common_text.format("(hard) links"),
     )
 
     fbank_41_config = os.path.join(

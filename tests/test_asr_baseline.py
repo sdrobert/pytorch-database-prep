@@ -99,7 +99,7 @@ class DummyLM(MixableSequentialLanguageModel):
 
 
 @pytest.mark.parametrize("with_lm", [True, False], ids=["w/ lm", "w/o lm"])
-@pytest.mark.parametrize("recognizer", ["ctc", "encdec"])
+@pytest.mark.parametrize("recognizer", ["ctc", "ctc-greedy", "encdec"])
 def test_recognizer(device, recognizer, with_lm):
     T, N, V, I, H = 50, 20, 20, 10, 5
     feats = torch.randn(T, N, I, device=device)
@@ -108,8 +108,10 @@ def test_recognizer(device, recognizer, with_lm):
     ref_lens = (torch.rand(N, device=device) * lens).clamp_min_(1).long()
     lm = DummyLM(V) if with_lm else None
     encoder = FeedForwardEncoder(I, H)
-    if recognizer == "ctc":
-        recognizer = CTCSpeechRecognizer(V, encoder, lm=lm).to(device)
+    if recognizer.startswith("ctc"):
+        recognizer = CTCSpeechRecognizer(
+            V, encoder, 0 if recognizer == "ctc-greedy" else 8, lm=lm
+        ).to(device)
         # CTC loss averages over reference lengths per batch element, THEN batch
         # elements
         nums, denom = [1] * N, N
@@ -147,7 +149,7 @@ def test_construct_baseline(with_lm, encoder_type, transducer_type):
     T, N, V, I = 5, 10, 15, 20
     feats = torch.rand(T, N, I)
     lens = torch.randint(1, T + 1, (N,))
-    lm = DummyLM(V + int(transducer_type == "encdec")) if with_lm else None
+    lm = DummyLM(V) if with_lm else None
     params = BaselineParams(
         encoder_type=encoder_type,
         transducer_type=transducer_type,

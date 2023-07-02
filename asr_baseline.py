@@ -31,6 +31,7 @@ from pydrobert.torch.modules import (
     BeamSearch,
     ConcatSoftAttention,
     CTCPrefixSearch,
+    CTCGreedySearch,
     ErrorRate,
     ExtractableSequentialLanguageModel,
     ExtractableShallowFusionLanguageModel,
@@ -379,9 +380,10 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
 
     encoder: Encoder
 
-    def __init__(self, encoder: Encoder) -> None:
+    def __init__(self, encoder: Encoder, stack: int = 1) -> None:
+        check_positive("stack", stack)
         super().__init__()
-        self.encoder = encoder
+        self.stack, self.encoder = stack, encoder
 
     def reset_parameters(self):
         self.encoder.reset_parameters()
@@ -396,6 +398,20 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
     ) -> torch.Tensor:
         ...
 
+    def encode(
+        self, feats: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.stack > 1:
+            T, N, C = feats.shape
+            Tp = T - (T % self.stack)
+            feats = (
+                feats.transpose(0, 1)[:, :Tp]
+                .reshape(N, Tp // self.stack, C * self.stack)
+                .transpose(0, 1)
+            )
+            lens = lens // self.stack
+        return self.encoder(feats, lens)
+
     def train_loss(
         self,
         feats: torch.Tensor,
@@ -403,7 +419,7 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
         refs: torch.Tensor,
         ref_lens: torch.Tensor,
     ) -> torch.Tensor:
-        input, lens = self.encoder(feats, lens)
+        input, lens = self.encode(feats, lens)
         return self.train_loss_from_encoded(input, lens, refs, ref_lens)
 
     @abc.abstractmethod
@@ -415,7 +431,7 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
     def decode(
         self, feats: torch.Tensor, lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        input, lens = self.encoder(feats, lens)
+        input, lens = self.encode(feats, lens)
         return self.decode_from_encoded(input, lens)
 
     def forward(
@@ -424,6 +440,20 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
         return self.decode(feats, lens)
 
     __call__: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+class MyCTCGreedySearch(CTCGreedySearch):
+    def __init__(self):
+        super().__init__(-1, False, True)
+
+    def reset_parameters(self):
+        pass
+
+    def forward(
+        self, logits: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        max_, paths, out_lens = super().forward(logits, lens)
+        return paths.unsqueeze(2), out_lens.unsqueeze(1), max_.unsqueeze(1)
 
 
 class CTCSpeechRecognizer(SpeechRecognizer):
@@ -441,14 +471,18 @@ class CTCSpeechRecognizer(SpeechRecognizer):
         beam_width: int = 8,
         lm: Optional[MixableSequentialLanguageModel] = None,
         beta: float = 0.0,
+        stack: int = 1,
     ) -> None:
         check_positive("vocab_size", vocab_size)
-        check_positive("beam_width", beam_width)
+        check_positive("beam_width", beam_width, nonnegative=True)
         if lm is not None:
             check_equals("lm.vocab_size", lm.vocab_size, vocab_size)
-        super().__init__(encoder)
+        super().__init__(encoder, stack)
         self.ff = torch.nn.Linear(encoder.hidden_size, vocab_size + 1)
-        self.search = CTCPrefixSearch(beam_width, beta, lm)
+        if beam_width:
+            self.search = CTCPrefixSearch(beam_width, beta, lm)
+        else:
+            self.search = MyCTCGreedySearch()
         self.ctc_loss = torch.nn.CTCLoss(vocab_size)
 
     def reset_parameters(self):
@@ -504,6 +538,7 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
         pad_value: int = config.INDEX_PAD_VALUE,
         eos: Optional[int] = None,
         max_iters: int = 200,
+        stack: int = 1,
     ) -> None:
         check_positive("beam_width", beam_width)
         if lm is not None:
@@ -511,7 +546,7 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
         check_positive("max_iters", max_iters)
         if eos is not None:
             check_less_than("eos", eos, decoder.vocab_size)
-        super().__init__(encoder)
+        super().__init__(encoder, stack)
         self.decoder = decoder
         self.encoded_name_train = self.encoded_name_decode = encoded_name
         self.encoded_lens_name_train = self.encoded_lens_name_decode = encoded_lens_name
@@ -592,7 +627,10 @@ class RecurrentDecoderWithAttentionParams(param.Parameterized):
 
 class BaselineParams(param.Parameterized):
     input_size: int = param.Integer(
-        41, bounds=(1, None), doc="Size of input feature vectors"
+        41, bounds=(1, None), doc="Size of input feature vectors (pre stacking)"
+    )
+    stack: int = param.Integer(
+        1, bounds=(1, None), doc="Number of feature vectors to stack together"
     )
     hidden_size: int = param.Integer(
         512, bounds=(1, None), doc="Size of encoder hidden states/output"
@@ -656,7 +694,7 @@ def construct_baseline(
                 "encoder_type is 'ff' but ff_encoder has not been initialized"
             )
         encoder = FeedForwardEncoder(
-            params.input_size,
+            params.input_size * params.stack,
             params.hidden_size,
             params.ff_encoder.num_layers,
             params.ff_encoder.bias,
@@ -669,7 +707,7 @@ def construct_baseline(
                 "encoder_type is 'recur' but recur_encoder has not been initialized"
             )
         encoder = RecurrentEncoder(
-            params.input_size,
+            params.input_size * params.stack,
             params.hidden_size,
             params.recur_encoder.num_layers,
             params.recur_encoder.bidirectional,
@@ -687,7 +725,7 @@ def construct_baseline(
                 "for shallow fusion"
             )
         recognizer = CTCSpeechRecognizer(
-            params.vocab_size, encoder, beam_width, lm, beta
+            params.vocab_size, encoder, beam_width, lm, beta, params.stack
         )
     elif params.transducer_type == "encdec":
         if params.decoder_type == "rwa":
@@ -697,7 +735,7 @@ def construct_baseline(
                 )
             decoder = RecurrentDecoderWithAttention(
                 params.hidden_size,
-                params.vocab_size + 1,
+                params.vocab_size,
                 params.rwa_decoder.embed_size,
                 params.rwa_decoder.hidden_size,
                 dropout,
@@ -707,7 +745,14 @@ def construct_baseline(
                 f"decoder_type '{params.decoder_type}' not implemented"
             )
         recognizer = EncoderDecoderSpeechRecognizer(
-            encoder, decoder, beam_width, lm, beta, eos=eos, max_iters=max_iters
+            encoder,
+            decoder,
+            max(beam_width, 1),
+            lm,
+            beta,
+            eos=eos,
+            max_iters=max_iters,
+            stack=params.stack,
         )
     else:
         raise NotImplementedError(
@@ -800,7 +845,7 @@ def _train_for_epoch(
         total_elems += N
         del feats, lens, refs, ref_lens, loss
 
-    return total_loss / N
+    return total_loss / total_elems
 
 
 def _val_for_epoch(
@@ -810,23 +855,21 @@ def _val_for_epoch(
 
     total_er = 0
     total_ref_tokens = 0
+    if eos is None:
+        eos = config.INDEX_PAD_VALUE
     er_func = ErrorRate(eos, norm=False)
-    eos_pad = torch.full((N,), eos, device=device, dtype=torch.long)
     with torch.no_grad():
         for feats, refs, lens, ref_lens in dl:
             # batch_first = False
-            N = ref_lens.size(0)
             feats, lens = feats.to(device), lens.to(device)
             refs, ref_lens = refs.to(device), ref_lens.to(device)
 
             hyps, hyp_lens = recognizer.decode(feats, lens)
             del feats, lens
 
-            hyps = torch.cat([hyps, eos_pad], 0)
             mask = torch.arange(hyps.size(0), device=device).unsqueeze(1) >= hyp_lens
             hyps = hyps.masked_fill_(mask, eos)
-            refs = torch.cat([refs, eos_pad], 0)
-            mask = torch.arange(refs.size(0), device=device).unsqueeze(1) >= hyp_lens
+            mask = torch.arange(refs.size(0), device=device).unsqueeze(1) >= ref_lens
             refs = refs.masked_fill_(mask, eos)
 
             er = er_func(refs, hyps).sum().item()
@@ -834,6 +877,8 @@ def _val_for_epoch(
             total_er += er
             total_ref_tokens += ref_tokens
             del hyps, hyp_lens, refs, ref_lens
+        # print("refs", refs[: ref_lens[0], 0])
+        # print("hyps", hyps[: hyp_lens[0], 0])
 
     return total_er / total_ref_tokens
 
@@ -845,8 +890,12 @@ def train(options: argparse.Namespace):
     bparams.initialize_missing()
 
     recognizer = construct_baseline(
-        bparams, beam_width=1, dropout=tparams.dropout, eos=dparams.eos
+        bparams, beam_width=0, dropout=tparams.dropout, eos=dparams.eos
     )
+    if options.init_state_dict:
+        recognizer.load_state_dict(torch.load(options.init_state_dict, "cpu"))
+        # don't let controller reset the parameters at epoch 0
+        recognizer.reset_parameters = lambda *args, **kwargs: None
     recognizer.to(options.device)
 
     if options.distributed_backend is not None:
@@ -856,9 +905,8 @@ def train(options: argparse.Namespace):
             recognizer, [local_rank], local_rank
         )
 
-    eos = bparams.vocab_size
-    if isinstance(recognizer, EncoderDecoderSpeechRecognizer):
-        dparams.eos = eos
+    if not isinstance(recognizer, EncoderDecoderSpeechRecognizer):
+        dparams.eos = None
 
     if tparams.optimizer == "adam":
         Optimizer = torch.optim.Adam
@@ -928,7 +976,7 @@ def train(options: argparse.Namespace):
             recognizer, optimizer, spec_aug, get_tdl(), options.device
         )
         print_(f"Validating for epoch {epoch}...")
-        val_err = _val_for_epoch(recognizer, get_vdl(), eos, options.device)
+        val_err = _val_for_epoch(recognizer, get_vdl(), dparams.eos, options.device)
         print_(
             f"Epoch {epoch} training loss was {train_loss:.02f}, "
             f"validation error was {val_err:.02%}"
@@ -955,10 +1003,11 @@ def train(options: argparse.Namespace):
 def decode(options: argparse.Namespace):
     bparams: BaselineParams = options.bparams
     dparams: SpectDataParams = options.dparams
+    bparams.initialize_missing()
 
     if options.lookup_lm_state_dict is not None:
         lm_state_dict: dict = torch.load(options.lookup_lm_state_dict)
-        sos = lm_state_dict["sos"]
+        sos = lm_state_dict.pop("sos")
         vocab_size = lm_state_dict.pop("vocab_size", None)
         if vocab_size is None:
             vocab_size = bparams.vocab_size
@@ -984,14 +1033,36 @@ def decode(options: argparse.Namespace):
     recognizer.to(options.device)
     recognizer.eval()
 
-    ds = SpectDataSet(options.data_dir, params=dparams, feat_mean=options.feat_mean, feat_std=options.feat_std, suppress_alis=True, suppress_uttids=False)
+    if not isinstance(recognizer, EncoderDecoderSpeechRecognizer):
+        dparams.eos = None
+
+    ds = SpectDataSet(
+        options.data_dir,
+        params=dparams,
+        feat_mean=options.feat_mean,
+        feat_std=options.feat_std,
+        suppress_alis=True,
+        suppress_uttids=False,
+        tokens_only=True,
+    )
+
+    os.makedirs(options.hyp_dir, exist_ok=True)
+
+    for feat, _, uttid in ds:
+        feats = feat.unsqueeze(1).to(options.device)
+        lens = torch.tensor([feats.size(0)], device=options.device)
+        hyps, lens = recognizer.decode(feats, lens)
+        hyp = hyps[: lens[0], 0].cpu()
+        if dparams.eos is not None:
+            hyp = hyp.masked_select(hyp != dparams.eos)
+        torch.save(hyp, os.path.join(options.hyp_dir, uttid + ".pt"))
 
 
 def main(args: Optional[Sequence[str]] = None):
     """Train and decode baseline, supervised speech recognizers"""
 
     parser = argparse.ArgumentParser(
-        description=main.__doc__,
+        description=main.__doc__, fromfile_prefix_chars="@"
     )
     add_serialization_group_to_parser(
         parser,
@@ -1017,12 +1088,6 @@ def main(args: Optional[Sequence[str]] = None):
         type=argparse.FileType("rb"),
         default=None,
         help="Path to corpus-level mean-variance stats for normalization",
-    )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=0,
-        help="Number of data workers. Default (0) is on main thread",
     )
 
     subparsers = parser.add_subparsers(
@@ -1074,10 +1139,22 @@ def main(args: Optional[Sequence[str]] = None):
         "torchrun. If unset, will be run in serial",
     )
     train_parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Number of data workers. Default (0) is on main thread",
+    )
+    train_parser.add_argument(
         "--quiet",
         action="store_true",
         default=False,
         help="Whether to perform training quietly",
+    )
+    train_parser.add_argument(
+        "--init-state-dict",
+        type=argparse.FileType("rb"),
+        default=None,
+        help="If set, the model will be loaded first with this state dict. ",
     )
     train_parser.add_argument(
         "train_dir", type=existing_dir, help="Training SpectDataSet"
@@ -1120,7 +1197,8 @@ def main(args: Optional[Sequence[str]] = None):
     )
     decode_parser.add_argument(
         "--beta",
-        float=0.0,
+        type=float,
+        default=0.0,
         help="Shallow fusion mixing coefficient (only applies if "
         "--lookup-lm-state-dict is set)",
     )
@@ -1150,7 +1228,7 @@ def main(args: Optional[Sequence[str]] = None):
             options.device = torch.device(torch.cuda.current_device())
         else:
             options.device = torch.device("cpu")
-    
+
     if options.mvn_path is None:
         options.feat_mean = options.feat_std = None
     else:

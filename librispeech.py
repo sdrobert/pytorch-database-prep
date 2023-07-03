@@ -690,7 +690,6 @@ def torch_dir(options):
         ref_dir = os.path.join(fname_dir, "ref")
         os.makedirs(ref_dir, exist_ok=True)
 
-        print(f"building refs for {fname}...")
         args = [
             ref_trn,
             token2id_txt,
@@ -708,8 +707,8 @@ def torch_dir(options):
             args = [fname_dir, os.path.join(ext, f"{fname}.info.ark"), "--strict"]
             assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
-            if fname.endswith(options.compute_up_to):
-                break
+        if fname.endswith(options.compute_up_to):
+            break
 
     if options.aggregate_by_copy:
         cp = shutil.copy2
@@ -734,7 +733,7 @@ def torch_dir(options):
     dst_dir = os.path.join(dir_, dest_subdir)
     os.makedirs(dst_dir, exist_ok=True)
     for src_subdir in src_subdirs:
-        print(f"Aggregating {src_subdir}...")
+        print(f"Aggregating {src_subdir} into {dst_dir}...")
         src_dir = os.path.join(dir_, src_subdir)
         shutil.copytree(
             src_dir,

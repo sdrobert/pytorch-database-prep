@@ -191,7 +191,7 @@ class FeedForwardEncoder(Encoder):
 
     def reset_parameters(self):
         super().reset_parameters()
-        for n in range(0, len(self.stack), 2):
+        for n in range(0, len(self.stack), 3):
             self.stack[n].reset_parameters()
 
     def forward(
@@ -483,7 +483,7 @@ class CTCSpeechRecognizer(SpeechRecognizer):
             self.search = CTCPrefixSearch(beam_width, beta, lm)
         else:
             self.search = MyCTCGreedySearch()
-        self.ctc_loss = torch.nn.CTCLoss(vocab_size)
+        self.ctc_loss = torch.nn.CTCLoss(vocab_size, zero_infinity=True)
 
     def reset_parameters(self):
         super().reset_parameters()
@@ -763,8 +763,8 @@ def construct_baseline(
 
 class MyTrainingStateParams(TrainingStateParams):
     dropout: float = param.Magnitude(0.0, doc="Dropout probability")
-    optimizer: Literal["adam", "sgd"] = param.ObjectSelector(
-        "adam", ["adam", "sgd"], doc="Which optimizer to train with"
+    optimizer: Literal["adamw", "adam", "sgd"] = param.ObjectSelector(
+        "adamw", ["adamw", "adam", "sgd"], doc="Which optimizer to train with"
     )
 
     spec_aug_max_time_warp: float = param.Number(
@@ -889,6 +889,8 @@ def train(options: argparse.Namespace):
     dparams: SpectDataLoaderParams = options.dparams
     bparams.initialize_missing()
 
+    torch.autograd.set_detect_anomaly(True)
+
     recognizer = construct_baseline(
         bparams, beam_width=0, dropout=tparams.dropout, eos=dparams.eos
     )
@@ -908,7 +910,9 @@ def train(options: argparse.Namespace):
     if not isinstance(recognizer, EncoderDecoderSpeechRecognizer):
         dparams.eos = None
 
-    if tparams.optimizer == "adam":
+    if tparams.optimizer == "adamw":
+        Optimizer = torch.optim.AdamW
+    elif tparams.optimizer == "adam":
         Optimizer = torch.optim.Adam
     elif tparams.optimizer == "sgd":
         Optimizer = torch.optim.SGD

@@ -437,6 +437,8 @@ def init_word(options):
 def train_custom_lm(config_dir, vocab, max_order, prune_counts, delta=None):
     sents = []
     for fname in AM_FNAMES:
+        if not fname.startswith("train"):
+            continue
         fname = fname.replace("-", "_")
         trn_path = os.path.join(config_dir, fname + ".ref.trn")
         if not os.path.exists(trn_path):

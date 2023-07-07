@@ -1034,6 +1034,7 @@ def decode(options: argparse.Namespace):
         dparams.eos,
         options.max_hyp_len,
     )
+    # FIXME(sdrobert): lm + search shouldn't be included in the state dict.
     recognizer.load_state_dict(torch.load(options.model, "cpu"), False)
     recognizer.to(options.device)
     recognizer.eval()

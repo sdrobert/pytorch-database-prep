@@ -18,7 +18,7 @@ import abc
 import argparse
 import os
 
-from typing import Callable, Collection, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Collection, Dict, Mapping, Optional, Sequence, Tuple
 from typing_extensions import Literal
 from itertools import chain
 
@@ -1034,6 +1034,7 @@ def decode(options: argparse.Namespace):
         dparams.eos,
         options.max_hyp_len,
     )
+    recognizer.load_state_dict(torch.load(options.model, "cpu"), False)
     recognizer.to(options.device)
     recognizer.eval()
 

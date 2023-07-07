@@ -681,13 +681,15 @@ def torch_dir(options):
     token2id_txt = os.path.join(config_dir, "token2id.txt")
     for fname in fnames:
         ref_trn = os.path.join(config_dir, fname + ".ref.trn")
+        wav_scp = os.path.join(config_dir, fname + ".wav.scp")
         if not os.path.isfile(ref_trn):
-            if fname in TRAIN_SUBSETS and not os.path.isfile(
-                os.path.join(config_dir, fname + ".wav.scp")
-            ):
+            if fname in TRAIN_SUBSETS and not os.path.isfile(wav_scp):
                 continue
             else:
                 raise ValueError(f"'{ref_trn}' not a file (did you finish init_*)?")
+        
+        shutil.copy(ref_trn, os.path.join(ext, fname + '.ref.trn'))
+        shutil.copy(wav_scp, os.path.join(ext, fname + '.wav.scp'))
 
         fname_dir = os.path.join(dir_, fname)
         ref_dir = os.path.join(fname_dir, "ref")

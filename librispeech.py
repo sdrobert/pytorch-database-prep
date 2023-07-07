@@ -670,9 +670,10 @@ def torch_dir(options):
                 for line in in_:
                     utt_id = line.split(" ", maxsplit=1)[0]
                     file_ = utt_id + ".pt"
-                    os.link(
-                        os.path.join(clean_dir, file_), os.path.join(feat_dir, file_)
-                    )
+                    dst = os.path.join(feat_dir, file_)
+                    if os.path.exists(dst):
+                        os.unlink(dst)
+                    os.link(os.path.join(clean_dir, file_), dst)
         fnames = TRAIN_SUBSETS + fnames
 
     token2id_txt = os.path.join(config_dir, "token2id.txt")

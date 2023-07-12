@@ -2049,7 +2049,7 @@ def main(args: Optional[Sequence[str]] = None):
 
     if options.prune_by_count_thresholds is not None:
         k = len(options.prune_by_count_thresholds) - 1
-        for i, counts in enumerate(ngram_counts):
+        for i, counts in enumerate(ngram_counts[1:]):
             t = options.prune_by_count_thresholds[min(i, k)]
             if t == 0:
                 continue

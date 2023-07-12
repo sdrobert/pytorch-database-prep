@@ -68,7 +68,7 @@ __all__ = [
 ]
 
 
-TRAIN_DATA_LOADER_PARAMS_SUBSET = {
+DATA_LOADER_PARAMS_SUBSET = {
     "batch_size",
     "drop_last",
     "num_length_buckets",
@@ -1006,9 +1006,13 @@ def train(options: argparse.Namespace):
 
 def decode(options: argparse.Namespace):
     bparams: BaselineParams = options.bparams
-    dparams: SpectDataParams = options.dparams
+    dparams: SpectDataLoaderParams = options.dparams
     bparams.initialize_missing()
+    device = options.device
+    if options.batch_size is not None:
+        dparams.batch_size = options.batch_size
 
+    print("loading lm")
     if options.lookup_lm_state_dict is not None:
         lm_state_dict: dict = torch.load(options.lookup_lm_state_dict)
         sos = lm_state_dict.pop("sos")
@@ -1025,6 +1029,7 @@ def decode(options: argparse.Namespace):
     else:
         lm = None
 
+    print("constructing recognizer")
     recognizer = construct_baseline(
         bparams,
         lm,
@@ -1035,33 +1040,39 @@ def decode(options: argparse.Namespace):
         options.max_hyp_len,
     )
     # FIXME(sdrobert): lm + search shouldn't be included in the state dict.
+    print("loading state dict")
     recognizer.load_state_dict(torch.load(options.model, "cpu"), False)
-    recognizer.to(options.device)
+    recognizer.to(device)
     recognizer.eval()
 
+    eos = dparams.eos
     if not isinstance(recognizer, EncoderDecoderSpeechRecognizer):
         dparams.eos = None
 
-    ds = SpectDataSet(
+    dl = SpectDataLoader(
         options.data_dir,
-        params=dparams,
+        dparams,
+        shuffle=False,
         feat_mean=options.feat_mean,
         feat_std=options.feat_std,
         suppress_alis=True,
         suppress_uttids=False,
         tokens_only=True,
+        num_workers=options.num_workers,
+        pin_memory=device.type == "cuda",
+        batch_first=False,
     )
-
     os.makedirs(options.hyp_dir, exist_ok=True)
 
-    for feat, _, uttid in ds:
-        feats = feat.unsqueeze(1).to(options.device)
-        lens = torch.tensor([feats.size(0)], device=options.device)
-        hyps, lens = recognizer.decode(feats, lens)
-        hyp = hyps[: lens[0], 0].cpu()
-        if dparams.eos is not None:
-            hyp = hyp.masked_select(hyp != dparams.eos)
-        torch.save(hyp, os.path.join(options.hyp_dir, uttid + ".pt"))
+    with torch.no_grad():
+        for feats, _, lens, _, uttids in tqdm(dl):
+            feats, lens = feats.to(device), lens.to(device)
+            hyps, lens = recognizer.decode(feats, lens)
+            for hyp, len_, uttid in zip(hyps.T.cpu(), lens.cpu(), uttids):
+                hyp = hyp[:len_]
+                if eos is not None:
+                    hyp = hyp.masked_select(hyp != eos)
+                torch.save(hyp, os.path.join(options.hyp_dir, uttid + ".pt"))
 
 
 def main(args: Optional[Sequence[str]] = None):
@@ -1095,6 +1106,25 @@ def main(args: Optional[Sequence[str]] = None):
         default=None,
         help="Path to corpus-level mean-variance stats for normalization",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Number of data workers. Default (0) is on main thread",
+    )
+    add_serialization_group_to_parser(
+        parser,
+        SpectDataLoaderParams(name="data"),
+        subset=DATA_LOADER_PARAMS_SUBSET,
+        flag_format_str="--print-data-{file_format}",
+    )
+    add_deserialization_group_to_parser(
+        parser,
+        SpectDataLoaderParams(name="data"),
+        "dparams",
+        subset=DATA_LOADER_PARAMS_SUBSET,
+        flag_format_str="--read-data-{file_format}",
+    )
 
     subparsers = parser.add_subparsers(
         dest="cmd", description="Whether to train or decode", required=True
@@ -1111,19 +1141,6 @@ def main(args: Optional[Sequence[str]] = None):
         MyTrainingStateParams(name="training"),
         "tparams",
         flag_format_str="--read-training-{file_format}",
-    )
-    add_serialization_group_to_parser(
-        train_parser,
-        SpectDataLoaderParams(name="data"),
-        subset=TRAIN_DATA_LOADER_PARAMS_SUBSET,
-        flag_format_str="--print-data-{file_format}",
-    )
-    add_deserialization_group_to_parser(
-        train_parser,
-        SpectDataLoaderParams(name="data"),
-        "dparams",
-        subset=TRAIN_DATA_LOADER_PARAMS_SUBSET,
-        flag_format_str="--read-data-{file_format}",
     )
     train_parser.add_argument(
         "--last",
@@ -1144,12 +1161,7 @@ def main(args: Optional[Sequence[str]] = None):
         help="Backend for torch.distributed. If set, script should be called with "
         "torchrun. If unset, will be run in serial",
     )
-    train_parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=0,
-        help="Number of data workers. Default (0) is on main thread",
-    )
+
     train_parser.add_argument(
         "--quiet",
         action="store_true",
@@ -1175,19 +1187,6 @@ def main(args: Optional[Sequence[str]] = None):
 
     decode_parser = subparsers.add_parser(
         "decode", description="Use a trained model to decode features"
-    )
-    add_serialization_group_to_parser(
-        decode_parser,
-        SpectDataParams(name="data"),
-        subset=DECODE_DATA_SET_PARAMS_SUBSET,
-        flag_format_str="--print-data-{file_format}",
-    )
-    add_deserialization_group_to_parser(
-        decode_parser,
-        SpectDataParams(name="data"),
-        "dparams",
-        subset=DECODE_DATA_SET_PARAMS_SUBSET,
-        flag_format_str="--read-data-{file_format}",
     )
     decode_parser.add_argument(
         "--beam-width",
@@ -1215,6 +1214,12 @@ def main(args: Optional[Sequence[str]] = None):
         help="The resulting state file of calling arpa-lm-to-state-dict.py on an "
         "arpa LM. The start-of-sequence id should be saved in the state dict, i.e. "
         "the '--save-sos' flag should have been set",
+    )
+    decode_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="If set, clobbers the data config's batch size",
     )
     decode_parser.add_argument(
         "model",

@@ -434,7 +434,7 @@ def init_word(options):
         shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
 
 
-def train_custom_lm(config_dir, vocab, max_order, prune_counts, delta=None):
+def train_custom_lm(config_dir, vocab, max_order, prune_counts):
     sents = []
     for fname in AM_FNAMES:
         if not fname.startswith("train"):
@@ -484,7 +484,7 @@ def train_custom_lm(config_dir, vocab, max_order, prune_counts, delta=None):
             )
 
     prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-        ngram_counts, sos="<s>", to_prune=to_prune, delta=delta
+        ngram_counts, sos="<s>", to_prune=to_prune
     )
 
     # remove start-of-sequence probability mass
@@ -553,13 +553,11 @@ def init_char(options):
         shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
 
     if options.custom_lm_max_order > 0:
-        # XXX(sdrobert): see wsj.py for details on deltas
         train_custom_lm(
             config_dir,
             set(vocab),
             options.custom_lm_max_order,
             options.custom_lm_prune_counts,
-            [(0.5, 1.0, 1.5)] * options.custom_lm_max_order,
         )
 
 
@@ -687,9 +685,9 @@ def torch_dir(options):
                 continue
             else:
                 raise ValueError(f"'{ref_trn}' not a file (did you finish init_*)?")
-        
-        shutil.copy(ref_trn, os.path.join(ext, fname + '.ref.trn'))
-        shutil.copy(wav_scp, os.path.join(ext, fname + '.wav.scp'))
+
+        shutil.copy(ref_trn, os.path.join(ext, fname + ".ref.trn"))
+        shutil.copy(wav_scp, os.path.join(ext, fname + ".wav.scp"))
 
         fname_dir = os.path.join(dir_, fname)
         ref_dir = os.path.join(fname_dir, "ref")

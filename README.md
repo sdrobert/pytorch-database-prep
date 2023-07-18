@@ -54,6 +54,6 @@ The `rouge-1.5.5.py` script uses code from
 [py-rouge](https://github.com/Diego999/py-rouge), which is
 Apache 2.0 licensed.
 
-`NGramCountShelf` and the various routines surrounding it are based on the
-python 3.11 source of the `shelve` module, subject to the PSF. Details are in
-[LICENSE_python](./LICENSE_python).
+`ngram_lm.DbfilenameCountDict` and the various routines surrounding it are
+based on the python 3.11 source of the `shelve` module, subject to the PSF.
+Details are in [LICENSE_python](./LICENSE_python).

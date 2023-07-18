@@ -74,7 +74,7 @@ def test_katz_discounts(katz_ngram_counts):
         )
         act_dc = act_dc[1:]  # exclude r=0
         act_dc -= np.log10(np.arange(1, len(act_dc) + 1))
-        act_dc = 10**act_dc
+        act_dc = 10 ** act_dc
         assert np.allclose(act_dc[len(exp_dc) :], 1.0)
         # discount ratios have been rounded to precision 2 in arpa file
         assert np.allclose(act_dc[: len(exp_dc)], exp_dc, atol=1e-2)
@@ -227,7 +227,7 @@ def test_text_to_sents():
 
 
 @pytest.mark.parametrize("N_is_dict", [True, False], ids=["dict", "count"])
-def test_sents_to_ngram_counts(N_is_dict):
+def test_sents_to_ngram_counts(N_is_dict, tmp_path_factory):
     sent = "what am I chopped liver".split()
     sents = [sent]
     for s in range(1, len(sent)):
@@ -235,8 +235,9 @@ def test_sents_to_ngram_counts(N_is_dict):
     N = len(sent) + 2
     if N_is_dict:
         dicts = []
-        for _ in range(N):
-            dicts.append(dict())
+        dir_ = tmp_path_factory.mktemp("counts")
+        for n in range(N):
+            dicts.append(ngram_lm.open_count(dir_ / str(n)))
         N = dicts
     ngram_counts = ngram_lm.sents_to_ngram_counts(sents, N, update_frequency=3)
     assert not ngram_counts[0]["<S>"]

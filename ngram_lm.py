@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# DbfilenameCountDict is based off the Python module `shelve`, which is PSF-licensed.
+#
+#   https://docs.python.org/3/license.html
+
 # Copyright 2023 Sean Robertson
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,19 +18,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import argparse
 from typing import Dict, Generator, List, Literal, Optional, Sequence, Tuple, Union
 import warnings
 import sys
 import locale
 import re
-import shelve
+import dbm
+import struct
 
 from collections import OrderedDict, Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableMapping
 from itertools import product
+from typing_extensions import Final
 
 import numpy as np
+
+from expiringdict import ExpiringDict
 
 __all__ = [
     "BackoffNGramLM",
@@ -40,6 +49,8 @@ __all__ = [
     "sents_to_ngram_counts",
     "text_to_sents",
     "write_arpa",
+    "DbfilenameCountDict",
+    "open_count",
 ]
 
 DEFT_SENT_END_EXPR = re.compile(r"[.?!]+")
@@ -50,7 +61,10 @@ DEFAULT_KATZ_THRESH = 7
 
 FALLBACK_DELTAS = (0.5, 1.0, 1.5)
 
-locale.setlocale(locale.LC_ALL, "C")
+CountKey = Union[str, Tuple[str, ...]]
+CountDict = MutableMapping[CountKey, int]
+CountDicts = List[CountDict]
+
 warnings.simplefilter("error", RuntimeWarning)
 
 
@@ -221,7 +235,7 @@ class BackoffNGramLM(object):
                 denom = 0.0
                 for w, child in node.children.items():
                     assert child.lprob is not None
-                    num -= 10.0**child.lprob
+                    num -= 10.0 ** child.lprob
                     denom -= 10.0 ** self.conditional(h[1:] + (w,))
                 # these values may be ridiculously close to 1, but still valid.
                 if num < -1.0:
@@ -268,10 +282,10 @@ class BackoffNGramLM(object):
                     P_h = 10 ** self.log_prob(h, _srilm_hacks=_srilm_hacks)
                     for w, child in node.children.items():
                         assert child.lprob is not None
-                        num -= 10.0**child.lprob
+                        num -= 10.0 ** child.lprob
                         logP_w_given_hprime = self.conditional(h[1:] + (w,))
                         logP_w_given_hprimes.append(logP_w_given_hprime)
-                        denom -= 10.0**logP_w_given_hprime
+                        denom -= 10.0 ** logP_w_given_hprime
                     if num + 1 < eps or denom + 1 < eps:
                         warnings.warn(
                             "Malformed backoff weight for context {}. Leaving "
@@ -296,9 +310,9 @@ class BackoffNGramLM(object):
                         if child.bo:
                             continue  # don't prune children with backoffs
                         logP_w_given_h = child.lprob
-                        P_w_given_h = 10**logP_w_given_h
+                        P_w_given_h = 10 ** logP_w_given_h
                         logP_w_given_hprime = logP_w_given_hprimes[idx]
-                        P_w_given_hprime = 10**logP_w_given_hprime
+                        P_w_given_hprime = 10 ** logP_w_given_hprime
                         new_num = num + P_w_given_h
                         new_denom = denom + P_w_given_hprime
                         log_alphaprime = np.log1p(new_num)
@@ -310,7 +324,7 @@ class BackoffNGramLM(object):
                             P_w_given_h * log_delta_prob
                             + (log_alphaprime - log_alpha) * (1.0 + num)
                         )
-                        delta_perplexity = 10.0**KL - 1
+                        delta_perplexity = 10.0 ** KL - 1
                         if delta_perplexity < threshold:
                             node.children.pop(w)
                     # we don't have to set backoff properly (we'll renormalize at end).
@@ -632,6 +646,133 @@ class BackoffNGramLM(object):
         self.trie.prune_by_name(to_prune, eps_lprob)
 
 
+class DbfilenameCountDict(MutableMapping[CountKey, int]):
+
+    COUNT_FMT_STR: Final[str] = "!Q"
+
+    dict: MutableMapping[bytes, bytes]
+    cache: MutableMapping[bytes, bytes]
+    key_encoding: str
+    separator: str
+
+    def __init__(
+        self,
+        filename: os.PathLike,
+        protocol: Literal["c", "w", "r", "n"] = "c",
+        key_encoding: str = "utf-8",
+        separator: str = "\n",
+        max_cache_len: Optional[int] = 20_000,
+        max_cache_age_seconds: Optional[float] = 10.0,
+    ) -> None:
+        if not len(separator):
+            raise ValueError("separator cannot be empty")
+        super().__init__()
+        self.dict = dbm.open(os.fspath(filename), protocol)
+        self.cache = ExpiringDict(max_cache_len, max_cache_age_seconds)
+        self.key_encoding, self.separator = key_encoding, separator
+
+    def encode_key(self, key: CountKey) -> bytes:
+        if not isinstance(key, str):
+            key = self.separator.join(key)
+        return key.encode(self.key_encoding)
+
+    def decode_key(self, key_: bytes) -> CountKey:
+        key = key_.decode(self.key_encoding)
+        assert isinstance(key, str)
+        if self.separator in key:
+            key = tuple(key.split(self.separator))
+        return key
+
+    def encode_count(self, count: int) -> bytes:
+        return struct.pack(self.COUNT_FMT_STR, count)
+
+    encode_value = encode_count
+
+    def decode_count(self, count_: bytes) -> int:
+        return struct.unpack(self.COUNT_FMT_STR, count_)[0]
+
+    def encode_pair(self, key: CountKey, count: int) -> Tuple[bytes, bytes]:
+        return self.encode_key(key), self.encode_count(count)
+
+    def decode_pair(self, key_: bytes, count_: bytes) -> Tuple[CountKey, int]:
+        return self.decode_key(key_), self.decode_count(count_)
+
+    def __iter__(self):
+        for key_ in self.dict.keys():
+            yield self.decode_key(key_)
+
+    def __len__(self) -> int:
+        return len(self.dict)
+
+    def __contains__(self, key: CountKey) -> bool:
+        key_ = self.encode_key(key)
+        return (key_ in self.cache) or (key_ in self.dict)
+
+    def get(self, key: CountKey, default=None):
+        key_ = self.encode_key(key)
+        if key_ in self.cache:
+            return self.decode_count(self.cache[key_])
+        else:
+            try:
+                return self.decode_count(self.dict[key_])
+            except KeyError:
+                return default
+
+    def __getitem__(self, key: CountKey) -> int:
+        key_ = self.encode_key(key)
+        try:
+            count_ = self.cache[key_]
+        except KeyError:
+            count_ = self.dict[key_]
+        return self.decode_count(count_)
+
+    def __setitem__(self, key: CountKey, count: int):
+        key_, count_ = self.encode_pair(key, count)
+        self.cache[key_] = self.dict[key_] = count_
+
+    def __delitem__(self, key: CountKey) -> None:
+        key_ = self.encode_key(key)
+        del self.dict[key_]
+        try:
+            del self.cache[key_]
+        except KeyError:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self):
+        self.close()
+
+    def __del__(self):
+        self.close()
+
+    def close(self):
+        try:
+            if self.dict is not None:
+                self.dict.close()
+        finally:
+            self.dict = None
+
+
+def open_count(
+    filename: os.PathLike,
+    protocol: Literal["c", "w", "r", "n"] = "c",
+    key_encoding: str = "utf-8",
+    separator: str = "\n",
+    max_cache_len: Optional[int] = 20_000,
+    max_cache_age_seconds: Optional[float] = 10.0,
+) -> DbfilenameCountDict:
+    return DbfilenameCountDict(
+        filename,
+        protocol,
+        key_encoding,
+        separator,
+        max_cache_len,
+        max_cache_age_seconds,
+    )
+
+
 def write_arpa(prob_list, out=sys.stdout):
     """Convert an lists of n-gram probabilities to arpa format
 
@@ -754,7 +895,7 @@ def _get_cond_mle(order, counts, vocab, k):
 
 
 def ngram_counts_to_prob_list_add_k(
-    ngram_counts, eps_lprob=DEFT_EPS_LPROB, k=DEFT_ADD_K_K
+    ngram_counts: CountDicts, eps_lprob=DEFT_EPS_LPROB, k=DEFT_ADD_K_K
 ):
     r"""MLE probabilities with constant discount factor added to counts
 
@@ -925,13 +1066,13 @@ def _simple_good_turing_counts(counts, eps_lprob):
     log_Np = np.log10((N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
     log_Np += max_log_r_star
     log_p_0 = log_r_star[0] - log_N
-    log_r_star[1:] += -log_Np + np.log10(1 - 10**log_p_0) + log_N
+    log_r_star[1:] += -log_Np + np.log10(1 - 10 ** log_p_0) + log_N
 
     return log_r_star
 
 
 def ngram_counts_to_prob_list_simple_good_turing(
-    ngram_counts, eps_lprob=DEFT_EPS_LPROB
+    ngram_counts: CountDicts, eps_lprob=DEFT_EPS_LPROB
 ):
     r"""Determine probabilities based on n-gram counts using simple good-turing
 
@@ -1093,7 +1234,7 @@ def _get_katz_discounted_counts(counts, k):
         log_num = log_num_minu + np.log1p(
             -(10 ** (log_subtra - log_num_minu))
         ) / np.log(10)
-        log_denom = np.log1p(-(10**log_subtra)) / np.log(10)
+        log_denom = np.log1p(-(10 ** log_subtra)) / np.log(10)
         log_d_rp1[:k] = log_num - log_denom
     else:
         log_d_rp1 = log_r_star[1:] - log_rp1[:-1]
@@ -1105,7 +1246,10 @@ def _get_katz_discounted_counts(counts, k):
 
 
 def ngram_counts_to_prob_list_katz_backoff(
-    ngram_counts, thresh=DEFAULT_KATZ_THRESH, eps_lprob=DEFT_EPS_LPROB, _cmu_hacks=False
+    ngram_counts: CountDicts,
+    thresh=DEFAULT_KATZ_THRESH,
+    eps_lprob=DEFT_EPS_LPROB,
+    _cmu_hacks=False,
 ):
     r"""Determine probabilities based on Katz's backoff algorithm
 
@@ -1260,7 +1404,7 @@ def ngram_counts_to_prob_list_katz_backoff(
             else:
                 lg_norm = lg_pref_counts[prefix]
             num_subtra = 10.0 ** (lg_num_subtra - lg_norm)
-            den_subtra = 10.0**lg_den_subtra
+            den_subtra = 10.0 ** lg_den_subtra
             if np.isclose(den_subtra, 1.0):  # 1 - den_subtra = 0
                 # If the denominator is zero, it means nothing we're backing
                 # off to has a nonzero probability. It doesn't really matter
@@ -1371,7 +1515,7 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
 
 
 def ngram_counts_to_prob_list_absolute_discounting(
-    ngram_counts, delta=None, to_prune=set()
+    ngram_counts: CountDicts, delta=None, to_prune=set()
 ):
     r"""Determine probabilities from n-gram counts using absolute discounting
 
@@ -1499,7 +1643,7 @@ def ngram_counts_to_prob_list_absolute_discounting(
 
 
 def ngram_counts_to_prob_list_kneser_ney(
-    ngram_counts, delta=None, sos=None, to_prune=set()
+    ngram_counts: CountDicts, delta=None, sos=None, to_prune=set()
 ):
     r"""Determine probabilities from counts using Kneser-Ney(-like) estimates
 
@@ -1773,12 +1917,12 @@ def titer_to_siter(
 
 def sents_to_ngram_counts(
     sents: Iterable[str],
-    N: Union[int, List[Dict[str, int]]],
+    N: Union[int, CountDicts],
     sos: str = "<S>",
     eos: str = "</S>",
     count_unigram_sos: bool = False,
     update_frequency: int = 10_000,
-) -> List[Dict[str, int]]:
+) -> CountDicts:
     """Count n-grams in sentence lists up to a maximum order
 
     Parameters
@@ -2076,10 +2220,7 @@ def main(args: Optional[Sequence[str]] = None):
     else:
         sents = options.sent_end_expr.split(options.in_file.read())
     sents = titer_to_siter(
-        sents,
-        options.word_delim_expr,
-        options.to_case,
-        options.trim_empty_sents,
+        sents, options.word_delim_expr, options.to_case, options.trim_empty_sents,
     )
 
     ngram_counts = sents_to_ngram_counts(

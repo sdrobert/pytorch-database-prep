@@ -14,6 +14,7 @@ dependencies:
   - requests
   - sentencepiece=0.1.95
   - jiwer
+  - expiringdict
   - pip:  # FIXME(sdrobert): Update to conda dep when pydrobert-pytorch and pydrobert-speech release >0.3.0
     - "git+https://github.com/sdrobert/pydrobert-pytorch.git@scpc"
     - "git+https://github.com/sdrobert/pydrobert-speech"

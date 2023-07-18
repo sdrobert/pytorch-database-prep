@@ -20,6 +20,7 @@ import warnings
 import sys
 import locale
 import re
+import shelve
 
 from collections import OrderedDict, Counter
 from collections.abc import Iterable
@@ -1772,10 +1773,11 @@ def titer_to_siter(
 
 def sents_to_ngram_counts(
     sents: Iterable[str],
-    max_order: int,
+    N: Union[int, List[Dict[str, int]]],
     sos: str = "<S>",
     eos: str = "</S>",
     count_unigram_sos: bool = False,
+    update_frequency: int = 10_000,
 ) -> List[Dict[str, int]]:
     """Count n-grams in sentence lists up to a maximum order
 
@@ -1783,8 +1785,10 @@ def sents_to_ngram_counts(
     ----------
     sents
         A list of sentences, where each sentence is a tuple of its words.
-    max_order
-        The maximum order (inclusive) of n-gram to count.
+    N
+        Either the maximum order (inclusive) of n-gram to count, or a list of
+        count dictionaries to populate of the same format as `ngram_counts`. In the
+        latter case, counts will be added to these dictionaries and returned.
     sos
         A token representing the start-of-sequence.
     eos
@@ -1792,12 +1796,15 @@ def sents_to_ngram_counts(
     count_unigram_sos
         If :obj:`False`, the unigram count of the start-of-sequence token will always be
         zero (though higher-order n-grams beginning with the SOS can have counts).
+    update_frequency
+        If `N` is a list of n-gram count dictionaries, this specifies the number of
+        sentences before counts are synchronized to `N`.
 
     Returns
     -------
     ngram_counts : list of dicts
-        A list of length `max_order` where ``ngram_counts[0]`` is a dictionary of
-        unigram counts, ``ngram_counts[1]`` of bigram counts, etc.
+        A list of the same length as the maximum order where ``ngram_counts[0]`` is a
+        dictionary of unigram counts, ``ngram_counts[1]`` of bigram counts, etc.
 
     Notes
     -----
@@ -1813,26 +1820,49 @@ def sents_to_ngram_counts(
     language model should never predict the next word to be the start-of-sequence token.
     Rather, it always exists prior to the first word being predicted. This exception can
     be disabled by setting `count_unigram_sos` to :obj:`True`.
+
+    See Also
+    --------
+    shelve
+        A module for creating disk-backed mutable dictionaries. Use as `N` to decrease
+        memory load.
     """
-    if max_order < 1:
-        raise ValueError("max_order ({}) must be >= 1".format(max_order))
-    ngram_counts = [Counter() for _ in range(max_order)]
+    if not isinstance(N, int):
+        if update_frequency < 1:
+            raise ValueError("update_frequency must be positive")
+        parent_counts, N = N, len(N)
+    else:
+        parent_counts = None
+    if N < 1:
+        raise ValueError("max order must be >= 1")
+    ngram_counts = [Counter() for _ in range(N)]
     ngram_counts[0].setdefault(sos, 0)
-    for sent in sents:
+    for i, sent in enumerate(sents):
         if {sos, eos} & set(sent):
             raise ValueError(
                 "start-of-sequence ({}) or end-of-sequence ({}) found in "
                 'sentence "{}"'.format(sos, eos, " ".join(sent))
             )
         sent = (sos,) + tuple(sent) + (eos,)
-        for order, counter in zip(range(1, max_order + 1), ngram_counts):
+        for order, counter in zip(range(1, N + 1), ngram_counts):
             if order == 1:
                 counter.update(sent if count_unigram_sos else sent[1:])
             else:
                 counter.update(
                     sent[s : s + order] for s in range(len(sent) - order + 1)
                 )
-    return ngram_counts
+        if parent_counts is not None and (i % update_frequency == 0):
+            for parent, counter in zip(parent_counts, ngram_counts):
+                for k, v in counter.items():
+                    parent[k] = parent.get(k, 0) + v
+                counter.clear()
+    if parent_counts is None:
+        return ngram_counts
+    else:
+        for parent, counter in zip(parent_counts, ngram_counts):
+            for k, v in counter.items():
+                parent[k] = parent.get(k, 0) + v
+        return parent_counts
 
 
 def _pos_int(val):
@@ -1854,24 +1884,31 @@ def main(args: Optional[Sequence[str]] = None):
 
     Convenient, but slow. You should prefer KenLM (https://github.com/kpu/kenlm).
 
-    Example call:
+    Example call (5-gram, modified Kneser-Ney, hapax pruning):
 
-        gunzip -c text.gz | python ngram_lm.py -o 5 | gzip -c > text.arpa.gz"""
+        gunzip -c text.gz | python ngram_lm.py -o 5 -t 1 | gzip -c > text.arpa.gz"""
 
     parser = argparse.ArgumentParser(
         description=main.__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Smoothing methods (--methods, -m):
 
-- abs: Absolute discounting
+- abs: absolute discounting
     Special flags:
-    - --delta,-d: Absolute discount to apply to non-zero values. A single value will
+      --delta,-d: Absolute discount to apply to non-zero values. A single value will
                   be applied to all orders; otherwise, one discount per order
-- add-k: Add k to counts, then MLE
+- add-k: add k to counts, then mle
     Speckal flags:
-    - --k,-k: The amount to add
+      --k,-k: The amount to add
 - katz: Katz backoff
-    - --katz-threshold: Discounting will not be applied above this threshold
-- 
+      --katz-threshold: Discounting will not be applied above this threshold
+- kn: modified Kneser-Ney
+      --delta,-d: Absolute discount to apply to non-zero values. A single value will
+                  be applied to all orders; otherwise, one discount per order. Note:
+                  specifying more than one value per order is not supported by this
+                  flag, whereas the default 
+- sgt: simple Good-Turing
+- mle: maximum likelihood estimate (no smoothing; no backoff)
 """,
     )
     parser.add_argument(
@@ -1939,18 +1976,21 @@ def main(args: Optional[Sequence[str]] = None):
     )
     parser.add_argument(
         "--prune-by-lprob-threshold",
+        metavar="FLOAT",
         type=float,
         default=None,
         help="If specified, remove any n-grams with log-prob lte this threshold",
     )
     parser.add_argument(
         "--prune-by-entropy-threshold",
+        metavar="FLOAT",
         type=float,
         default=None,
         help="If specified, prune by SRI's relative entropy criterion",
     )
     parser.add_argument(
         "--prune-by-count-thresholds",
+        "-t",
         metavar="NN_INT",
         type=_nonneg_int,
         nargs="+",
@@ -2049,7 +2089,7 @@ def main(args: Optional[Sequence[str]] = None):
 
     if options.prune_by_count_thresholds is not None:
         k = len(options.prune_by_count_thresholds) - 1
-        for i, counts in enumerate(ngram_counts[1:]):
+        for i, counts in enumerate(ngram_counts):
             t = options.prune_by_count_thresholds[min(i, k)]
             if t == 0:
                 continue

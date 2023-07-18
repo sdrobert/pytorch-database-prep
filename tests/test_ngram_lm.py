@@ -226,12 +226,19 @@ def test_text_to_sents():
     assert sents[4][-4:] == ("QUO", "VOLUPTAS", "NULLA", "PARIATUR")
 
 
-def test_sents_to_ngram_counts():
+@pytest.mark.parametrize("N_is_dict", [True, False], ids=["dict", "count"])
+def test_sents_to_ngram_counts(N_is_dict):
     sent = "what am I chopped liver".split()
     sents = [sent]
     for s in range(1, len(sent)):
         sents.append(sent[s:] + sent[:s])
-    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, len(sent) + 2)
+    N = len(sent) + 2
+    if N_is_dict:
+        dicts = []
+        for _ in range(N):
+            dicts.append(dict())
+        N = dicts
+    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, N, update_frequency=3)
     assert not ngram_counts[0]["<S>"]
     assert ngram_counts[0]["</S>"] == len(sents)
     for word in sent:

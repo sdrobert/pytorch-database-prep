@@ -20,10 +20,9 @@
 
 import os
 import argparse
-from typing import Dict, Generator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Generator, List, Literal, Optional, Sequence, Tuple, Union
 import warnings
 import sys
-import locale
 import re
 import dbm
 import struct
@@ -32,6 +31,8 @@ from collections import OrderedDict, Counter
 from collections.abc import Iterable, MutableMapping
 from itertools import product
 from typing_extensions import Final
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 import numpy as np
 
@@ -53,13 +54,15 @@ __all__ = [
     "open_count",
 ]
 
-DEFT_SENT_END_EXPR = re.compile(r"[.?!]+")
-DEFT_WORD_DELIM_EXPR = re.compile(r"\W+")
-DEFT_EPS_LPROB = -99.999
-DEFT_ADD_K_K = 0.5
-DEFAULT_KATZ_THRESH = 7
+DEFT_SENT_END_EXPR: Final[re.Pattern] = re.compile(r"[.?!]+")
+DEFT_WORD_DELIM_EXPR: Final[re.Pattern] = re.compile(r"\W+")
+DEFT_EPS_LPROB: Final[float] = -99.999
+DEFT_ADD_K_K: Final[float] = 0.5
+DEFAULT_KATZ_THRESH: Final[int] = 7
+COUNTFILE_FMT_NAME: Final[str] = "counts.{order}.db"
+COUNTFILE_COMPLETE_FMT_NAME: Final[str] = ".counts.{order}.complete"
 
-FALLBACK_DELTAS = (0.5, 1.0, 1.5)
+FALLBACK_DELTAS: Final[Tuple[float, float, float]] = (0.5, 1.0, 1.5)
 
 CountKey = Union[str, Tuple[str, ...]]
 CountDict = MutableMapping[CountKey, int]
@@ -648,7 +651,7 @@ class BackoffNGramLM(object):
 
 class DbfilenameCountDict(MutableMapping[CountKey, int]):
 
-    COUNT_FMT_STR: Final[str] = "!Q"
+    COUNT_STRUCT_FMT: Final[str] = "!Q"
 
     dict: MutableMapping[bytes, bytes]
     cache: MutableMapping[bytes, bytes]
@@ -684,12 +687,12 @@ class DbfilenameCountDict(MutableMapping[CountKey, int]):
         return key
 
     def encode_count(self, count: int) -> bytes:
-        return struct.pack(self.COUNT_FMT_STR, count)
+        return struct.pack(self.COUNT_STRUCT_FMT, count)
 
     encode_value = encode_count
 
     def decode_count(self, count_: bytes) -> int:
-        return struct.unpack(self.COUNT_FMT_STR, count_)[0]
+        return struct.unpack(self.COUNT_STRUCT_FMT, count_)[0]
 
     def encode_pair(self, key: CountKey, count: int) -> Tuple[bytes, bytes]:
         return self.encode_key(key), self.encode_count(count)
@@ -2066,7 +2069,7 @@ def main(args: Optional[Sequence[str]] = None):
     parser.add_argument(
         "--in-file",
         "-f",
-        metavar="FILE",
+        metavar="PTH",
         type=argparse.FileType("r"),
         default=sys.stdin,
         help="If specified, reads from this file instead of stdin",
@@ -2074,7 +2077,7 @@ def main(args: Optional[Sequence[str]] = None):
     parser.add_argument(
         "--out-file",
         "-O",
-        metavar="FILE",
+        metavar="PTH",
         type=argparse.FileType("w"),
         default=sys.stdout,
         help="If specified, writes to this file instead of stdout",
@@ -2146,6 +2149,19 @@ def main(args: Optional[Sequence[str]] = None):
         "not prune count-0 terms.",
     )
     parser.add_argument(
+        "--count-directory",
+        "-T",
+        metavar="PTH",
+        nargs="?",
+        const=1,
+        help="If specified, counts will be stored to files in this directory in order "
+        "to reduce memory pressure. If the flag is passed an argument, count files "
+        "will be stored in the provided directory. If count files up to the maximum "
+        "order have been previously completed and are stored in this directory, those "
+        "counts will be used instead of processing the input. If the flag is not "
+        "passed an argument, a temporary directory will be used",
+    )
+    parser.add_argument(
         "--eps-lprob",
         metavar="FLOAT",
         type=float,
@@ -2215,18 +2231,45 @@ def main(args: Optional[Sequence[str]] = None):
     prune_names = (tuple(options.word_delim_expr.split(x)) for x in prune_names if x)
     prune_names = {x[0] if len(x) == 1 else x for x in prune_names}
 
-    if options.sent_end_expr is None:
-        sents = (x.rstrip("\n") for x in options.in_file)
-    else:
-        sents = options.sent_end_expr.split(options.in_file.read())
-    sents = titer_to_siter(
-        sents, options.word_delim_expr, options.to_case, options.trim_empty_sents,
-    )
+    count_dir, N, ngram_counts = options.count_directory, options.max_order, None
+    if count_dir is not None:
+        if count_dir == 1:
+            count_dir_ = TemporaryDirectory()
+            count_dir = os.fspath(count_dir_.name)
+        os.makedirs(count_dir, exist_ok=True)
+        parent_dicts = []
+        orders_exist = True
+        for n in range(1, N + 1):
+            parent_dicts.append(
+                open_count(os.path.join(count_dir, COUNTFILE_FMT_NAME.format(order=n)))
+            )
+            orders_exist &= os.path.exists(
+                os.path.join(count_dir, COUNTFILE_COMPLETE_FMT_NAME.format(order=n))
+            )
+        if orders_exist:
+            ngram_counts = parent_dicts
+        else:
+            N = parent_dicts
+        del parent_dicts
 
-    ngram_counts = sents_to_ngram_counts(
-        sents, options.max_order, options.sos, options.eos, options.count_unigram_sos
-    )
-    del sents
+    if ngram_counts is None:
+        if options.sent_end_expr is None:
+            sents = (x.rstrip("\n") for x in options.in_file)
+        else:
+            sents = options.sent_end_expr.split(options.in_file.read())
+        sents = titer_to_siter(
+            sents, options.word_delim_expr, options.to_case, options.trim_empty_sents,
+        )
+
+        ngram_counts = sents_to_ngram_counts(
+            sents, N, options.sos, options.eos, options.count_unigram_sos
+        )
+        del sents
+
+        if count_dir is not None:
+            for n in range(1, len(N) + 1):
+                (Path(count_dir) / COUNTFILE_COMPLETE_FMT_NAME.format(order=n)).touch()
+    del N
 
     if options.prune_by_count_thresholds is not None:
         k = len(options.prune_by_count_thresholds) - 1

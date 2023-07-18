@@ -260,14 +260,14 @@ def test_count_open(tmp_path):
     dir_.mkdir()
     sents = ngram_lm.text_to_sents(LIPSUM)
     ngram_counts_a = ngram_lm.sents_to_ngram_counts(sents, 3)
-    
+
     with ngram_lm.open_count(dir_ / "1") as unigram, ngram_lm.open_count(
         dir_ / "2"
     ) as bigram, ngram_lm.open_count(dir_ / "3") as trigram:
         assert ngram_counts_a == ngram_lm.sents_to_ngram_counts(
             sents, [unigram, bigram, trigram]
         )
-    
+
     with ngram_lm.open_count(dir_ / "1") as unigram, ngram_lm.open_count(
         dir_ / "2"
     ) as bigram, ngram_lm.open_count(dir_ / "3") as trigram:
@@ -342,3 +342,48 @@ def test_prune_by_name():
     assert len(pruned_prob_list) == 1
     assert all(k == "QUI" or v == eps_lprob for (k, v) in pruned_prob_list[0].items())
     assert np.isclose(pruned_prob_list[0]["QUI"], 0.0)
+
+
+def test_cmd_with_saved_counts(tmp_path):
+    N = 3
+    text_file = tmp_path / "lipsum.txt"
+    text_file.write_text(LIPSUM)
+    arpa_file = tmp_path / "lm.arpa"
+    args = [
+        "-f",
+        str(text_file),
+        "-O",
+        str(arpa_file),
+        "-o",
+        str(N),
+        "-m",
+        "mle",
+    ]
+    assert not ngram_lm.main(args)
+    exp = parse_arpa_lm(str(arpa_file))
+    arpa_file.write_text("")
+    assert len(exp) == 3
+    assert all(len(counts) for counts in exp)
+
+    assert not ngram_lm.main(args + ["-T"])
+    act = parse_arpa_lm(str(arpa_file))
+    arpa_file.write_text("")
+    assert exp == act
+
+    count_dir = tmp_path / "counts"
+    count_dir.mkdir()
+    args.extend(["-T", str(count_dir)])
+    assert not ngram_lm.main(args)
+    for n in range(1, N + 1):
+        assert (
+            count_dir / ngram_lm.COUNTFILE_COMPLETE_FMT_NAME.format(order=n)
+        ).is_file()
+    act = parse_arpa_lm(str(arpa_file))
+    arpa_file.write_text("")
+    assert exp == act
+
+    text_file.write_text("")
+    assert not text_file.read_text()
+    assert not ngram_lm.main(args)
+    act = parse_arpa_lm(str(arpa_file))
+    assert exp == act

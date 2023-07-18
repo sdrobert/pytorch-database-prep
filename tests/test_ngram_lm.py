@@ -74,7 +74,7 @@ def test_katz_discounts(katz_ngram_counts):
         )
         act_dc = act_dc[1:]  # exclude r=0
         act_dc -= np.log10(np.arange(1, len(act_dc) + 1))
-        act_dc = 10 ** act_dc
+        act_dc = 10**act_dc
         assert np.allclose(act_dc[len(exp_dc) :], 1.0)
         # discount ratios have been rounded to precision 2 in arpa file
         assert np.allclose(act_dc[: len(exp_dc)], exp_dc, atol=1e-2)
@@ -238,7 +238,7 @@ def test_sents_to_ngram_counts(N_is_dict):
         for _ in range(N):
             dicts.append(dict())
         N = dicts
-    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, N, update_frequency=3)
+    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, N)
     assert not ngram_counts[0]["<S>"]
     assert ngram_counts[0]["</S>"] == len(sents)
     for word in sent:
@@ -376,7 +376,8 @@ def test_cmd_with_saved_counts(tmp_path):
     assert not ngram_lm.main(args)
     for n in range(1, N + 1):
         assert (
-            count_dir / ngram_lm.COUNTFILE_COMPLETE_FMT_NAME.format(order=n)
+            count_dir
+            / (ngram_lm.COUNTFILE_FMT_PREFIX.format(order=n) + ngram_lm.COMPLETE_SUFFIX)
         ).is_file()
     act = parse_arpa_lm(str(arpa_file))
     arpa_file.write_text("")
@@ -384,6 +385,17 @@ def test_cmd_with_saved_counts(tmp_path):
 
     text_file.write_text("")
     assert not text_file.read_text()
+    assert not ngram_lm.main(args)
+    act = parse_arpa_lm(str(arpa_file))
+    assert exp == act
+
+    text_file.write_text(LIPSUM)
+    os.unlink(
+        str(
+            count_dir
+            / (ngram_lm.COUNTFILE_FMT_PREFIX.format(order=1) + ngram_lm.COMPLETE_SUFFIX)
+        )
+    )
     assert not ngram_lm.main(args)
     act = parse_arpa_lm(str(arpa_file))
     assert exp == act

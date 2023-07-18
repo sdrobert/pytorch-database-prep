@@ -20,7 +20,7 @@
 
 import os
 import argparse
-from typing import Generator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Generator, Iterator, List, Literal, Optional, Sequence, Tuple, Union
 import warnings
 import sys
 import re
@@ -35,8 +35,6 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 
 import numpy as np
-
-from expiringdict import ExpiringDict
 
 __all__ = [
     "BackoffNGramLM",
@@ -59,8 +57,8 @@ DEFT_WORD_DELIM_EXPR: Final[re.Pattern] = re.compile(r"\W+")
 DEFT_EPS_LPROB: Final[float] = -99.999
 DEFT_ADD_K_K: Final[float] = 0.5
 DEFAULT_KATZ_THRESH: Final[int] = 7
-COUNTFILE_FMT_NAME: Final[str] = "counts.{order}.db"
-COUNTFILE_COMPLETE_FMT_NAME: Final[str] = ".counts.{order}.complete"
+COUNTFILE_FMT_PREFIX: Final[str] = "counts.{order}"
+COMPLETE_SUFFIX: Final[str] = ".complete"
 
 FALLBACK_DELTAS: Final[Tuple[float, float, float]] = (0.5, 1.0, 1.5)
 
@@ -238,7 +236,7 @@ class BackoffNGramLM(object):
                 denom = 0.0
                 for w, child in node.children.items():
                     assert child.lprob is not None
-                    num -= 10.0 ** child.lprob
+                    num -= 10.0**child.lprob
                     denom -= 10.0 ** self.conditional(h[1:] + (w,))
                 # these values may be ridiculously close to 1, but still valid.
                 if num < -1.0:
@@ -285,10 +283,10 @@ class BackoffNGramLM(object):
                     P_h = 10 ** self.log_prob(h, _srilm_hacks=_srilm_hacks)
                     for w, child in node.children.items():
                         assert child.lprob is not None
-                        num -= 10.0 ** child.lprob
+                        num -= 10.0**child.lprob
                         logP_w_given_hprime = self.conditional(h[1:] + (w,))
                         logP_w_given_hprimes.append(logP_w_given_hprime)
-                        denom -= 10.0 ** logP_w_given_hprime
+                        denom -= 10.0**logP_w_given_hprime
                     if num + 1 < eps or denom + 1 < eps:
                         warnings.warn(
                             "Malformed backoff weight for context {}. Leaving "
@@ -313,9 +311,9 @@ class BackoffNGramLM(object):
                         if child.bo:
                             continue  # don't prune children with backoffs
                         logP_w_given_h = child.lprob
-                        P_w_given_h = 10 ** logP_w_given_h
+                        P_w_given_h = 10**logP_w_given_h
                         logP_w_given_hprime = logP_w_given_hprimes[idx]
-                        P_w_given_hprime = 10 ** logP_w_given_hprime
+                        P_w_given_hprime = 10**logP_w_given_hprime
                         new_num = num + P_w_given_h
                         new_denom = denom + P_w_given_hprime
                         log_alphaprime = np.log1p(new_num)
@@ -327,7 +325,7 @@ class BackoffNGramLM(object):
                             P_w_given_h * log_delta_prob
                             + (log_alphaprime - log_alpha) * (1.0 + num)
                         )
-                        delta_perplexity = 10.0 ** KL - 1
+                        delta_perplexity = 10.0**KL - 1
                         if delta_perplexity < threshold:
                             node.children.pop(w)
                     # we don't have to set backoff properly (we'll renormalize at end).
@@ -649,8 +647,27 @@ class BackoffNGramLM(object):
         self.trie.prune_by_name(to_prune, eps_lprob)
 
 
-class DbfilenameCountDict(MutableMapping[CountKey, int]):
+class _NoCacheDict(MutableMapping):
+    def __init__(self) -> None:
+        super().__init__()
 
+    def __getitem__(self, key):
+        raise KeyError
+
+    def __setitem__(self, key, value) -> None:
+        pass
+
+    def __len__(self) -> int:
+        return 0
+
+    def __delitem__(self, key) -> None:
+        pass
+
+    def __iter__(self) -> Iterator:
+        return iter(tuple())
+
+
+class DbfilenameCountDict(MutableMapping[CountKey, int]):
     COUNT_STRUCT_FMT: Final[str] = "!Q"
 
     dict: MutableMapping[bytes, bytes]
@@ -671,7 +688,13 @@ class DbfilenameCountDict(MutableMapping[CountKey, int]):
             raise ValueError("separator cannot be empty")
         super().__init__()
         self.dict = dbm.open(os.fspath(filename), protocol)
-        self.cache = ExpiringDict(max_cache_len, max_cache_age_seconds)
+        try:
+            from expiringdict import ExpiringDict
+
+            self.cache = ExpiringDict(max_cache_len, max_cache_age_seconds)
+        except ImportError:
+            warnings.warn("expiringdict not installed. not caching counts")
+            self.cache = _NoCacheDict()
         self.key_encoding, self.separator = key_encoding, separator
 
     def encode_key(self, key: CountKey) -> bytes:
@@ -717,7 +740,8 @@ class DbfilenameCountDict(MutableMapping[CountKey, int]):
             return self.decode_count(self.cache[key_])
         else:
             try:
-                return self.decode_count(self.dict[key_])
+                count_ = self.cache[key_] = self.dict[key_]
+                return self.decode_count(count_)
             except KeyError:
                 return default
 
@@ -726,7 +750,7 @@ class DbfilenameCountDict(MutableMapping[CountKey, int]):
         try:
             count_ = self.cache[key_]
         except KeyError:
-            count_ = self.dict[key_]
+            count_ = self.cache[key_] = self.dict[key_]
         return self.decode_count(count_)
 
     def __setitem__(self, key: CountKey, count: int):
@@ -1069,7 +1093,7 @@ def _simple_good_turing_counts(counts, eps_lprob):
     log_Np = np.log10((N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
     log_Np += max_log_r_star
     log_p_0 = log_r_star[0] - log_N
-    log_r_star[1:] += -log_Np + np.log10(1 - 10 ** log_p_0) + log_N
+    log_r_star[1:] += -log_Np + np.log10(1 - 10**log_p_0) + log_N
 
     return log_r_star
 
@@ -1237,7 +1261,7 @@ def _get_katz_discounted_counts(counts, k):
         log_num = log_num_minu + np.log1p(
             -(10 ** (log_subtra - log_num_minu))
         ) / np.log(10)
-        log_denom = np.log1p(-(10 ** log_subtra)) / np.log(10)
+        log_denom = np.log1p(-(10**log_subtra)) / np.log(10)
         log_d_rp1[:k] = log_num - log_denom
     else:
         log_d_rp1 = log_r_star[1:] - log_rp1[:-1]
@@ -1407,7 +1431,7 @@ def ngram_counts_to_prob_list_katz_backoff(
             else:
                 lg_norm = lg_pref_counts[prefix]
             num_subtra = 10.0 ** (lg_num_subtra - lg_norm)
-            den_subtra = 10.0 ** lg_den_subtra
+            den_subtra = 10.0**lg_den_subtra
             if np.isclose(den_subtra, 1.0):  # 1 - den_subtra = 0
                 # If the denominator is zero, it means nothing we're backing
                 # off to has a nonzero probability. It doesn't really matter
@@ -1924,7 +1948,6 @@ def sents_to_ngram_counts(
     sos: str = "<S>",
     eos: str = "</S>",
     count_unigram_sos: bool = False,
-    update_frequency: int = 10_000,
 ) -> CountDicts:
     """Count n-grams in sentence lists up to a maximum order
 
@@ -1943,9 +1966,6 @@ def sents_to_ngram_counts(
     count_unigram_sos
         If :obj:`False`, the unigram count of the start-of-sequence token will always be
         zero (though higher-order n-grams beginning with the SOS can have counts).
-    update_frequency
-        If `N` is a list of n-gram count dictionaries, this specifies the number of
-        sentences before counts are synchronized to `N`.
 
     Returns
     -------
@@ -1975,8 +1995,6 @@ def sents_to_ngram_counts(
         memory load.
     """
     if not isinstance(N, int):
-        if update_frequency < 1:
-            raise ValueError("update_frequency must be positive")
         parent_counts, N = N, len(N)
     else:
         parent_counts = None
@@ -1984,7 +2002,7 @@ def sents_to_ngram_counts(
         raise ValueError("max order must be >= 1")
     ngram_counts = [Counter() for _ in range(N)]
     ngram_counts[0].setdefault(sos, 0)
-    for i, sent in enumerate(sents):
+    for sent in sents:
         if {sos, eos} & set(sent):
             raise ValueError(
                 "start-of-sequence ({}) or end-of-sequence ({}) found in "
@@ -1998,18 +2016,12 @@ def sents_to_ngram_counts(
                 counter.update(
                     sent[s : s + order] for s in range(len(sent) - order + 1)
                 )
-        if parent_counts is not None and (i % update_frequency == 0):
+        if parent_counts is not None:
             for parent, counter in zip(parent_counts, ngram_counts):
                 for k, v in counter.items():
                     parent[k] = parent.get(k, 0) + v
                 counter.clear()
-    if parent_counts is None:
-        return ngram_counts
-    else:
-        for parent, counter in zip(parent_counts, ngram_counts):
-            for k, v in counter.items():
-                parent[k] = parent.get(k, 0) + v
-        return parent_counts
+    return ngram_counts if parent_counts is None else parent_counts
 
 
 def _pos_int(val):
@@ -2237,20 +2249,22 @@ def main(args: Optional[Sequence[str]] = None):
             count_dir_ = TemporaryDirectory()
             count_dir = os.fspath(count_dir_.name)
         os.makedirs(count_dir, exist_ok=True)
-        parent_dicts = []
-        orders_exist = True
+        count_prefixes = []
+        all_complete = True
         for n in range(1, N + 1):
-            parent_dicts.append(
-                open_count(os.path.join(count_dir, COUNTFILE_FMT_NAME.format(order=n)))
-            )
-            orders_exist &= os.path.exists(
-                os.path.join(count_dir, COUNTFILE_COMPLETE_FMT_NAME.format(order=n))
-            )
-        if orders_exist:
-            ngram_counts = parent_dicts
+            count_prefix = os.path.join(count_dir, COUNTFILE_FMT_PREFIX.format(order=n))
+            complete_file = count_prefix + COMPLETE_SUFFIX
+            complete_file_exists = os.path.exists(complete_file)
+            all_complete &= complete_file_exists
+            count_prefixes.append(count_prefix)
+        if all_complete:
+            ngram_counts = [open_count(p, "r") for p in count_prefixes]
         else:
-            N = parent_dicts
-        del parent_dicts
+            N = []
+            for count_prefix in count_prefixes:
+                if os.path.exists(count_prefix + COMPLETE_SUFFIX):
+                    os.unlink(count_prefix + COMPLETE_SUFFIX)
+                N.append(open_count(count_prefix, "n"))
 
     if ngram_counts is None:
         if options.sent_end_expr is None:
@@ -2258,7 +2272,10 @@ def main(args: Optional[Sequence[str]] = None):
         else:
             sents = options.sent_end_expr.split(options.in_file.read())
         sents = titer_to_siter(
-            sents, options.word_delim_expr, options.to_case, options.trim_empty_sents,
+            sents,
+            options.word_delim_expr,
+            options.to_case,
+            options.trim_empty_sents,
         )
 
         ngram_counts = sents_to_ngram_counts(
@@ -2267,8 +2284,8 @@ def main(args: Optional[Sequence[str]] = None):
         del sents
 
         if count_dir is not None:
-            for n in range(1, len(N) + 1):
-                (Path(count_dir) / COUNTFILE_COMPLETE_FMT_NAME.format(order=n)).touch()
+            for count_prefix in count_prefixes:
+                Path(count_prefix + COMPLETE_SUFFIX).touch()
     del N
 
     if options.prune_by_count_thresholds is not None:
@@ -2307,6 +2324,9 @@ def main(args: Optional[Sequence[str]] = None):
         )
     else:  # mle
         prob_list = ngram_counts_to_prob_list_mle(ngram_counts, options.eps_lprob)
+    if count_dir is not None:
+        for counts in ngram_counts:
+            counts.close()
     del ngram_counts
 
     if (

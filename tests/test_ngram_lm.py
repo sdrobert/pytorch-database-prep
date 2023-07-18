@@ -227,7 +227,7 @@ def test_text_to_sents():
 
 
 @pytest.mark.parametrize("N_is_dict", [True, False], ids=["dict", "count"])
-def test_sents_to_ngram_counts(N_is_dict, tmp_path_factory):
+def test_sents_to_ngram_counts(N_is_dict):
     sent = "what am I chopped liver".split()
     sents = [sent]
     for s in range(1, len(sent)):
@@ -235,9 +235,8 @@ def test_sents_to_ngram_counts(N_is_dict, tmp_path_factory):
     N = len(sent) + 2
     if N_is_dict:
         dicts = []
-        dir_ = tmp_path_factory.mktemp("counts")
-        for n in range(N):
-            dicts.append(ngram_lm.open_count(dir_ / str(n)))
+        for _ in range(N):
+            dicts.append(dict())
         N = dicts
     ngram_counts = ngram_lm.sents_to_ngram_counts(sents, N, update_frequency=3)
     assert not ngram_counts[0]["<S>"]
@@ -254,6 +253,25 @@ def test_sents_to_ngram_counts(N_is_dict, tmp_path_factory):
     assert ngram_counts_b[0]["<S>"] == len(sents)
     ngram_counts_b[0]["<S>"] = 0
     assert ngram_counts == ngram_counts_b
+
+
+def test_count_open(tmp_path):
+    dir_ = tmp_path / "counts"
+    dir_.mkdir()
+    sents = ngram_lm.text_to_sents(LIPSUM)
+    ngram_counts_a = ngram_lm.sents_to_ngram_counts(sents, 3)
+    
+    with ngram_lm.open_count(dir_ / "1") as unigram, ngram_lm.open_count(
+        dir_ / "2"
+    ) as bigram, ngram_lm.open_count(dir_ / "3") as trigram:
+        assert ngram_counts_a == ngram_lm.sents_to_ngram_counts(
+            sents, [unigram, bigram, trigram]
+        )
+    
+    with ngram_lm.open_count(dir_ / "1") as unigram, ngram_lm.open_count(
+        dir_ / "2"
+    ) as bigram, ngram_lm.open_count(dir_ / "3") as trigram:
+        assert ngram_counts_a == [unigram, bigram, trigram]
 
 
 def test_prune_by_threshold():

@@ -434,67 +434,67 @@ def init_word(options):
         shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
 
 
-def train_custom_lm(config_dir, vocab, max_order, prune_counts):
-    sents = []
-    for fname in AM_FNAMES:
-        if not fname.startswith("train"):
-            continue
-        fname = fname.replace("-", "_")
-        trn_path = os.path.join(config_dir, fname + ".ref.trn")
-        if not os.path.exists(trn_path):
-            warnings.warn(
-                f"'{trn_path}' does not exist, so not using to train LM. If the file "
-                "is added later, you'll get a different LM if you rerun this stage. "
-                "You've been warned!"
-            )
-            continue
-        with open(trn_path) as f:
-            for line in f:
-                sent = line.strip().split()
-                sent.pop()  # utterance id
-                sents.append(sent)
+# def train_custom_lm(config_dir, vocab, max_order, prune_counts):
+#     sents = []
+#     for fname in AM_FNAMES:
+#         if not fname.startswith("train"):
+#             continue
+#         fname = fname.replace("-", "_")
+#         trn_path = os.path.join(config_dir, fname + ".ref.trn")
+#         if not os.path.exists(trn_path):
+#             warnings.warn(
+#                 f"'{trn_path}' does not exist, so not using to train LM. If the file "
+#                 "is added later, you'll get a different LM if you rerun this stage. "
+#                 "You've been warned!"
+#             )
+#             continue
+#         with open(trn_path) as f:
+#             for line in f:
+#                 sent = line.strip().split()
+#                 sent.pop()  # utterance id
+#                 sents.append(sent)
 
-    # count n-grams in sentences
-    ngram_counts = ngram_lm.sents_to_ngram_counts(
-        sents, max_order, sos="<s>", eos="</s>"
-    )
-    # ensure all vocab terms have unigram counts (even if 0) for zeroton
-    # interpolation
-    for v in vocab:
-        ngram_counts[0].setdefault(v, 0)
-    del sents
+#     # count n-grams in sentences
+#     ngram_counts = ngram_lm.sents_to_ngram_counts(
+#         sents, max_order, sos="<s>", eos="</s>"
+#     )
+#     # ensure all vocab terms have unigram counts (even if 0) for zeroton
+#     # interpolation
+#     for v in vocab:
+#         ngram_counts[0].setdefault(v, 0)
+#     del sents
 
-    to_prune = set(ngram_counts[0]) - vocab
-    for i, ngram_count in enumerate(ngram_counts[1:]):
-        if i >= len(prune_counts):
-            prune_count = prune_counts[-1]
-        else:
-            prune_count = prune_counts[i]
-        if i:
-            to_prune |= set(
-                k
-                for (k, v) in ngram_count.items()
-                if k[:-1] in to_prune or k[-1] in to_prune or v <= prune_count
-            )
-        else:
-            to_prune |= set(
-                k
-                for (k, v) in ngram_count.items()
-                if k[0] in to_prune or k[1] in to_prune or v <= prune_count
-            )
+#     to_prune = set(ngram_counts[0]) - vocab
+#     for i, ngram_count in enumerate(ngram_counts[1:]):
+#         if i >= len(prune_counts):
+#             prune_count = prune_counts[-1]
+#         else:
+#             prune_count = prune_counts[i]
+#         if i:
+#             to_prune |= set(
+#                 k
+#                 for (k, v) in ngram_count.items()
+#                 if k[:-1] in to_prune or k[-1] in to_prune or v <= prune_count
+#             )
+#         else:
+#             to_prune |= set(
+#                 k
+#                 for (k, v) in ngram_count.items()
+#                 if k[0] in to_prune or k[1] in to_prune or v <= prune_count
+#             )
 
-    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-        ngram_counts, sos="<s>", to_prune=to_prune
-    )
+#     prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
+#         ngram_counts, sos="<s>", to_prune=to_prune
+#     )
 
-    # remove start-of-sequence probability mass
-    lm = ngram_lm.BackoffNGramLM(prob_list, sos="<s>", eos="</s>", unk="<s>")
-    lm.prune_by_name({"<s>"})
-    prob_list = lm.to_prob_list()
+#     # remove start-of-sequence probability mass
+#     lm = ngram_lm.BackoffNGramLM(prob_list, sos="<s>", eos="</s>", unk="<s>")
+#     lm.prune_by_name({"<s>"})
+#     prob_list = lm.to_prob_list()
 
-    # save it
-    with gzip.open(os.path.join(config_dir, "lm.arpa.gz"), "wt") as file_:
-        ngram_lm.write_arpa(prob_list, file_)
+#     # save it
+#     with gzip.open(os.path.join(config_dir, "lm.arpa.gz"), "wt") as file_:
+#         ngram_lm.write_arpa(prob_list, file_)
 
 
 def init_char(options):
@@ -552,13 +552,13 @@ def init_char(options):
 
         shutil.copy(data_prefix + ".wav.scp", config_prefix + ".wav.scp")
 
-    if options.custom_lm_max_order > 0:
-        train_custom_lm(
-            config_dir,
-            set(vocab),
-            options.custom_lm_max_order,
-            options.custom_lm_prune_counts,
-        )
+    # if options.custom_lm_max_order > 0:
+    #     train_custom_lm(
+    #         config_dir,
+    #         set(vocab),
+    #         options.custom_lm_max_order,
+    #         options.custom_lm_prune_counts,
+    #     )
 
 
 def torch_dir(options):
@@ -904,28 +904,28 @@ def build_init_char_parser(subparsers):
         help="Name of sub directory in data/local/ under which to store setup "
         "specific to this lm. Defaults to 'char'.",
     )
-    parser.add_argument(
-        "--custom-lm-max-order",
-        type=int,
-        default=0,
-        help="If > 0, an n-gram LM with Modified Kneser-Ney smoothing will be created "
-        "from whatever training partition transcripts we have. NOTE: the n-gram LMs "
-        "available from OpenSLR train on much more text!",
-    )
-    parser.add_argument(
-        "--custom-lm-prune-counts",
-        type=int,
-        nargs="+",
-        default=[0],
-        help="Applies when --custom-lm-max_order is greater than 0. Prunes n-grams "
-        "less than or equal to this counts before saving the custom lm. The first "
-        "value passed is the threshold for bigrams, the second for trigrams, and so "
-        "on (unigrams are not pruned). If there are fewer counts than "
-        "--custom-lm-max-order, the last count is duplicated for the higher-order "
-        "n-grams. E.g. '--custom-lm-prune-counts 1 2 3' prunes bigrams with a count in "
-        "0-1, trigrams with a count in 0-2, and everything higher with a count of 3 or "
-        "less",
-    )
+    # parser.add_argument(
+    #     "--custom-lm-max-order",
+    #     type=int,
+    #     default=0,
+    #     help="If > 0, an n-gram LM with Modified Kneser-Ney smoothing will be created "
+    #     "from whatever training partition transcripts we have. NOTE: the n-gram LMs "
+    #     "available from OpenSLR train on much more text!",
+    # )
+    # parser.add_argument(
+    #     "--custom-lm-prune-counts",
+    #     type=int,
+    #     nargs="+",
+    #     default=[0],
+    #     help="Applies when --custom-lm-max_order is greater than 0. Prunes n-grams "
+    #     "less than or equal to this counts before saving the custom lm. The first "
+    #     "value passed is the threshold for bigrams, the second for trigrams, and so "
+    #     "on (unigrams are not pruned). If there are fewer counts than "
+    #     "--custom-lm-max-order, the last count is duplicated for the higher-order "
+    #     "n-grams. E.g. '--custom-lm-prune-counts 1 2 3' prunes bigrams with a count in "
+    #     "0-1, trigrams with a count in 0-2, and everything higher with a count of 3 or "
+    #     "less",
+    # )
 
 
 def build_torch_dir_parser(subparsers):

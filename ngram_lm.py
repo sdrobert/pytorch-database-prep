@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
-# DbfilenameCountDict is based off the Python module `shelve`, which is PSF-licensed.
+# DbFileCountDict is based off the Python module `shelve`, which is PSF-licensed.
 #
 #   https://docs.python.org/3/license.html
 
@@ -24,7 +24,6 @@ from typing import Generator, Iterator, List, Literal, Optional, Sequence, Tuple
 import warnings
 import sys
 import re
-import dbm
 import struct
 
 from collections import OrderedDict, Counter
@@ -48,7 +47,7 @@ __all__ = [
     "sents_to_ngram_counts",
     "text_to_sents",
     "write_arpa",
-    "DbfilenameCountDict",
+    "DbFileCountDict",
     "open_count",
 ]
 
@@ -59,6 +58,8 @@ DEFT_ADD_K_K: Final[float] = 0.5
 DEFAULT_KATZ_THRESH: Final[int] = 7
 COUNTFILE_FMT_PREFIX: Final[str] = "counts.{order}"
 COMPLETE_SUFFIX: Final[str] = ".complete"
+DEFT_MAX_CACHE_LEN: Final[int] = 1_000_000
+DEFT_MAX_CACHE_AGE_SECONDS: Final[float] = 10.0
 
 FALLBACK_DELTAS: Final[Tuple[float, float, float]] = (0.5, 1.0, 1.5)
 
@@ -236,7 +237,7 @@ class BackoffNGramLM(object):
                 denom = 0.0
                 for w, child in node.children.items():
                     assert child.lprob is not None
-                    num -= 10.0**child.lprob
+                    num -= 10.0 ** child.lprob
                     denom -= 10.0 ** self.conditional(h[1:] + (w,))
                 # these values may be ridiculously close to 1, but still valid.
                 if num < -1.0:
@@ -283,10 +284,10 @@ class BackoffNGramLM(object):
                     P_h = 10 ** self.log_prob(h, _srilm_hacks=_srilm_hacks)
                     for w, child in node.children.items():
                         assert child.lprob is not None
-                        num -= 10.0**child.lprob
+                        num -= 10.0 ** child.lprob
                         logP_w_given_hprime = self.conditional(h[1:] + (w,))
                         logP_w_given_hprimes.append(logP_w_given_hprime)
-                        denom -= 10.0**logP_w_given_hprime
+                        denom -= 10.0 ** logP_w_given_hprime
                     if num + 1 < eps or denom + 1 < eps:
                         warnings.warn(
                             "Malformed backoff weight for context {}. Leaving "
@@ -311,9 +312,9 @@ class BackoffNGramLM(object):
                         if child.bo:
                             continue  # don't prune children with backoffs
                         logP_w_given_h = child.lprob
-                        P_w_given_h = 10**logP_w_given_h
+                        P_w_given_h = 10 ** logP_w_given_h
                         logP_w_given_hprime = logP_w_given_hprimes[idx]
-                        P_w_given_hprime = 10**logP_w_given_hprime
+                        P_w_given_hprime = 10 ** logP_w_given_hprime
                         new_num = num + P_w_given_h
                         new_denom = denom + P_w_given_hprime
                         log_alphaprime = np.log1p(new_num)
@@ -325,7 +326,7 @@ class BackoffNGramLM(object):
                             P_w_given_h * log_delta_prob
                             + (log_alphaprime - log_alpha) * (1.0 + num)
                         )
-                        delta_perplexity = 10.0**KL - 1
+                        delta_perplexity = 10.0 ** KL - 1
                         if delta_perplexity < threshold:
                             node.children.pop(w)
                     # we don't have to set backoff properly (we'll renormalize at end).
@@ -667,7 +668,7 @@ class _NoCacheDict(MutableMapping):
         return iter(tuple())
 
 
-class DbfilenameCountDict(MutableMapping[CountKey, int]):
+class DbFileCountDict(MutableMapping[CountKey, int]):
     COUNT_STRUCT_FMT: Final[str] = "!Q"
 
     dict: MutableMapping[bytes, bytes]
@@ -677,23 +678,25 @@ class DbfilenameCountDict(MutableMapping[CountKey, int]):
 
     def __init__(
         self,
-        filename: os.PathLike,
-        protocol: Literal["c", "w", "r", "n"] = "c",
+        dict: MutableMapping[bytes, bytes],
         key_encoding: str = "utf-8",
         separator: str = "\n",
-        max_cache_len: Optional[int] = 20_000,
-        max_cache_age_seconds: Optional[float] = 10.0,
+        max_cache_len: Optional[int] = DEFT_MAX_CACHE_LEN,
+        max_cache_age_seconds: Optional[float] = DEFT_MAX_CACHE_AGE_SECONDS,
     ) -> None:
         if not len(separator):
             raise ValueError("separator cannot be empty")
         super().__init__()
-        self.dict = dbm.open(os.fspath(filename), protocol)
-        try:
-            from expiringdict import ExpiringDict
+        self.dict = dict
+        if max_cache_age_seconds * max_cache_len > 0:
+            try:
+                from expiringdict import ExpiringDict
 
-            self.cache = ExpiringDict(max_cache_len, max_cache_age_seconds)
-        except ImportError:
-            warnings.warn("expiringdict not installed. not caching counts")
+                self.cache = ExpiringDict(max_cache_len, max_cache_age_seconds)
+            except ImportError:
+                warnings.warn("expiringdict not installed. not caching counts")
+                self.cache = _NoCacheDict()
+        else:
             self.cache = _NoCacheDict()
         self.key_encoding, self.separator = key_encoding, separator
 
@@ -724,7 +727,7 @@ class DbfilenameCountDict(MutableMapping[CountKey, int]):
         return self.decode_key(key_), self.decode_count(count_)
 
     def __iter__(self):
-        for key_ in self.dict.keys():
+        for key_ in self.dict:
             yield self.decode_key(key_)
 
     def __len__(self) -> int:
@@ -784,19 +787,25 @@ class DbfilenameCountDict(MutableMapping[CountKey, int]):
 
 def open_count(
     filename: os.PathLike,
-    protocol: Literal["c", "w", "r", "n"] = "c",
+    protocol: str = "c",
     key_encoding: str = "utf-8",
     separator: str = "\n",
-    max_cache_len: Optional[int] = 20_000,
-    max_cache_age_seconds: Optional[float] = 10.0,
-) -> DbfilenameCountDict:
-    return DbfilenameCountDict(
-        filename,
-        protocol,
-        key_encoding,
-        separator,
-        max_cache_len,
-        max_cache_age_seconds,
+    max_cache_len: Optional[int] = DEFT_MAX_CACHE_LEN,
+    max_cache_age_seconds: Optional[float] = DEFT_MAX_CACHE_AGE_SECONDS,
+) -> DbFileCountDict:
+    try:
+        import diskcache
+
+        os.makedirs(filename, exist_ok=True)
+        dict = diskcache.FanoutCache(os.fspath(filename), timeout=max_cache_age_seconds)
+        max_cache_age_seconds = 0
+    except ImportError:
+        import dbm
+
+        dict = dbm.open(os.fspath(filename), protocol)
+
+    return DbFileCountDict(
+        dict, key_encoding, separator, max_cache_len, max_cache_age_seconds,
     )
 
 
@@ -1093,7 +1102,7 @@ def _simple_good_turing_counts(counts, eps_lprob):
     log_Np = np.log10((N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
     log_Np += max_log_r_star
     log_p_0 = log_r_star[0] - log_N
-    log_r_star[1:] += -log_Np + np.log10(1 - 10**log_p_0) + log_N
+    log_r_star[1:] += -log_Np + np.log10(1 - 10 ** log_p_0) + log_N
 
     return log_r_star
 
@@ -1261,7 +1270,7 @@ def _get_katz_discounted_counts(counts, k):
         log_num = log_num_minu + np.log1p(
             -(10 ** (log_subtra - log_num_minu))
         ) / np.log(10)
-        log_denom = np.log1p(-(10**log_subtra)) / np.log(10)
+        log_denom = np.log1p(-(10 ** log_subtra)) / np.log(10)
         log_d_rp1[:k] = log_num - log_denom
     else:
         log_d_rp1 = log_r_star[1:] - log_rp1[:-1]
@@ -1431,7 +1440,7 @@ def ngram_counts_to_prob_list_katz_backoff(
             else:
                 lg_norm = lg_pref_counts[prefix]
             num_subtra = 10.0 ** (lg_num_subtra - lg_norm)
-            den_subtra = 10.0**lg_den_subtra
+            den_subtra = 10.0 ** lg_den_subtra
             if np.isclose(den_subtra, 1.0):  # 1 - den_subtra = 0
                 # If the denominator is zero, it means nothing we're backing
                 # off to has a nonzero probability. It doesn't really matter
@@ -2045,7 +2054,8 @@ def main(args: Optional[Sequence[str]] = None):
 
     Example call (5-gram, modified Kneser-Ney, hapax pruning):
 
-        gunzip -c text.gz | python ngram_lm.py -o 5 -t 1 | gzip -c > text.arpa.gz"""
+        gunzip -c text.gz | python ngram_lm.py -o 5 -t 1 | gzip -c > text.arpa.gz
+    """
 
     parser = argparse.ArgumentParser(
         description=main.__doc__,
@@ -2174,6 +2184,22 @@ def main(args: Optional[Sequence[str]] = None):
         "passed an argument, a temporary directory will be used",
     )
     parser.add_argument(
+        "--max-cache-age-seconds",
+        metavar="SEC",
+        type=float,
+        default=DEFT_MAX_CACHE_AGE_SECONDS,
+        help="When --count-directory/-T is specified, how many seconds before cache "
+        "elements expire",
+    )
+    parser.add_argument(
+        "--max-cache-len",
+        metavar="SEC",
+        type=float,
+        default=DEFT_MAX_CACHE_LEN,
+        help="When --count-directory/-T is specified, the maximum number of elements "
+        "which can exist in the cache of a single order of n-gram counts",
+    )
+    parser.add_argument(
         "--eps-lprob",
         metavar="FLOAT",
         type=float,
@@ -2258,13 +2284,24 @@ def main(args: Optional[Sequence[str]] = None):
             all_complete &= complete_file_exists
             count_prefixes.append(count_prefix)
         if all_complete:
-            ngram_counts = [open_count(p, "r") for p in count_prefixes]
+            # fire-hose read. Bad for cache
+            ngram_counts = [
+                open_count(p, "r", max_cache_len=1, max_cache_age_seconds=1)
+                for p in count_prefixes
+            ]
         else:
             N = []
             for count_prefix in count_prefixes:
                 if os.path.exists(count_prefix + COMPLETE_SUFFIX):
                     os.unlink(count_prefix + COMPLETE_SUFFIX)
-                N.append(open_count(count_prefix, "n"))
+                N.append(
+                    open_count(
+                        count_prefix,
+                        "n",
+                        max_cache_len=options.max_cache_len,
+                        max_cache_age_seconds=options.max_cache_age_seconds,
+                    )
+                )
 
     if ngram_counts is None:
         if options.sent_end_expr is None:
@@ -2272,10 +2309,7 @@ def main(args: Optional[Sequence[str]] = None):
         else:
             sents = options.sent_end_expr.split(options.in_file.read())
         sents = titer_to_siter(
-            sents,
-            options.word_delim_expr,
-            options.to_case,
-            options.trim_empty_sents,
+            sents, options.word_delim_expr, options.to_case, options.trim_empty_sents,
         )
 
         ngram_counts = sents_to_ngram_counts(

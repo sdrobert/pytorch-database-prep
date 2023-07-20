@@ -34,7 +34,6 @@ import glob
 import zlib
 import gzip
 
-import ngram_lm
 import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
@@ -75,7 +74,6 @@ FILE2MD5 = {
     "4-gram.arpa.gz": "6abdcd5b055bd482e4f9defe91d40408",
     "dev-clean.tar.gz": "42e2234ba48799c1f50f24a7926300a1",
     "dev-other.tar.gz": "c8d0bcc9cca99d4f8b62fcc847357931",
-    "intro-disclaimers.tar.gz": "92ba57a9611a70fd7d34b73249ae48cf",
     "librispeech-lexicon.txt": "28f72663f6bfed7cd346283c064c315b",
     "librispeech-lm-norm.txt.gz": "c83c64c726a1aedfe65f80aa311de402",
     "librispeech-vocab.txt": "bf3cc7a50112831ed8b0afa40cae96a5",
@@ -87,7 +85,23 @@ FILE2MD5 = {
     "train-clean-100.tar.gz": "2a93770f6d5c6c964bc36631d331a522",
     "train-clean-360.tar.gz": "c0e676e450a7ff2f54aeade5171606fa",
     "train-other-500.tar.gz": "d1a0fd59409feb2c614ce4d30c387708",
+    "librispeech-lm-norm.txt": "",
+    "3-gram.arpa": "a0ec91600ddb252336ad25155b0e3df2",
+    "3-gram.pruned.1e-7.arpa": "ed88f43704a5c3f77ba45480b077b8ca",
+    "3-gram.pruned.3e-7.arpa": "77b6d41e621dbaaf0de62edcda60f090",
+    "4-gram.arpa": "cb45826852ef06a4a2150ab5f31ff36e",
 }
+
+DOWNLOADABLE = sorted(
+    set(FILE2MD5)
+    - {
+        "librispeech-lm-norm.txt",
+        "3-gram.arpa",
+        "3-gram.pruned.1e-7.arpa",
+        "3-gram.pruned.3e-7.arpa",
+        "4-gram.arpa",
+    }
+)
 
 DEFT_HOST = "https://www.openslr.org"
 REGION_MIRRORS = {
@@ -210,16 +224,43 @@ def download(options):
 
     for file_ in lm_files:
         path = os.path.join(lmdir, file_)
-        if os.path.exists(path) and FILE2MD5[file_] == get_file_md5(path, chunk_size):
-            print(f"'{path}' already exists and has correct md5sum. Not redownloading")
-        else:
-            url = urllib.parse.urljoin(host + "/", f"{LM_URL_PATH}/{file_}")
-            print(
-                f"'{path}' either does not exist or is corrupted. Downloading '{url}'"
-            )
-            download_file(url, path, chunk_size)
-            if FILE2MD5[file_] != get_file_md5(path, chunk_size):
-                raise ValueError(f"Downloaded '{path}' does not match md5sum!")
+        extracted_ok = False
+        can_extract = file_ in LM_FILES
+        if can_extract:
+            extracted_path = path[:-3]  # remove .gz
+            if os.path.exists(extracted_path) and FILE2MD5[file_[:-3]] == get_file_md5(
+                extracted_path, chunk_size
+            ):
+                print(
+                    f"'{extracted_path}' already exists and has correct md5sum. Not "
+                    "redownloading compressed file"
+                )
+                extracted_ok = True
+        if not extracted_ok:
+            if os.path.exists(path) and FILE2MD5[file_] == get_file_md5(
+                path, chunk_size
+            ):
+                print(
+                    f"'{path}' already exists and has correct md5sum. Not redownloading"
+                )
+            else:
+                url = urllib.parse.urljoin(host + "/", f"{LM_URL_PATH}/{file_}")
+                print(
+                    f"'{path}' either does not exist or is corrupted. Downloading '{url}'"
+                )
+                download_file(url, path, chunk_size)
+                if FILE2MD5[file_] != get_file_md5(path, chunk_size):
+                    raise ValueError(f"Downloaded '{path}' does not match md5sum!")
+        if can_extract:
+            if options.extract_lm_files and not extracted_ok:
+                print(f"Extracting '{path}'")
+                with gzip.open(path, "rb") as in_, open(extracted_path, "wb") as out:
+                    shutil.copyfileobj(in_, out)
+                if FILE2MD5[file_[:-3]] != get_file_md5(extracted_path, chunk_size):
+                    raise ValueError(f"Extraction of '{path}' failed!")
+            if options.extract_lm_files and not options.dirty:
+                print(f"Deleting '{path}'")
+                os.remove(path)
 
 
 def find_file(root, file_name, allow_missing=False):
@@ -384,12 +425,12 @@ def init_word(options):
     config_dir = os.path.join(local_dir, options.config_subdir)
 
     vocab_txt = find_file(libri_dir, "librispeech-vocab.txt")
-    vocab = {"<s>", "</s>", "<UNK>"}
+    vocab = set()
     with open(vocab_txt) as f:
         for line in f:
             vocab.add(line.strip())
     vocab = sorted(vocab)
-    assert len(vocab) == 200_003
+    assert len(vocab) == 200_000
 
     os.makedirs(config_dir, exist_ok=True)
 
@@ -403,10 +444,14 @@ def init_word(options):
     for file_ in ("utt2spk", "spk2utt", "spk2gender"):
         shutil.copy(os.path.join(data_dir, file_), os.path.join(config_dir, file_))
 
-    lm_path = find_file(libri_dir, options.lm_name + ".arpa.gz", True)
+    lm_path = find_file(libri_dir, options.lm_name + ".arpa", True)
+    suffix = ""
+    if lm_path is None or not os.path.isfile(lm_path):
+        lm_path = find_file(libri_dir, options.lm_name + ".arpa.gz", True)
+        suffix = ".gz"
     if lm_path is not None and os.path.isfile(lm_path):
         # we copy in the next step
-        dst = os.path.join(config_dir, "lm.arpa.gz")
+        dst = os.path.join(config_dir, "lm.arpa" + suffix)
         if os.path.exists(dst):
             os.unlink(dst)
         os.link(lm_path, dst)
@@ -510,7 +555,7 @@ def init_char(options):
     config_dir = os.path.join(local_dir, options.config_subdir)
 
     vocab_txt = find_file(libri_dir, "librispeech-vocab.txt")
-    vocab = {"<s>", "</s>", "_", "<UNK>"}
+    vocab = {"_"}
     with open(vocab_txt) as f:
         for line in f:
             vocab.update(line.strip())
@@ -561,6 +606,122 @@ def init_char(options):
     #     )
 
 
+def init_subword(options):
+
+    import sentencepiece as spm
+
+    local_dir = os.path.join(options.data_root, "local")
+    data_dir = os.path.join(local_dir, "data")
+    if not os.path.isdir(data_dir):
+        raise ValueError("{} does not exist; call preamble first!".format(data_dir))
+    if options.librispeech_root is None:
+        libri_dir = data_dir
+    else:
+        libri_dir = options.librispeech_root
+    config_dir = os.path.join(local_dir, options.config_subdir)
+    spm_prefix = os.path.join(config_dir, "spm")
+    vocab_size = options.vocab_size
+    algorithm = options.algorithm
+
+    os.makedirs(config_dir, exist_ok=True)
+
+    for file_ in ("utt2spk", "spk2utt", "spk2gender"):
+        shutil.copy(os.path.join(data_dir, file_), os.path.join(config_dir, file_))
+
+    train_txt = os.path.join(config_dir, "librispeech-lm-norm.txt")
+    if not os.path.exists(train_txt):
+        # see if the user's already extracted the training data in the librispeech
+        # directory
+        train_txt_ = find_file(libri_dir, "librispeech-lm-norm.txt", True)
+        if train_txt_ is None or not os.path.isfile(train_txt_):
+            train_gz = find_file(libri_dir, "librispeech-lm-norm.txt.gz", True)
+            if train_gz is None:
+                # did the user maybe unzip already?
+                train_txt = find_file(libri_dir, "librispeech-lm-norm.txt", True)
+                if train_txt is None:
+                    raise ValueError(
+                        f"Could not find librispeech-lm-norm.txt.gz in '{libri_dir}'. "
+                        "This file is not downloaded by default with the "
+                        f"'{os.basename(__file__)} download' command, but is necessary "
+                        "to build the subword vocabulary. Please use the --files flag "
+                        "to download it"
+                    )
+            print(
+                f"Extracting '{train_gz}' into '{config_dir}'. This might be wasteful. "
+                f"Consider extracting '{train_gz}' into '{libri_dir}' to avoid "
+                "re-extraction"
+            )
+            train_txt_ = train_txt + "_"
+            with gzip.open(train_gz, "rb") as in_, open(train_txt_, "wb") as out:
+                shutil.copyfileobj(in_, out)
+            shutil.move(train_txt_, train_txt)
+        else:
+            train_txt = train_txt_
+
+    spm.SentencePieceTrainer.Train(
+        f"--input={train_txt} --model_prefix={spm_prefix} --model_type={algorithm} "
+        f"--vocab_size={vocab_size + 1} --unk_id={vocab_size} --bos_id=-1 --eos_id=-1 "
+        "--pad_id=-1"
+    )
+
+    spm_vocab = spm_prefix + ".vocab"
+    print(f"Determining vocab from '{spm_vocab}'")
+    vocab = []
+    with open(os.path.join(config_dir, "id2token.txt"), "w") as id2t, open(
+        os.path.join(config_dir, "token2id.txt"), "w"
+    ) as t2id, open(spm_prefix + ".vocab", encoding="utf-8") as spm_vocab:
+        for i, line in enumerate(spm_vocab):
+            word, _ = line.strip().split()
+            # replace the control character that sentencepiece uses with an
+            # underscore
+            word = word.replace("\u2581", "_")
+            if word == "<unk>":
+                break  # last word, but don't use it
+            t2id.write("{} {}\n".format(word, i))
+            id2t.write("{} {}\n".format(i, word))
+            vocab.append(word)
+
+    # with open(os.path.join(config_dir, "token2id.txt"), "w") as token2id, open(
+    #     os.path.join(config_dir, "id2token.txt"), "w"
+    # ) as id2token:
+    #     for id_, token in enumerate(vocab):
+    #         token2id.write(f"{token} {id_}\n")
+    #         id2token.write(f"{id_} {token}\n")
+
+    spm_model = spm_prefix + ".model"
+    print(f"Loading model '{spm_model}'")
+    sp = spm.SentencePieceProcessor()
+    sp.load(spm_model)
+
+    for fname in AM_FNAMES + TRAIN_SUBSETS:
+        fname = fname.replace("-", "_")
+        config_prefix = os.path.join(config_dir, fname)
+        data_prefix = os.path.join(data_dir, fname)
+        text_file = data_prefix + ".text"
+        ref_trn = config_prefix + ".ref.trn"
+        wav_scp = config_prefix + ".wav.scp"
+        if not os.path.isfile(text_file):
+            if fname not in TRAIN_SUBSETS:
+                if fname in {"train_clean_360", "train_other_500"}:
+                    warnings.warn(f"'{text_file}' does not exist. Skipping partition")
+                else:
+                    raise ValueError(
+                        f"'{text_file}' does not exist (did you finish preamble?)"
+                    )
+            continue
+
+        print(f"Writing '{ref_trn}'")
+        with open(text_file) as in_, open(ref_trn, "w") as out:
+            for line in in_:
+                utt_id, trans = line.strip().split(" ", maxsplit=1)
+                trans = sp.encode_as_ids(trans)
+                trans = " ".join(vocab[id_] for id_ in trans)
+                out.write(trans + f" ({utt_id})\n")
+
+        print(f"Writing '{wav_scp}'")
+        shutil.copy(data_prefix + ".wav.scp", wav_scp)
+
+
 def torch_dir(options):
     local_dir = os.path.join(options.data_root, "local")
     if options.config_subdir is None:
@@ -590,9 +751,11 @@ def torch_dir(options):
     for file_ in ("utt2spk", "spk2utt", "spk2gender", "id2token.txt", "token2id.txt"):
         shutil.copy(os.path.join(config_dir, file_), os.path.join(ext, file_))
 
-    lm_arpa_gz = os.path.join(config_dir, "lm.arpa.gz")
-    if os.path.exists(lm_arpa_gz):
-        shutil.copy(lm_arpa_gz, ext)
+    lm_path = os.path.join(config_dir, "lm.arpa")
+    if os.path.exists(lm_path):
+        shutil.copy(lm_path, ext)
+    elif os.path.exists(lm_path + ".gz"):
+        shutil.copy(lm_path + ".gz", ext)
 
     fnames = tuple(x.replace("-", "_") for x in AM_FNAMES)
     if options.force_compute_subsets:
@@ -760,6 +923,7 @@ def build_parser():
     build_preamble_parser(subparsers)
     build_init_word_parser(subparsers)
     build_init_char_parser(subparsers)
+    build_init_subword_parser(subparsers)
     build_torch_dir_parser(subparsers)
 
     return parser
@@ -787,15 +951,24 @@ def build_download_parser(subparsers):
         help="The size of the buffer to work with when downloading/extracting. Larger "
         "means more memory usage, but possibly faster.",
     )
+    parser.add_argument(
+        "--extract-lm-files",
+        action="store_true",
+        default=False,
+        help="In addition to downloading lm resources, extract them in-place. NOTE: "
+        "future downloads of the compressed file will be skipped if the extracted "
+        "file exists",
+    )
+
     dl_grp = parser.add_mutually_exclusive_group()
     dl_grp.add_argument(
         "--files",
         nargs="+",
         metavar="FNAME",
-        choices=sorted(FILE2MD5),
+        choices=DOWNLOADABLE,
         default=None,
         help="If passed, download (and extract, where appropriate) only the files "
-        f"specified here. Permitted: {', '.join(FILE2MD5)}",
+        f"specified here. Permitted: {', '.join(DOWNLOADABLE)}",
     )
     dl_grp.add_argument(
         "--lm",
@@ -926,6 +1099,43 @@ def build_init_char_parser(subparsers):
     #     "0-1, trigrams with a count in 0-2, and everything higher with a count of 3 or "
     #     "less",
     # )
+
+
+def build_init_subword_parser(subparsers):
+    parser = subparsers.add_parser(
+        "init_subword",
+        help="Perform setup common to all subword-based parsing. "
+        "Needs to be done only once for a specific vocabulary size and subword algo. "
+        "Requires SentencePiece",
+    )
+    parser.add_argument(
+        "librispeech_root",
+        nargs="?",
+        type=os.path.abspath,
+        default=None,
+        help="The root of the librispeech data directory. Contains 'dev-clean', "
+        "'train-clean-360', etc. If unset, will check the 'local/data/' subfolder of "
+        "the data folder (the default storage location of the 'download' command).",
+    )
+    parser.add_argument(
+        "--config-subdir",
+        default="subword",
+        help="Name of sub directory in data/local/ under which to store setup "
+        "specific to this lm. Defaults to 'char'.",
+    )
+    parser.add_argument(
+        "--vocab-size",
+        type=int,
+        default=1_000,
+        help="Size of subword vocabulary. Defaults to 1k "
+        "(https://arxiv.org/pdf/1805.03294)",
+    )
+    parser.add_argument(
+        "--algorithm",
+        choices=["bpe", "unigram"],
+        default="bpe",
+        help="What algorithm to use to determine subwords",
+    )
 
 
 def build_torch_dir_parser(subparsers):
@@ -1061,6 +1271,8 @@ def main(args=None):
         init_word(options)
     elif options.command == "init_char":
         init_char(options)
+    elif options.command == "init_subword":
+        init_subword(options)
     elif options.command == "torch_dir":
         torch_dir(options)
     else:

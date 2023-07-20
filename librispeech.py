@@ -85,7 +85,7 @@ FILE2MD5 = {
     "train-clean-100.tar.gz": "2a93770f6d5c6c964bc36631d331a522",
     "train-clean-360.tar.gz": "c0e676e450a7ff2f54aeade5171606fa",
     "train-other-500.tar.gz": "d1a0fd59409feb2c614ce4d30c387708",
-    "librispeech-lm-norm.txt": "",
+    "librispeech-lm-norm.txt": "c8288034566b62698db24f6cd414160d",
     "3-gram.arpa": "a0ec91600ddb252336ad25155b0e3df2",
     "3-gram.pruned.1e-7.arpa": "ed88f43704a5c3f77ba45480b077b8ca",
     "3-gram.pruned.3e-7.arpa": "77b6d41e621dbaaf0de62edcda60f090",
@@ -607,7 +607,6 @@ def init_char(options):
 
 
 def init_subword(options):
-
     import sentencepiece as spm
 
     local_dir = os.path.join(options.data_root, "local")
@@ -860,7 +859,6 @@ def torch_dir(options):
             ref_trn,
             token2id_txt,
             ref_dir,
-            "--unk-symbol=<UNK>",
             "--num-workers",
             num_workers,
             "--skip-frame-times",

@@ -907,9 +907,6 @@ def train(options: argparse.Namespace):
             recognizer, [local_rank], local_rank
         )
 
-    if not isinstance(recognizer, EncoderDecoderSpeechRecognizer):
-        dparams.eos = None
-
     if tparams.optimizer == "adamw":
         Optimizer = torch.optim.AdamW
     elif tparams.optimizer == "adam":
@@ -1039,10 +1036,6 @@ def decode(options: argparse.Namespace):
     recognizer.to(options.device)
     recognizer.eval()
 
-    eos = dparams.eos
-    if not isinstance(recognizer, EncoderDecoderSpeechRecognizer):
-        dparams.eos = None
-
     ds = SpectDataSet(
         options.data_dir,
         params=dparams,
@@ -1060,8 +1053,8 @@ def decode(options: argparse.Namespace):
         lens = torch.tensor([feats.size(0)], device=options.device)
         hyps, lens = recognizer.decode(feats, lens)
         hyp = hyps[: lens[0], 0].cpu()
-        if eos is not None:
-            eos_mask = (hyp == eos).cumsum(0).bool()
+        if dparams.eos is not None:
+            eos_mask = (hyp == dparams.eos).cumsum(0).bool()
             hyp = hyp.masked_select(~eos_mask)
         torch.save(hyp, os.path.join(options.hyp_dir, uttid + ".pt"))
 

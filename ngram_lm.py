@@ -237,7 +237,7 @@ class BackoffNGramLM(object):
                 denom = 0.0
                 for w, child in node.children.items():
                     assert child.lprob is not None
-                    num -= 10.0 ** child.lprob
+                    num -= 10.0**child.lprob
                     denom -= 10.0 ** self.conditional(h[1:] + (w,))
                 # these values may be ridiculously close to 1, but still valid.
                 if num < -1.0:
@@ -284,10 +284,10 @@ class BackoffNGramLM(object):
                     P_h = 10 ** self.log_prob(h, _srilm_hacks=_srilm_hacks)
                     for w, child in node.children.items():
                         assert child.lprob is not None
-                        num -= 10.0 ** child.lprob
+                        num -= 10.0**child.lprob
                         logP_w_given_hprime = self.conditional(h[1:] + (w,))
                         logP_w_given_hprimes.append(logP_w_given_hprime)
-                        denom -= 10.0 ** logP_w_given_hprime
+                        denom -= 10.0**logP_w_given_hprime
                     if num + 1 < eps or denom + 1 < eps:
                         warnings.warn(
                             "Malformed backoff weight for context {}. Leaving "
@@ -312,9 +312,9 @@ class BackoffNGramLM(object):
                         if child.bo:
                             continue  # don't prune children with backoffs
                         logP_w_given_h = child.lprob
-                        P_w_given_h = 10 ** logP_w_given_h
+                        P_w_given_h = 10**logP_w_given_h
                         logP_w_given_hprime = logP_w_given_hprimes[idx]
-                        P_w_given_hprime = 10 ** logP_w_given_hprime
+                        P_w_given_hprime = 10**logP_w_given_hprime
                         new_num = num + P_w_given_h
                         new_denom = denom + P_w_given_hprime
                         log_alphaprime = np.log1p(new_num)
@@ -326,7 +326,7 @@ class BackoffNGramLM(object):
                             P_w_given_h * log_delta_prob
                             + (log_alphaprime - log_alpha) * (1.0 + num)
                         )
-                        delta_perplexity = 10.0 ** KL - 1
+                        delta_perplexity = 10.0**KL - 1
                         if delta_perplexity < threshold:
                             node.children.pop(w)
                     # we don't have to set backoff properly (we'll renormalize at end).
@@ -727,7 +727,7 @@ class DbFileCountDict(MutableMapping[CountKey, int]):
         return self.decode_key(key_), self.decode_count(count_)
 
     def __iter__(self):
-        for key_ in self.dict:
+        for key_ in self.dict.keys():
             yield self.decode_key(key_)
 
     def __len__(self) -> int:
@@ -798,6 +798,7 @@ def open_count(
 
         os.makedirs(filename, exist_ok=True)
         dict = diskcache.FanoutCache(os.fspath(filename), timeout=max_cache_age_seconds)
+        dict.keys = dict.__iter__
         max_cache_age_seconds = 0
     except ImportError:
         import dbm
@@ -805,7 +806,11 @@ def open_count(
         dict = dbm.open(os.fspath(filename), protocol)
 
     return DbFileCountDict(
-        dict, key_encoding, separator, max_cache_len, max_cache_age_seconds,
+        dict,
+        key_encoding,
+        separator,
+        max_cache_len,
+        max_cache_age_seconds,
     )
 
 
@@ -1102,7 +1107,7 @@ def _simple_good_turing_counts(counts, eps_lprob):
     log_Np = np.log10((N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
     log_Np += max_log_r_star
     log_p_0 = log_r_star[0] - log_N
-    log_r_star[1:] += -log_Np + np.log10(1 - 10 ** log_p_0) + log_N
+    log_r_star[1:] += -log_Np + np.log10(1 - 10**log_p_0) + log_N
 
     return log_r_star
 
@@ -1270,7 +1275,7 @@ def _get_katz_discounted_counts(counts, k):
         log_num = log_num_minu + np.log1p(
             -(10 ** (log_subtra - log_num_minu))
         ) / np.log(10)
-        log_denom = np.log1p(-(10 ** log_subtra)) / np.log(10)
+        log_denom = np.log1p(-(10**log_subtra)) / np.log(10)
         log_d_rp1[:k] = log_num - log_denom
     else:
         log_d_rp1 = log_r_star[1:] - log_rp1[:-1]
@@ -1440,7 +1445,7 @@ def ngram_counts_to_prob_list_katz_backoff(
             else:
                 lg_norm = lg_pref_counts[prefix]
             num_subtra = 10.0 ** (lg_num_subtra - lg_norm)
-            den_subtra = 10.0 ** lg_den_subtra
+            den_subtra = 10.0**lg_den_subtra
             if np.isclose(den_subtra, 1.0):  # 1 - den_subtra = 0
                 # If the denominator is zero, it means nothing we're backing
                 # off to has a nonzero probability. It doesn't really matter
@@ -2052,9 +2057,9 @@ def main(args: Optional[Sequence[str]] = None):
 
     Convenient, but slow. You should prefer KenLM (https://github.com/kpu/kenlm).
 
-    Example call (5-gram, modified Kneser-Ney, hapax pruning):
+    Example call (5-gram, modified Kneser-Ney, hapax >1-gram pruning):
 
-        gunzip -c text.gz | python ngram_lm.py -o 5 -t 1 | gzip -c > text.arpa.gz
+        gunzip -c text.gz | python ngram_lm.py -o 5 -t 0 1 | gzip -c > text.arpa.gz
     """
 
     parser = argparse.ArgumentParser(
@@ -2309,7 +2314,10 @@ def main(args: Optional[Sequence[str]] = None):
         else:
             sents = options.sent_end_expr.split(options.in_file.read())
         sents = titer_to_siter(
-            sents, options.word_delim_expr, options.to_case, options.trim_empty_sents,
+            sents,
+            options.word_delim_expr,
+            options.to_case,
+            options.trim_empty_sents,
         )
 
         ngram_counts = sents_to_ngram_counts(
@@ -2326,6 +2334,8 @@ def main(args: Optional[Sequence[str]] = None):
         k = len(options.prune_by_count_thresholds) - 1
         for i, counts in enumerate(ngram_counts):
             t = options.prune_by_count_thresholds[min(i, k)]
+            if i == 0 and t > 0:
+                warnings.warn("Possibly pruning unigrams. You probably don't want this")
             if t == 0:
                 continue
             prune_names.update(k for (k, v) in counts.items() if v <= t)

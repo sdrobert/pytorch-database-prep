@@ -891,16 +891,24 @@ def train(options: argparse.Namespace):
 
     torch.autograd.set_detect_anomaly(True)
 
+    if options.quiet:
+        print_ = lambda x: None
+    else:
+        print_ = print
+
+    print_("Constructing model...")
     recognizer = construct_baseline(
         bparams, beam_width=0, dropout=tparams.dropout, eos=dparams.eos
     )
     if options.init_state_dict:
+        print_("loading initial state dict...")
         recognizer.load_state_dict(torch.load(options.init_state_dict, "cpu"))
         # don't let controller reset the parameters at epoch 0
         recognizer.reset_parameters = lambda *args, **kwargs: None
     recognizer.to(options.device)
 
     if options.distributed_backend is not None:
+        print_("initializing backend...")
         torch.distributed.init_process_group(options.distributed_backend)
         local_rank = os.environ.get("LOCAL_RANK")
         recognizer = torch.nn.parallel.DistributedDataParallel(
@@ -921,6 +929,7 @@ def train(options: argparse.Namespace):
         optimizer = Optimizer(
             recognizer.parameters(), lr=10**tparams.log10_learning_rate
         )
+    print_("Creating controller and possibly loading model/optimizer...")
     controller = TrainingStateController(
         tparams, options.state_csv_path, options.state_dir
     )
@@ -929,6 +938,7 @@ def train(options: argparse.Namespace):
     init_epoch = controller.get_last_epoch() + 1
     total_epochs = (tparams.num_epochs + 1) if tparams.num_epochs else 10_000
 
+    print_("Creating data loaders...")
     tdl = SpectDataLoader(
         options.train_dir,
         dparams,
@@ -953,10 +963,8 @@ def train(options: argparse.Namespace):
     )
     if options.quiet:
         get_tdl, get_vdl = (lambda: tdl), (lambda: vdl)
-        print_ = lambda x: None
     else:
         get_tdl, get_vdl = (lambda: tqdm(tdl)), (lambda: tqdm(vdl))
-        print_ = print
 
     spec_aug = SpecAugment(
         tparams.spec_aug_max_time_warp,
@@ -1006,7 +1014,13 @@ def decode(options: argparse.Namespace):
     dparams: SpectDataParams = options.dparams
     bparams.initialize_missing()
 
+    if options.quiet:
+        print_ = lambda x: None
+    else:
+        print_ = print
+
     if options.lookup_lm_state_dict is not None:
+        print_("Loading LM...")
         lm_state_dict: dict = torch.load(options.lookup_lm_state_dict)
         sos = lm_state_dict.pop("sos")
         vocab_size = lm_state_dict.pop("vocab_size", None)
@@ -1022,6 +1036,7 @@ def decode(options: argparse.Namespace):
     else:
         lm = None
 
+    print_("Constructing model...")
     recognizer = construct_baseline(
         bparams,
         lm,
@@ -1032,10 +1047,12 @@ def decode(options: argparse.Namespace):
         options.max_hyp_len,
     )
     # FIXME(sdrobert): lm + search shouldn't be included in the state dict.
+    print_("Loading the model state dict...")
     recognizer.load_state_dict(torch.load(options.model, "cpu"), False)
     recognizer.to(options.device)
     recognizer.eval()
 
+    print_("Creating dataset...")
     ds = SpectDataSet(
         options.data_dir,
         params=dparams,
@@ -1046,8 +1063,12 @@ def decode(options: argparse.Namespace):
         tokens_only=True,
     )
 
+    if not options.quiet:
+        ds = tqdm(ds)
+
     os.makedirs(options.hyp_dir, exist_ok=True)
 
+    print_("Beginning decoding...")
     for feat, _, uttid in ds:
         feats = feat.unsqueeze(1).to(options.device)
         lens = torch.tensor([feats.size(0)], device=options.device)
@@ -1057,6 +1078,7 @@ def decode(options: argparse.Namespace):
             eos_mask = (hyp == dparams.eos).cumsum(0).bool()
             hyp = hyp.masked_select(~eos_mask)
         torch.save(hyp, os.path.join(options.hyp_dir, uttid + ".pt"))
+    print("Done decoding")
 
 
 def main(args: Optional[Sequence[str]] = None):
@@ -1222,8 +1244,14 @@ def main(args: Optional[Sequence[str]] = None):
     decode_parser.add_argument(
         "hyp_dir", help="Directory to store hypothesis transcriptions"
     )
+    decode_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Whether to perform decoding quietly",
+    )
 
-    options = parser.parse_args()
+    options = parser.parse_args(args)
     if options.device is None:
         if torch.cuda.is_available():
             options.device = torch.device(torch.cuda.current_device())

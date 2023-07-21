@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# DbFileCountDict is based off the Python module `shelve`, which is PSF-licensed.
+# DbCountDict is based off the Python module `shelve`, which is PSF-licensed.
 #
 #   https://docs.python.org/3/license.html
 
@@ -19,8 +19,19 @@
 # limitations under the License.
 
 import os
+import abc
 import argparse
-from typing import Generator, Iterator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import (
+    Generator,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    TypeVar,
+)
 import warnings
 import sys
 import re
@@ -47,7 +58,7 @@ __all__ = [
     "sents_to_ngram_counts",
     "text_to_sents",
     "write_arpa",
-    "DbFileCountDict",
+    "DbCountDict",
     "open_count",
 ]
 
@@ -63,9 +74,11 @@ DEFT_MAX_CACHE_AGE_SECONDS: Final[float] = 10.0
 
 FALLBACK_DELTAS: Final[Tuple[float, float, float]] = (0.5, 1.0, 1.5)
 
-CountKey = Union[str, Tuple[str, ...]]
-CountDict = MutableMapping[CountKey, int]
+Ngram = Union[str, Tuple[str, ...]]
+CountDict = MutableMapping[Ngram, int]
 CountDicts = List[CountDict]
+ProbDict = MutableMapping[Ngram, float]
+ProbDicts = List[ProbDict]
 
 warnings.simplefilter("error", RuntimeWarning)
 
@@ -79,7 +92,7 @@ class BackoffNGramLM(object):
 
     Parameters
     ----------
-    prob_list : sequence
+    prob_dicts : sequence
         See :mod:`pydrobert.torch.util.parse_arpa_lm`
     sos : str, optional
         The start-of-sequence symbol. When calculating the probability of a
@@ -97,14 +110,14 @@ class BackoffNGramLM(object):
         ``'<unk>'``
     """
 
-    def __init__(self, prob_list, sos=None, eos=None, unk=None):
+    def __init__(self, prob_dicts: ProbDicts, sos=None, eos=None, unk=None):
         self.trie = self.TrieNode(0.0, 0.0)
         self.vocab = set()
-        if not len(prob_list) or not len(prob_list[0]):
-            raise ValueError("prob_list must contain (all) unigrams")
-        for order, dict_ in enumerate(prob_list):
+        if not len(prob_dicts) or not len(prob_dicts[0]):
+            raise ValueError("prob_dicts must contain (all) unigrams")
+        for order, dict_ in enumerate(prob_dicts):
             is_first = not order
-            is_last = order == len(prob_list) - 1
+            is_last = order == len(prob_dicts) - 1
             for context, value in dict_.items():
                 if is_first:
                     self.vocab.add(context)
@@ -149,7 +162,7 @@ class BackoffNGramLM(object):
                 "Out-of-vocabulary tokens will raise an error".format(unk)
             )
             self.unk = None
-        assert self.trie.depth == len(prob_list)
+        assert self.trie.depth == len(prob_dicts)
 
     class TrieNode(object):
         def __init__(self, lprob, bo):
@@ -668,18 +681,28 @@ class _NoCacheDict(MutableMapping):
         return iter(tuple())
 
 
-class DbFileCountDict(MutableMapping[CountKey, int]):
-    COUNT_STRUCT_FMT: Final[str] = "!Q"
+V = TypeVar("V")
 
-    dict: MutableMapping[bytes, bytes]
+
+class DbNgramDict(MutableMapping[Ngram, V]):
+    VALUE_FMT: str = NotImplemented
+
+    store: MutableMapping[bytes, bytes]
     cache: MutableMapping[bytes, bytes]
-    key_encoding: str
+    ngram_encoding: str
     separator: str
+
+    @classmethod
+    def __init_subclass__(cls, *args, **kwargs):
+        super().__init_subclass__(*args, **kwargs)
+
+        if cls.VALUE_FMT is NotImplemented:
+            raise NotImplementedError(f"{cls} needs to define VALUE_FMT")
 
     def __init__(
         self,
-        dict: MutableMapping[bytes, bytes],
-        key_encoding: str = "utf-8",
+        store: MutableMapping[bytes, bytes],
+        ngram_encoding: str = "utf-8",
         separator: str = "\n",
         max_cache_len: Optional[int] = DEFT_MAX_CACHE_LEN,
         max_cache_age_seconds: Optional[float] = DEFT_MAX_CACHE_AGE_SECONDS,
@@ -687,7 +710,7 @@ class DbFileCountDict(MutableMapping[CountKey, int]):
         if not len(separator):
             raise ValueError("separator cannot be empty")
         super().__init__()
-        self.dict = dict
+        self.store = store
         if max_cache_age_seconds * max_cache_len > 0:
             try:
                 from expiringdict import ExpiringDict
@@ -698,73 +721,71 @@ class DbFileCountDict(MutableMapping[CountKey, int]):
                 self.cache = _NoCacheDict()
         else:
             self.cache = _NoCacheDict()
-        self.key_encoding, self.separator = key_encoding, separator
+        self.ngram_encoding, self.separator = ngram_encoding, separator
 
-    def encode_key(self, key: CountKey) -> bytes:
-        if not isinstance(key, str):
-            key = self.separator.join(key)
-        return key.encode(self.key_encoding)
+    def encode_ngram(self, ngram: Ngram) -> bytes:
+        if not isinstance(ngram, str):
+            ngram = self.separator.join(ngram)
+        return ngram.encode(self.ngram_encoding)
 
-    def decode_key(self, key_: bytes) -> CountKey:
-        key = key_.decode(self.key_encoding)
+    def decode_ngram(self, ngram_b: bytes) -> Ngram:
+        key = ngram_b.decode(self.ngram_encoding)
         assert isinstance(key, str)
         if self.separator in key:
             key = tuple(key.split(self.separator))
         return key
 
-    def encode_count(self, count: int) -> bytes:
-        return struct.pack(self.COUNT_STRUCT_FMT, count)
+    def encode_value(self, val: V) -> bytes:
+        return struct.pack(self.VALUE_FMT, val)
 
-    encode_value = encode_count
+    def decode_value(self, val_b: bytes) -> V:
+        return struct.unpack(self.VALUE_FMT, val_b)[0]
 
-    def decode_count(self, count_: bytes) -> int:
-        return struct.unpack(self.COUNT_STRUCT_FMT, count_)[0]
+    def encode_pair(self, ngram: Ngram, val: V) -> Tuple[bytes, bytes]:
+        return self.encode_ngram(ngram), self.encode_value(val)
 
-    def encode_pair(self, key: CountKey, count: int) -> Tuple[bytes, bytes]:
-        return self.encode_key(key), self.encode_count(count)
-
-    def decode_pair(self, key_: bytes, count_: bytes) -> Tuple[CountKey, int]:
-        return self.decode_key(key_), self.decode_count(count_)
+    def decode_pair(self, ngram_b: bytes, val_b: bytes) -> Tuple[Ngram, V]:
+        return self.decode_ngram(ngram_b), self.decode_value(val_b)
 
     def __iter__(self):
-        for key_ in self.dict.keys():
-            yield self.decode_key(key_)
+        for ngram_b in self.store.keys():
+            yield self.decode_ngram(ngram_b)
 
     def __len__(self) -> int:
-        return len(self.dict)
+        return len(self.store)
 
-    def __contains__(self, key: CountKey) -> bool:
-        key_ = self.encode_key(key)
-        return (key_ in self.cache) or (key_ in self.dict)
+    def __contains__(self, ngram_b: Ngram) -> bool:
+        ngram_b = self.encode_ngram(ngram_b)
+        return (ngram_b in self.cache) or (ngram_b in self.store)
 
-    def get(self, key: CountKey, default=None):
-        key_ = self.encode_key(key)
-        if key_ in self.cache:
-            return self.decode_count(self.cache[key_])
+    def get(self, ngram_b: Ngram, default=None):
+        ngram_b = self.encode_ngram(ngram_b)
+        if ngram_b in self.cache:
+            return self.decode_value(self.cache[ngram_b])
         else:
             try:
-                count_ = self.cache[key_] = self.dict[key_]
-                return self.decode_count(count_)
+                val_b = self.cache[ngram_b] = self.store[ngram_b]
+                return self.decode_value(val_b)
             except KeyError:
                 return default
 
-    def __getitem__(self, key: CountKey) -> int:
-        key_ = self.encode_key(key)
+    def __getitem__(self, key: Ngram) -> V:
+        ngram_b = self.encode_ngram(key)
         try:
-            count_ = self.cache[key_]
+            val_b = self.cache[ngram_b]
         except KeyError:
-            count_ = self.cache[key_] = self.dict[key_]
-        return self.decode_count(count_)
+            val_b = self.cache[ngram_b] = self.store[ngram_b]
+        return self.decode_value(val_b)
 
-    def __setitem__(self, key: CountKey, count: int):
-        key_, count_ = self.encode_pair(key, count)
-        self.cache[key_] = self.dict[key_] = count_
+    def __setitem__(self, ngram: Ngram, val: V):
+        ngram_b, val_b = self.encode_pair(ngram, val)
+        self.cache[ngram_b] = self.store[ngram_b] = val_b
 
-    def __delitem__(self, key: CountKey) -> None:
-        key_ = self.encode_key(key)
-        del self.dict[key_]
+    def __delitem__(self, ngram: Ngram) -> None:
+        ngram_b = self.encode_ngram(ngram)
+        del self.store[ngram_b]
         try:
-            del self.cache[key_]
+            del self.cache[ngram_b]
         except KeyError:
             pass
 
@@ -779,57 +800,63 @@ class DbFileCountDict(MutableMapping[CountKey, int]):
 
     def close(self):
         try:
-            if self.dict is not None:
-                self.dict.close()
+            if self.store is not None and hasattr(self.store, "close"):
+                self.store.close()
         finally:
-            self.dict = None
+            self.store = None
+
+
+class DbCountDict(DbNgramDict[int]):
+    VALUE_FMT: Final[str] = "!Q"
 
 
 def open_count(
     filename: os.PathLike,
     protocol: str = "c",
-    key_encoding: str = "utf-8",
+    ngram_encoding: str = "utf-8",
     separator: str = "\n",
     max_cache_len: Optional[int] = DEFT_MAX_CACHE_LEN,
     max_cache_age_seconds: Optional[float] = DEFT_MAX_CACHE_AGE_SECONDS,
-) -> DbFileCountDict:
+) -> DbCountDict:
     try:
         import diskcache
 
         os.makedirs(filename, exist_ok=True)
-        dict = diskcache.FanoutCache(os.fspath(filename), timeout=max_cache_age_seconds)
-        dict.keys = dict.__iter__
+        store = diskcache.FanoutCache(
+            os.fspath(filename), timeout=max_cache_age_seconds
+        )
+        store.keys = store.__iter__
         max_cache_age_seconds = 0
     except ImportError:
         import dbm
 
-        dict = dbm.open(os.fspath(filename), protocol)
+        store = dbm.open(os.fspath(filename), protocol)
 
-    return DbFileCountDict(
-        dict,
-        key_encoding,
+    return DbCountDict(
+        store,
+        ngram_encoding,
         separator,
         max_cache_len,
         max_cache_age_seconds,
     )
 
 
-def write_arpa(prob_list, out=sys.stdout):
+def write_arpa(prob_dicts: ProbDicts, out=sys.stdout):
     """Convert an lists of n-gram probabilities to arpa format
 
     The inverse operation of :func:`pydrobert.torch.util.parse_arpa_lm`
 
     Parameters
     ----------
-    prob_list : list of dict
+    prob_dicts : list of dict
     out : file or str, optional
         Path or file object to output to
     """
     if isinstance(out, str):
         with open(out, "w") as f:
-            return write_arpa(prob_list, f)
+            return write_arpa(prob_dicts, f)
     entries_by_order = []
-    for idx, dict_ in enumerate(prob_list):
+    for idx, dict_ in enumerate(prob_dicts):
         entries = sorted((k, v) if idx else ((k,), v) for (k, v) in dict_.items())
         entries_by_order.append(entries)
     out.write("\\data\\\n")

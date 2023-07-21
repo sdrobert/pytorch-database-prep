@@ -500,17 +500,17 @@ def init_word(options):
 #                 sents.append(sent)
 
 #     # count n-grams in sentences
-#     ngram_counts = ngram_lm.sents_to_ngram_counts(
+#     count_dicts = ngram_lm.sents_to_count_dicts(
 #         sents, max_order, sos="<s>", eos="</s>"
 #     )
 #     # ensure all vocab terms have unigram counts (even if 0) for zeroton
 #     # interpolation
 #     for v in vocab:
-#         ngram_counts[0].setdefault(v, 0)
+#         count_dicts[0].setdefault(v, 0)
 #     del sents
 
-#     to_prune = set(ngram_counts[0]) - vocab
-#     for i, ngram_count in enumerate(ngram_counts[1:]):
+#     to_prune = set(count_dicts[0]) - vocab
+#     for i, count_dict in enumerate(count_dicts[1:]):
 #         if i >= len(prune_counts):
 #             prune_count = prune_counts[-1]
 #         else:
@@ -518,18 +518,18 @@ def init_word(options):
 #         if i:
 #             to_prune |= set(
 #                 k
-#                 for (k, v) in ngram_count.items()
+#                 for (k, v) in count_dict.items()
 #                 if k[:-1] in to_prune or k[-1] in to_prune or v <= prune_count
 #             )
 #         else:
 #             to_prune |= set(
 #                 k
-#                 for (k, v) in ngram_count.items()
+#                 for (k, v) in count_dict.items()
 #                 if k[0] in to_prune or k[1] in to_prune or v <= prune_count
 #             )
 
-#     prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-#         ngram_counts, sos="<s>", to_prune=to_prune
+#     prob_list = ngram_lm.count_dicts_to_prob_list_kneser_ney(
+#         count_dicts, sos="<s>", to_prune=to_prune
 #     )
 
 #     # remove start-of-sequence probability mass

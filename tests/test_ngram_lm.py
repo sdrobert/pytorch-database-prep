@@ -35,24 +35,24 @@ RE_DIR = os.path.join(os.path.dirname(__file__), "re_pruning")
 
 
 @pytest.fixture
-def katz_ngram_counts():
+def katz_count_dicts():
     # CMU derives lower-order n-grams from higher-order n-grams by summing
     # up prefixes, e.g.:
     # C(a, b) = sum_c C(a, b, c)
     # This is not sufficient to recover the actual counts since we lose
     # sentence-final (n-1)-grams, but whatever.
-    ngram_counts = [dict(), dict(), dict()]
+    count_dicts = [dict(), dict(), dict()]
     with open(os.path.join(KATZ_DIR, "republic.wngram")) as f:
         for line in f:
             w1, w2, w3, n = line.strip().split()
             n = int(n)
-            ngram_counts[0][w1] = ngram_counts[0].get(w1, 0) + n
-            ngram_counts[1][(w1, w2)] = ngram_counts[1].get((w1, w2), 0) + n
-            ngram_counts[2][(w1, w2, w3)] = ngram_counts[1].get((w1, w2, w3), 0) + n
-    return ngram_counts
+            count_dicts[0][w1] = count_dicts[0].get(w1, 0) + n
+            count_dicts[1][(w1, w2)] = count_dicts[1].get((w1, w2), 0) + n
+            count_dicts[2][(w1, w2, w3)] = count_dicts[1].get((w1, w2, w3), 0) + n
+    return count_dicts
 
 
-def test_katz_discounts(katz_ngram_counts):
+def test_katz_discounts(katz_count_dicts):
     exp_dcs = []
     discount_pattern = re.compile(r"^(\d+)-gram discounting ratios :(.*)$")
     with open(os.path.join(KATZ_DIR, "republic.arpa")) as f:
@@ -70,7 +70,7 @@ def test_katz_discounts(katz_ngram_counts):
     for order in range(1, 3):  # n=2 and n=3
         exp_dc = np.array(exp_dcs[order])
         act_dc = ngram_lm._get_katz_discounted_counts(
-            katz_ngram_counts[order], len(exp_dc)
+            katz_count_dicts[order], len(exp_dc)
         )
         act_dc = act_dc[1:]  # exclude r=0
         act_dc -= np.log10(np.arange(1, len(act_dc) + 1))
@@ -81,10 +81,10 @@ def test_katz_discounts(katz_ngram_counts):
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
-def test_katz_backoff(katz_ngram_counts):
+def test_katz_backoff(katz_count_dicts):
     exp_prob_list = parse_arpa_lm(os.path.join(KATZ_DIR, "republic.arpa"))
-    act_prob_list = ngram_lm.ngram_counts_to_prob_list_katz_backoff(
-        katz_ngram_counts, _cmu_hacks=True
+    act_prob_list = ngram_lm.count_dicts_to_prob_list_katz_backoff(
+        katz_count_dicts, _cmu_hacks=True
     )
     for order in range(3):
         exp_probs, act_probs = exp_prob_list[order], act_prob_list[order]
@@ -95,28 +95,28 @@ def test_katz_backoff(katz_ngram_counts):
 
 
 @pytest.fixture(scope="session")
-def kneser_ney_ngram_counts():
-    ngram_counts = [Counter({"<s>": 0, "</s>": 0}), Counter(), Counter()]
+def kneser_ney_count_dicts():
+    count_dicts = [Counter({"<s>": 0, "</s>": 0}), Counter(), Counter()]
     # Note: KenLM doesn't count <s> or </s> in unigrams
     with open(os.path.join(KK_DIR, "republic.txt")) as f:
         for line in f:
             s = tuple(["<s>"] + line.strip().split() + ["</s>"])
-            for order, counts in enumerate(ngram_counts):
+            for order, counts in enumerate(count_dicts):
                 counts.update(
                     s[i : i + order + 1] if order else s[i]
                     for i in range(
                         max(1 - order, 0), len(s) - order - max(1 - order, 0)
                     )
                 )
-    return ngram_counts
+    return count_dicts
 
 
 @pytest.mark.parametrize("from_cmd", [True, False], ids=["cmd", "api"])
-def test_kneser_ney_unpruned(kneser_ney_ngram_counts, from_cmd, capsys):
+def test_kneser_ney_unpruned(kneser_ney_count_dicts, from_cmd, capsys):
     exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, "republic.arpa"))
     del exp_prob_list[0]["<unk>"]
     exp_vocab = set(exp_prob_list[0])
-    count_vocab = set(kneser_ney_ngram_counts[0])
+    count_vocab = set(kneser_ney_count_dicts[0])
     assert exp_vocab == count_vocab, exp_vocab - count_vocab
     if from_cmd:
         assert not ngram_lm.main(
@@ -134,8 +134,8 @@ def test_kneser_ney_unpruned(kneser_ney_ngram_counts, from_cmd, capsys):
         temp.seek(0)
         act_prob_list = parse_arpa_lm(temp)
     else:
-        act_prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-            kneser_ney_ngram_counts
+        act_prob_list = ngram_lm.count_dicts_to_prob_list_kneser_ney(
+            kneser_ney_count_dicts
         )
     # While it doesn't really matter - you shouldn't ever need to predict <s> -
     # it's strange that KenLM sets the unigram probability of <s> to 1
@@ -149,7 +149,7 @@ def test_kneser_ney_unpruned(kneser_ney_ngram_counts, from_cmd, capsys):
 
 
 @pytest.mark.parametrize("from_cmd", [True, False], ids=["cmd", "api"])
-def test_kneser_ney_pruning(kneser_ney_ngram_counts, from_cmd, capsys):
+def test_kneser_ney_pruning(kneser_ney_count_dicts, from_cmd, capsys):
     exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, "republic.pruned.arpa"))
     del exp_prob_list[0]["<unk>"]
     if from_cmd:
@@ -173,10 +173,10 @@ def test_kneser_ney_pruning(kneser_ney_ngram_counts, from_cmd, capsys):
     else:
         # prune out bigrams and trigrams with count 1:
         pruned = set()
-        for counts in kneser_ney_ngram_counts[1:]:
+        for counts in kneser_ney_count_dicts[1:]:
             pruned.update(k for (k, v) in counts.items() if v == 1)
-        act_prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-            kneser_ney_ngram_counts, to_prune=pruned
+        act_prob_list = ngram_lm.count_dicts_to_prob_list_kneser_ney(
+            kneser_ney_count_dicts, to_prune=pruned
         )
     act_prob_list[0]["<s>"] = (0.0, act_prob_list[0]["<s>"][1])
     for order in range(3):
@@ -227,58 +227,57 @@ def test_text_to_sents():
 
 
 @pytest.mark.parametrize("N_is_dict", [True, False], ids=["dict", "count"])
-def test_sents_to_ngram_counts(N_is_dict):
+def test_sents_to_count_dicts(N_is_dict, tmp_path):
+    dir_ = tmp_path / "counts"
+    dir_.mkdir()
     sent = "what am I chopped liver".split()
     sents = [sent]
     for s in range(1, len(sent)):
         sents.append(sent[s:] + sent[:s])
     N = len(sent) + 2
     if N_is_dict:
-        dicts = []
-        for _ in range(N):
-            dicts.append(dict())
-        N = dicts
-    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, N)
-    assert not ngram_counts[0]["<S>"]
-    assert ngram_counts[0]["</S>"] == len(sents)
+        N = [ngram_lm.open_count_dict(dir_ / str(n)) for n in range(N)]
+    count_dicts = ngram_lm.sents_to_count_dicts(sents, N)
+    assert not count_dicts[0]["<S>"]
+    assert count_dicts[0]["</S>"] == len(sents)
     for word in sent:
-        assert ngram_counts[0][word] == len(sents)
-        assert ngram_counts[1][("<S>", word)] == 1
-        assert ngram_counts[1][(word, "</S>")] == 1
-    assert len(ngram_counts[-1]) == len(sents)
-    assert all(ngram_counts[-1][("<S>",) + tuple(s) + ("</S>",)] == 1 for s in sents)
-    ngram_counts_b = ngram_lm.sents_to_ngram_counts(
+        assert count_dicts[0][word] == len(sents)
+        assert count_dicts[1][("<S>", word)] == 1
+        assert count_dicts[1][(word, "</S>")] == 1
+    assert len(count_dicts[-1]) == len(sents)
+    assert all(count_dicts[-1][("<S>",) + tuple(s) + ("</S>",)] == 1 for s in sents)
+    count_dicts_b = ngram_lm.sents_to_count_dicts(
         sents, len(sent) + 2, count_unigram_sos=True
     )
-    assert ngram_counts_b[0]["<S>"] == len(sents)
-    ngram_counts_b[0]["<S>"] = 0
-    assert ngram_counts == ngram_counts_b
+    assert count_dicts_b[0]["<S>"] == len(sents)
+    count_dicts_b[0]["<S>"] = 0
+    assert count_dicts == count_dicts_b
 
 
 def test_count_open(tmp_path):
     dir_ = tmp_path / "counts"
     dir_.mkdir()
     sents = ngram_lm.text_to_sents(LIPSUM)
-    ngram_counts_a = ngram_lm.sents_to_ngram_counts(sents, 3)
+    count_dicts_a = ngram_lm.sents_to_count_dicts(sents, 3)
 
-    with ngram_lm.open_count(dir_ / "1") as unigram, ngram_lm.open_count(
+    with ngram_lm.open_count_dict(dir_ / "1") as unigram, ngram_lm.open_count_dict(
         dir_ / "2"
-    ) as bigram, ngram_lm.open_count(dir_ / "3") as trigram:
-        assert ngram_counts_a == ngram_lm.sents_to_ngram_counts(
+    ) as bigram, ngram_lm.open_count_dict(dir_ / "3") as trigram:
+        assert count_dicts_a == ngram_lm.sents_to_count_dicts(
             sents, [unigram, bigram, trigram]
         )
 
-    with ngram_lm.open_count(dir_ / "1") as unigram, ngram_lm.open_count(
+    with ngram_lm.open_count_dict(dir_ / "1") as unigram, ngram_lm.open_count_dict(
         dir_ / "2"
-    ) as bigram, ngram_lm.open_count(dir_ / "3") as trigram:
-        assert ngram_counts_a == [unigram, bigram, trigram]
+    ) as bigram, ngram_lm.open_count_dict(dir_ / "3") as trigram:
+        assert count_dicts_a == [unigram, bigram, trigram]
 
 
 def test_prune_by_threshold():
     sents = ngram_lm.text_to_sents(LIPSUM)
-    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, 3)
-    ngram_counts[0]["<UNK>"] = 0
-    prob_list = ngram_lm.ngram_counts_to_prob_list_mle(ngram_counts)
+    count_dicts = ngram_lm.sents_to_count_dicts(sents, 3)
+    count_dicts[0]["<UNK>"] = 0
+    prob_list = ngram_lm.count_dicts_to_prob_list_mle(count_dicts)
     will_keep = set(prob_list[0])
     will_discard = set()
     for dict_ in prob_list[:0:-1]:
@@ -306,18 +305,18 @@ def test_prune_by_threshold():
     lm.prune_by_threshold(0.0)
     pruned_prob_list = lm.to_prob_list()
     assert len(pruned_prob_list) == 1
-    assert len(pruned_prob_list[0]) == len(ngram_counts[0])
+    assert len(pruned_prob_list[0]) == len(count_dicts[0])
 
 
 def test_prune_by_name():
     eps_lprob = -30
     sents = ngram_lm.text_to_sents(LIPSUM)
-    ngram_counts = ngram_lm.sents_to_ngram_counts(sents, 3)
-    ngram_counts[0]["<UNK>"] = 0
-    prob_list = ngram_lm.ngram_counts_to_prob_list_mle(ngram_counts)
-    to_prune = set(ngram_counts[0])
+    count_dicts = ngram_lm.sents_to_count_dicts(sents, 3)
+    count_dicts[0]["<UNK>"] = 0
+    prob_list = ngram_lm.count_dicts_to_prob_list_mle(count_dicts)
+    to_prune = set(count_dicts[0])
     to_prune.remove("QUI")
-    to_prune |= set(k[:-1] for k in ngram_counts[-1])
+    to_prune |= set(k[:-1] for k in count_dicts[-1])
     lm = ngram_lm.BackoffNGramLM(prob_list)
     lm.prune_by_name(to_prune, eps_lprob=eps_lprob)
     pruned_prob_list = lm.to_prob_list()
@@ -336,7 +335,7 @@ def test_prune_by_name():
         k == "QUI" or v[0] == eps_lprob for (k, v) in pruned_prob_list[0].items()
     )
     assert np.isclose(pruned_prob_list[0]["QUI"][0], 0.0)
-    to_prune = (set(ngram_counts[1]) | set(ngram_counts[2])) - to_prune
+    to_prune = (set(count_dicts[1]) | set(count_dicts[2])) - to_prune
     lm.prune_by_name(to_prune, eps_lprob=eps_lprob)
     pruned_prob_list = lm.to_prob_list()
     assert len(pruned_prob_list) == 1

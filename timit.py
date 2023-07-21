@@ -252,7 +252,6 @@ def preamble(options):
 
 
 def write_mapped_trn(src, dst, map_, utts=None):
-
     if isinstance(src, str):
         if isinstance(dst, str):
             with open(src) as in_trn, open(dst, "w") as out_trn:
@@ -292,7 +291,6 @@ def write_mapped_trn(src, dst, map_, utts=None):
 
 
 def write_mapped_stm(src, dst, map_, wcinfo=None):
-
     if isinstance(src, str):
         if isinstance(dst, str):
             with open(src) as in_stm, open(dst, "w") as out_stm:
@@ -362,7 +360,6 @@ def write_mapped_stm(src, dst, map_, wcinfo=None):
 
 
 def write_mapped_ctm(src, dst, map_, wclist=None):
-
     if isinstance(src, str):
         if isinstance(dst, str):
             with open(src) as in_ctm, open(dst, "w") as out_ctm:
@@ -417,7 +414,6 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
 
 
 def init_phn(options):
-
     local_dir = os.path.join(options.data_root, "local")
     data_dir = os.path.join(local_dir, "data")
     if not os.path.isdir(data_dir):
@@ -486,7 +482,6 @@ def init_phn(options):
 
 
 def train_phn_lm(config_dir, max_order):
-
     spk2utts = dict()
     with open(os.path.join(config_dir, "utt2spk")) as utt2spk:
         for line in utt2spk:
@@ -531,14 +526,12 @@ def train_phn_lm(config_dir, max_order):
         for idx, sent in enumerate(sents):
             file_.write(" ".join(sent) + utt_format_str.format(idx))
 
-    ngram_counts = ngram_lm.sents_to_ngram_counts(
-        sents, max_order, sos="<s>", eos="</s>"
-    )
+    count_dicts = ngram_lm.sents_to_count_dicts(sents, max_order, sos="<s>", eos="</s>")
     # 4-fold cross-validation said K&M with delta=0.5 lead to the best perplexity for
     # both 2-grams and 3-grams. Too small for Katz. Perplexity for add k was higher
     # for a variety of k.
     # I suspect the primary benefit of the LM is to forbid invalid phone sequences.
-    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=0.5)
+    prob_list = ngram_lm.count_dicts_to_prob_list_kneser_ney(count_dicts, delta=0.5)
     lm = ngram_lm.BackoffNGramLM(prob_list, sos="<s>", eos="</s>", unk="<s>")
     lm.prune_by_name({"<s>"})
     prob_list = lm.to_prob_list()
@@ -547,7 +540,6 @@ def train_phn_lm(config_dir, max_order):
 
 
 def torch_dir(options):
-
     local_dir = os.path.join(options.data_root, "local")
     if options.config_subdir is None:
         dirs = os.listdir(local_dir)
@@ -814,7 +806,6 @@ def filter(options):
         return
 
     if options.both_stm:
-
         # these files shouldn't change for specific subdirectory configurations, so
         # we won't bother the user with 'em.
         config_dir = os.path.join(options.data_root, "local", "data")

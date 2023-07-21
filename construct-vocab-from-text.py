@@ -130,7 +130,7 @@ def main(args=None):
             count_dir = options.count_dir
         os.makedirs(count_dir, exist_ok=True)
         count_prefix = os.path.join(count_dir, "counts")
-        type2count = ngram_lm.open_count(count_prefix, "n")
+        type2count = ngram_lm.open_count_dict(count_prefix, "n")
         for token in tokens:
             type2count[token] = type2count.get(token, 0) + 1
 

@@ -52,6 +52,11 @@ try:
 except:
     Cache = None
 
+try:
+    from sortedcontainers import SortedList as sorted
+except ImportError:
+    pass
+
 __all__ = [
     "BackoffNGramLM",
     "main",
@@ -74,17 +79,19 @@ DEFT_EPS_LPROB: Final[float] = -99.999
 DEFT_ADD_K_K: Final[float] = 0.5
 DEFAULT_KATZ_THRESH: Final[int] = 7
 COUNTFILE_FMT_PREFIX: Final[str] = "counts.{order}"
+LPROBFILE_FMT_PREFIX: Final[str] = "lprobs.{order}"
 COMPLETE_SUFFIX: Final[str] = ".complete"
 DEFT_MAX_CACHE_LEN: Final[int] = 1_000_000
 DEFT_MAX_CACHE_AGE_SECONDS: Final[float] = 10.0
-SENTS_PER_INFO: Final[int] = 10_000
+SENTS_PER_INFO: Final[int] = 1_000
 
 FALLBACK_DELTAS: Final[Tuple[float, float, float]] = (0.5, 1.0, 1.5)
 
 Ngram = Union[str, Tuple[str, ...]]
 CountDict = MutableMapping[Ngram, int]
 CountDicts = List[CountDict]
-ProbDict = MutableMapping[Ngram, float]
+LProb = Union[float, Tuple[float, float]]
+ProbDict = MutableMapping[Ngram, LProb]
 ProbDicts = List[ProbDict]
 
 warnings.simplefilter("error", RuntimeWarning)
@@ -821,7 +828,20 @@ class DbNgramDict(MutableMapping[Ngram, V]):
 
 
 class DbCountDict(DbNgramDict[int]):
-    VALUE_FMT: Final[str] = "!Q"
+    """Disk-backed dictionary of n-gram counts
+
+    Update shares semantics with :func:`collections.Counter.update`, i.e.
+
+    >>> count_dict.update(ngrams)
+
+    adds 1 to the value of every n-gram in `ngrams`, whereas
+
+    >>> count_dict.update(other_count_dict)
+
+    adds the counts in `other_count_dict` to `count_dict`
+    """
+
+    VALUE_FMT: Final[str] = "Q"
 
     def encode_value(self, val: int) -> Union[int, bytes]:
         if self._is_diskcache:
@@ -867,9 +887,21 @@ class DbCountDict(DbNgramDict[int]):
             self.update(kwds)
 
 
-class DbProbDict(DbNgramDict[float]):
-    # it's a float b/c these are log probs, stored w/ limited precision
-    VALUE_FMT: Final[str] = "!f"
+class DbProbDict(DbNgramDict[LProb]):
+    VALUE_FMT: Final[str] = "d"
+
+    def encode_value(self, val: LProb) -> bytes:
+        if isinstance(val, float) or isinstance(val, int):
+            return super().encode_value(float(val))
+        else:
+            return struct.pack(self.VALUE_FMT * 2, float(val[0]), float(val[1]))
+
+    def decode_value(self, val_b: bytes) -> LProb:
+        val = tuple(x[0] for x in struct.iter_unpack(self.VALUE_FMT, val_b))
+        if len(val) == 1:
+            return val[0]
+        else:
+            return val
 
 
 def get_store(
@@ -883,7 +915,8 @@ def get_store(
 
         os.makedirs(filename_, exist_ok=True)
         store = diskcache.Cache(filename_)
-        store.keys = store.__iter__
+        if protocol == "n":
+            store.clear()
     except ImportError:
         import dbm
 
@@ -1582,7 +1615,7 @@ def count_dicts_to_prob_list_katz_backoff(
             else:
                 log_alpha = np.log1p(-num_subtra) - np.log1p(-den_subtra)
                 log_alpha /= np.log(10)
-            log_prob, bad_backoff = prob_list[-1][prefix]
+            log_prob = prob_list[-1][prefix][0]
             prob_list[-1][prefix] = (log_prob, log_alpha)
         if order != max_order:
             probs = dict((ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
@@ -1608,15 +1641,17 @@ def _optimal_deltas(counts, y):
     return deltas
 
 
-def _absolute_discounting(count_dicts, deltas, to_prune):
+def _absolute_discounting(
+    count_dicts: CountDicts, deltas, to_prune, temp: Optional[Path] = None
+):
     V = len(set(count_dicts[0]) - to_prune)
     prob_list = [{tuple(): (-np.log10(V), 0.0)}]
     max_order = len(count_dicts) - 1
+
     for order, counts, delta in zip(range(len(count_dicts)), count_dicts, deltas):
+        logging.info(f"Discounting order {order + 1}")
         delta = np.array(delta, dtype=float)
-        n_counts = dict()
-        d_counts = dict()
-        pr2bin = dict()
+        n_counts, d_counts, pr2bin = dict(), dict(), dict()
         for ngram, count in counts.items():
             in_prune = ngram in to_prune
             if not order:
@@ -1644,9 +1679,14 @@ def _absolute_discounting(count_dicts, deltas, to_prune):
                 prefix_bins[:-1] += np.log10(delta)
             gamma = _log10sumexp(prefix_bins)
             gamma -= np.log10(d_counts[prefix])
-            lprob, bo = prob_list[-1][prefix]
+            lprob = prob_list[-1][prefix][0]
             prob_list[-1][prefix] = (lprob, gamma)
-        probs = dict()
+        if temp is None or order == 0:
+            probs = dict()
+        else:
+            probs = open_prob_dict(
+                temp / LPROBFILE_FMT_PREFIX.format(order=order + 1), "n"
+            )
         for ngram, n_count in n_counts.items():
             prefix = ngram[:-1]
             if n_count:
@@ -1667,7 +1707,12 @@ def _absolute_discounting(count_dicts, deltas, to_prune):
             probs[ngram] = lprob
         prob_list.append(probs)
     del prob_list[0]  # zero-th order
-    prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
+    prob_list_ = prob_list[0]
+    if temp is None:
+        prob_list[0] = dict()
+    else:
+        prob_list[0] = open_prob_dict(temp / LPROBFILE_FMT_PREFIX.format(order=1), "n")
+    prob_list[0].update((ngram[0], p) for (ngram, p) in prob_list_.items())
     return prob_list
 
 
@@ -1800,7 +1845,11 @@ def count_dicts_to_prob_list_absolute_discounting(
 
 
 def count_dicts_to_prob_list_kneser_ney(
-    count_dicts: CountDicts, delta=None, sos=None, to_prune=set()
+    count_dicts: CountDicts,
+    delta=None,
+    sos=None,
+    to_prune=set(),
+    temp: Optional[os.PathLike] = None,
 ):
     r"""Determine probabilities from counts using Kneser-Ney(-like) estimates
 
@@ -1969,12 +2018,27 @@ def count_dicts_to_prob_list_kneser_ney(
         )
     if sos is None:
         sos = "<S>" if "<S>" in count_dicts[0] else "<s>"
+
+    if temp:
+
+        class MyDict(DbNgramDict[int]):
+            VALUE_FMT: Final[str] = "!Q"
+
+        temp = Path(temp)
+        acount_tmp = temp / "acount"
+        acount_tmp.mkdir(exist_ok=True)
+
     new_count_dicts = [count_dicts[-1]]
     for order in range(len(count_dicts) - 2, -1, -1):
-        if order:
+        if temp:
+            new_counts = MyDict(
+                get_store(acount_tmp / COUNTFILE_FMT_PREFIX.format(order=order + 1))
+            )
+        else:
             new_counts = dict()
-        else:  # preserve vocabulary
-            new_counts = dict.fromkeys(count_dicts[order], 0)
+        if order == 0:
+            for ngram in count_dicts[order].keys():
+                new_counts[ngram] = 0
         for ngram, count in count_dicts[order + 1].items():
             if not count:
                 continue
@@ -2004,7 +2068,7 @@ def count_dicts_to_prob_list_kneser_ney(
             warnings.warn(f"Falling back to default discounts for {i+1}-th order")
             ds = FALLBACK_DELTAS
         delta[i] = ds
-    return _absolute_discounting(count_dicts, delta, to_prune)
+    return _absolute_discounting(count_dicts, delta, to_prune, temp)
 
 
 def text_to_sents(
@@ -2145,7 +2209,7 @@ def sents_to_count_dicts(
                 counter.update(
                     sent[s : s + order] for s in range(len(sent) - order + 1)
                 )
-        if (i + 1) % SENTS_PER_INFO:
+        if (i + 1) % SENTS_PER_INFO == 0:
             logging.info(f"Processed {i + 1} sentences")
     return count_dicts
 
@@ -2289,17 +2353,17 @@ def main(args: Optional[Sequence[str]] = None):
         "not prune count-0 terms.",
     )
     parser.add_argument(
-        "--count-directory",
+        "--temp-dir",
         "-T",
         metavar="PTH",
         nargs="?",
         const=1,
-        help="If specified, counts will be stored to files in this directory in order "
-        "to reduce memory pressure. If the flag is passed an argument, count files "
-        "will be stored in the provided directory. If count files up to the maximum "
-        "order have been previously completed and are stored in this directory, those "
-        "counts will be used instead of processing the input. If the flag is not "
-        "passed an argument, a temporary directory will be used",
+        help="If specified, counts and probs will be stored to files in this directory "
+        "in order to reduce memory pressure. If the flag is passed an argument, count "
+        "files will be stored in the provided directory. If count files up to the "
+        "maximum order have been previously completed and are stored in this "
+        "directory, those counts will be used instead of processing the input. If the "
+        "flag is not passed an argument, a temporary directory will be used",
     )
     parser.add_argument(
         "--max-cache-age-seconds",
@@ -2376,8 +2440,10 @@ def main(args: Optional[Sequence[str]] = None):
 
     options = parser.parse_args(args)
 
-    if options.verbose:
-        logging.setLevel(logging.INFO)
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s: %(message)s",
+        level=logging.INFO if options.verbose else logging.WARNING,
+    )
 
     if options.prune_by_name_file is not None:
         if options.sent_end_expr is None:
@@ -2391,17 +2457,17 @@ def main(args: Optional[Sequence[str]] = None):
     prune_names = (tuple(options.word_delim_expr.split(x)) for x in prune_names if x)
     prune_names = {x[0] if len(x) == 1 else x for x in prune_names}
 
-    count_dir, N, count_dicts = options.count_directory, options.max_order, None
-    if count_dir is not None:
-        if count_dir == 1:
-            count_dir_ = TemporaryDirectory()
-            count_dir = os.fspath(count_dir_.name)
-        os.makedirs(count_dir, exist_ok=True)
-        logging.info(f"Count directory set to '{count_dir}'")
+    temp_dir, N, count_dicts = options.temp_dir, options.max_order, None
+    if temp_dir is not None:
+        if temp_dir == 1:
+            temp_dir_ = TemporaryDirectory()
+            temp_dir = os.fspath(temp_dir_.name)
+        os.makedirs(temp_dir, exist_ok=True)
+        logging.info(f"Count directory set to '{temp_dir}'")
         count_prefixes = []
         all_complete = True
         for n in range(1, N + 1):
-            count_prefix = os.path.join(count_dir, COUNTFILE_FMT_PREFIX.format(order=n))
+            count_prefix = os.path.join(temp_dir, COUNTFILE_FMT_PREFIX.format(order=n))
             complete_file = count_prefix + COMPLETE_SUFFIX
             complete_file_exists = os.path.exists(complete_file)
             all_complete &= complete_file_exists
@@ -2439,14 +2505,14 @@ def main(args: Optional[Sequence[str]] = None):
             options.trim_empty_sents,
         )
 
-        logging.info("Beginning counting n-grams")
+        logging.info("Beginning to count n-grams")
         count_dicts = sents_to_count_dicts(
             sents, N, options.sos, options.eos, options.count_unigram_sos
         )
         logging.info("Done counting n-grams")
         del sents
 
-        if count_dir is not None:
+        if temp_dir is not None:
             for count_prefix in count_prefixes:
                 Path(count_prefix + COMPLETE_SUFFIX).touch()
     del N
@@ -2489,7 +2555,7 @@ def main(args: Optional[Sequence[str]] = None):
         if options.delta is not None and len(options.delta) == 1:
             options.delta = options.delta[0]
         prob_list = count_dicts_to_prob_list_kneser_ney(
-            count_dicts, options.delta, options.sos, prune_names
+            count_dicts, options.delta, options.sos, prune_names, temp_dir
         )
         prune_names = set()
     elif options.method == "sgt":
@@ -2501,7 +2567,7 @@ def main(args: Optional[Sequence[str]] = None):
         logging.info("Taking the MLE (no smoothing)")
         prob_list = count_dicts_to_prob_list_mle(count_dicts, options.eps_lprob)
     logging.info("Done collecting probabilities")
-    if count_dir is not None:
+    if temp_dir is not None:
         for counts in count_dicts:
             counts.close()
     del count_dicts

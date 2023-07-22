@@ -112,8 +112,13 @@ def kneser_ney_count_dicts():
 
 
 @pytest.mark.parametrize("from_cmd", [True, False], ids=["cmd", "api"])
-def test_kneser_ney_unpruned(kneser_ney_count_dicts, from_cmd, capsys):
+@pytest.mark.parametrize("with_temp", [True, False], ids=["temp", "notemp"])
+def test_kneser_ney_unpruned(
+    kneser_ney_count_dicts, from_cmd, capsys, with_temp, tmp_path
+):
     exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, "republic.arpa"))
+    dir_ = tmp_path / "kn"
+    dir_.mkdir()
     del exp_prob_list[0]["<unk>"]
     exp_vocab = set(exp_prob_list[0])
     count_vocab = set(kneser_ney_count_dicts[0])
@@ -128,6 +133,7 @@ def test_kneser_ney_unpruned(kneser_ney_count_dicts, from_cmd, capsys):
                 "--word-delim-expr",
                 r" ",
             ]
+            + (["-T", os.fspath(dir_)] if with_temp else [])
         )
         temp = SpooledTemporaryFile(mode="w+")
         temp.write(capsys.readouterr()[0])
@@ -135,13 +141,14 @@ def test_kneser_ney_unpruned(kneser_ney_count_dicts, from_cmd, capsys):
         act_prob_list = parse_arpa_lm(temp)
     else:
         act_prob_list = ngram_lm.count_dicts_to_prob_list_kneser_ney(
-            kneser_ney_count_dicts
+            kneser_ney_count_dicts, temp=dir_ if with_temp else None
         )
     # While it doesn't really matter - you shouldn't ever need to predict <s> -
     # it's strange that KenLM sets the unigram probability of <s> to 1
     act_prob_list[0]["<s>"] = (0.0, act_prob_list[0]["<s>"][1])
     for order in range(3):
         exp_probs, act_probs = exp_prob_list[order], act_prob_list[order]
+        assert len(exp_probs) == len(act_probs)
         assert set(exp_probs) == set(act_probs)
         for ngram, exp_prob in exp_probs.items():
             act_prob = act_probs[ngram]

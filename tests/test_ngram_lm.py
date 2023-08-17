@@ -15,6 +15,7 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+import gzip
 
 import os
 import re
@@ -82,7 +83,9 @@ def test_katz_discounts(katz_count_dicts):
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
 def test_katz_backoff(katz_count_dicts):
-    exp_prob_list = parse_arpa_lm(os.path.join(KATZ_DIR, "republic.arpa"))
+    exp_prob_list = parse_arpa_lm(
+        os.path.join(KATZ_DIR, "republic.arpa"), to_base_e=False
+    )
     act_prob_list = ngram_lm.count_dicts_to_prob_list_katz_backoff(
         katz_count_dicts, _cmu_hacks=True
     )
@@ -116,7 +119,9 @@ def kneser_ney_count_dicts():
 def test_kneser_ney_unpruned(
     kneser_ney_count_dicts, from_cmd, capsys, with_temp, tmp_path
 ):
-    exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, "republic.arpa"))
+    exp_prob_list = parse_arpa_lm(
+        os.path.join(KK_DIR, "republic.arpa"), to_base_e=False
+    )
     dir_ = tmp_path / "kn"
     dir_.mkdir()
     del exp_prob_list[0]["<unk>"]
@@ -138,7 +143,7 @@ def test_kneser_ney_unpruned(
         temp = SpooledTemporaryFile(mode="w+")
         temp.write(capsys.readouterr()[0])
         temp.seek(0)
-        act_prob_list = parse_arpa_lm(temp)
+        act_prob_list = parse_arpa_lm(temp, to_base_e=False)
     else:
         act_prob_list = ngram_lm.count_dicts_to_prob_list_kneser_ney(
             kneser_ney_count_dicts, temp=dir_ if with_temp else None
@@ -157,7 +162,9 @@ def test_kneser_ney_unpruned(
 
 @pytest.mark.parametrize("from_cmd", [True, False], ids=["cmd", "api"])
 def test_kneser_ney_pruning(kneser_ney_count_dicts, from_cmd, capsys):
-    exp_prob_list = parse_arpa_lm(os.path.join(KK_DIR, "republic.pruned.arpa"))
+    exp_prob_list = parse_arpa_lm(
+        os.path.join(KK_DIR, "republic.pruned.arpa"), to_base_e=False
+    )
     del exp_prob_list[0]["<unk>"]
     if from_cmd:
         assert not ngram_lm.main(
@@ -176,7 +183,7 @@ def test_kneser_ney_pruning(kneser_ney_count_dicts, from_cmd, capsys):
         temp = SpooledTemporaryFile(mode="w+")
         temp.write(capsys.readouterr()[0])
         temp.seek(0)
-        act_prob_list = parse_arpa_lm(temp)
+        act_prob_list = parse_arpa_lm(temp, to_base_e=False)
     else:
         # prune out bigrams and trigrams with count 1:
         pruned = set()
@@ -196,12 +203,14 @@ def test_kneser_ney_pruning(kneser_ney_count_dicts, from_cmd, capsys):
 @pytest.mark.filterwarnings("ignore::UserWarning")
 def test_relative_entropy_pruning():
     with open(os.path.join(RE_DIR, "republic.arpa")) as f:
-        unpruned_prob_list = parse_arpa_lm(f)
+        unpruned_prob_list = parse_arpa_lm(f, to_base_e=False)
     lm = ngram_lm.BackoffNGramLM(unpruned_prob_list)
     lm.relative_entropy_pruning(1e-5, _srilm_hacks=True)
     act_prob_list = lm.to_prob_list()
     del lm, unpruned_prob_list
-    exp_prob_list = parse_arpa_lm(os.path.join(RE_DIR, "republic.pruned.arpa"))
+    exp_prob_list = parse_arpa_lm(
+        os.path.join(RE_DIR, "republic.pruned.arpa"), to_base_e=False
+    )
     for order in range(3):
         exp_probs, act_probs = exp_prob_list[order], act_prob_list[order]
         assert set(exp_probs) == set(act_probs)
@@ -350,6 +359,36 @@ def test_prune_by_name():
     assert np.isclose(pruned_prob_list[0]["QUI"], 0.0)
 
 
+def test_compressed_same_as_not(tmp_path):
+    text_file = tmp_path / "lipsum.txt"
+    text_file.write_text(LIPSUM)
+    arpa_file = tmp_path / "lm.arpa"
+    text_gz_file = tmp_path / "lipsum.txt.gz"
+    text_gz_file.write_bytes(gzip.compress(LIPSUM.encode()))
+    arpa_gz_file = tmp_path / "lm.arpa.gz"
+    args = [
+        "-o",
+        "1",
+        "-m",
+        "mle",
+        "-f",
+        os.fspath(text_file),
+        "-O",
+        os.fspath(arpa_file),
+    ]
+    assert not ngram_lm.main(args)
+
+    args[-3] = os.fspath(text_gz_file)
+    args[-1] = os.fspath(arpa_gz_file)
+    args.append("-c")
+    assert not ngram_lm.main(args)
+
+    exp_arpa = arpa_file.read_text()
+    act_arpa = gzip.decompress(arpa_gz_file.read_bytes()).decode()
+
+    assert exp_arpa == act_arpa
+
+
 def test_cmd_with_saved_counts(tmp_path):
     N = 3
     text_file = tmp_path / "lipsum.txt"
@@ -357,22 +396,22 @@ def test_cmd_with_saved_counts(tmp_path):
     arpa_file = tmp_path / "lm.arpa"
     args = [
         "-f",
-        str(text_file),
+        os.fspath(text_file),
         "-O",
-        str(arpa_file),
+        os.fspath(arpa_file),
         "-o",
         str(N),
         "-m",
         "mle",
     ]
     assert not ngram_lm.main(args)
-    exp = parse_arpa_lm(str(arpa_file))
+    exp = parse_arpa_lm(str(arpa_file), to_base_e=False)
     arpa_file.write_text("")
     assert len(exp) == 3
     assert all(len(counts) for counts in exp)
 
     assert not ngram_lm.main(args + ["-T"])
-    act = parse_arpa_lm(str(arpa_file))
+    act = parse_arpa_lm(str(arpa_file), to_base_e=False)
     arpa_file.write_text("")
     assert exp == act
 
@@ -385,14 +424,14 @@ def test_cmd_with_saved_counts(tmp_path):
             count_dir
             / (ngram_lm.COUNTFILE_FMT_PREFIX.format(order=n) + ngram_lm.COMPLETE_SUFFIX)
         ).is_file()
-    act = parse_arpa_lm(str(arpa_file))
+    act = parse_arpa_lm(str(arpa_file), to_base_e=False)
     arpa_file.write_text("")
     assert exp == act
 
     text_file.write_text("")
     assert not text_file.read_text()
     assert not ngram_lm.main(args)
-    act = parse_arpa_lm(str(arpa_file))
+    act = parse_arpa_lm(str(arpa_file), to_base_e=False)
     assert exp == act
 
     text_file.write_text(LIPSUM)
@@ -403,5 +442,5 @@ def test_cmd_with_saved_counts(tmp_path):
         )
     )
     assert not ngram_lm.main(args)
-    act = parse_arpa_lm(str(arpa_file))
+    act = parse_arpa_lm(str(arpa_file), to_base_e=False)
     assert exp == act

@@ -37,6 +37,7 @@ import sys
 import re
 import struct
 import logging
+import gzip
 
 from collections import OrderedDict, Counter
 from collections.abc import Iterable, MutableMapping, Mapping
@@ -44,6 +45,7 @@ from itertools import product
 from typing_extensions import Final
 from tempfile import TemporaryDirectory
 from pathlib import Path
+from io import TextIOWrapper
 
 import numpy as np
 
@@ -106,33 +108,45 @@ class BackoffNGramLM(object):
 
     Parameters
     ----------
-    prob_dicts : sequence
+    prob_dicts
         See :mod:`pydrobert.torch.util.parse_arpa_lm`
-    sos : str, optional
+    sos
         The start-of-sequence symbol. When calculating the probability of a
         sequence, :math:`P(sos) = 1` when `sos` starts the sequence. Defaults
         to ``'<S>'`` if that symbol is in the vocabulary, otherwise
         ``'<s>'``
-    eos : str, optional
+    eos
         The end-of-sequence symbol. This symbol is expected to terminate each
         sequence when calculating sequence or corpus perplexity. Defaults to
         ``</S>`` if that symbol is in the vocabulary, otherwise ``</s>``
-    unk : str, optional
+    unk
         The out-of-vocabulary symbol. If a unigram probability does not exist
         for a token, the token is replaced with this symbol. Defaults to
         ``'<UNK>'`` if that symbol is in the vocabulary, otherwise
         ``'<unk>'``
+    destructive
     """
 
-    def __init__(self, prob_dicts: ProbDicts, sos=None, eos=None, unk=None):
+    def __init__(
+        self,
+        prob_dicts: ProbDicts,
+        sos: Optional[str] = None,
+        eos: Optional[str] = None,
+        unk: Optional[str] = None,
+        destructive: bool = False,
+    ):
         self.trie = self.TrieNode(0.0, 0.0)
         self.vocab = set()
-        if not len(prob_dicts) or not len(prob_dicts[0]):
+        max_order = len(prob_dicts)
+        if not max_order or not len(prob_dicts[0]):
             raise ValueError("prob_dicts must contain (all) unigrams")
-        for order, dict_ in enumerate(prob_dicts):
+        for order, prob_dict in enumerate(prob_dicts):
             is_first = not order
-            is_last = order == len(prob_dicts) - 1
-            for context, value in dict_.items():
+            is_last = order == max_order - 1
+            if not destructive:
+                prob_dict = prob_dict.copy()
+            while prob_dict:
+                context, value = prob_dict.popitem()
                 if is_first:
                     self.vocab.add(context)
                     context = (context,)
@@ -144,38 +158,48 @@ class BackoffNGramLM(object):
         if sos is None:
             if "<S>" in self.vocab:
                 sos = "<S>"
-            else:
+            elif "<s>" in self.vocab:
                 sos = "<s>"
-        if sos not in self.vocab:
+            else:
+                warnings.warn(
+                    "start-of-sequence symbol could not be found. Will not include "
+                    "in computations"
+                )
+        elif sos not in self.vocab:
             raise ValueError(
-                'start-of-sequence symbol "{}" does not have unigram '
-                "entry.".format(sos)
+                f"start-of-sequence symbol '{sos}' does not have unigram entry "
             )
         self.sos = self.trie.sos = sos
         if eos is None:
             if "</S>" in self.vocab:
                 eos = "</S>"
-            else:
+            elif "</s>" in self.vocab:
                 eos = "</s>"
-        if eos not in self.vocab:
+            else:
+                warnings.warn(
+                    "end-of-sequence symbol could not be found. Will not include "
+                    "in computations"
+                )
+        elif eos not in self.vocab:
             raise ValueError(
-                'end-of-sequence symbol "{}" does not have unigram '
-                "entry.".format(eos)
+                f"end-of-sequence symbol '{eos}' does not have a unigram entry"
             )
         self.eos = self.trie.eos = eos
         if unk is None:
             if "<UNK>" in self.vocab:
                 unk = "<UNK>"
-            else:
+            elif "<unk>" in self.vocab:
                 unk = "<unk>"
-        if unk in self.vocab:
-            self.unk = unk
-        else:
-            warnings.warn(
-                'out-of-vocabulary symbol "{}" does not have unigram count. '
-                "Out-of-vocabulary tokens will raise an error".format(unk)
+            else:
+                warnings.warn(
+                    "out-of-vocabulary symbol could not be found. OOVs will raise an "
+                    "error"
+                )
+        elif unk not in self.vocab:
+            raise ValueError(
+                f"out-of-vocabulary symbol '{unk}' does not have a unigram entry"
             )
-            self.unk = None
+        self.unk = unk
         assert self.trie.depth == len(prob_dicts)
 
     class TrieNode(object):
@@ -568,9 +592,9 @@ class BackoffNGramLM(object):
         """
         sequence = list(sequence)
         if include_delimiters:
-            if not len(sequence) or sequence[0] != self.sos:
+            if self.sos is not None and (not len(sequence) or sequence[0] != self.sos):
                 sequence.insert(0, self.sos)
-            if sequence[-1] != self.eos:
+            if self.eos is not None and sequence[-1] != self.eos:
                 sequence.append(self.eos)
         if not len(sequence):
             raise ValueError(
@@ -581,7 +605,7 @@ class BackoffNGramLM(object):
             N -= 1
         return 10.0 ** (-self.log_prob(sequence) / N)
 
-    def corpus_perplexity(self, corpus, include_delimiters=True):
+    def corpus_perplexity(self, corpus, include_delimiters=True) -> float:
         r"""Calculate the perplexity of an entire corpus using this model
 
         A `corpus` is a sequence of sequences ``[s_1, s_2, ..., s_S]``. Each
@@ -604,21 +628,22 @@ class BackoffNGramLM(object):
         ----------
         corpus : sequence
         include_delimiters : bool, optional
-            Whether to add start- and end-of-sequence delimiters to each
-            sequence (if necessary). See :func:`sequence_complexity` for more
-            info
+            Whether to add start- and end-of-sequence delimiters to each sequence if
+            necessary and available. See :func:`sequence_complexity` for more info
         """
         joint = 0.0
         M = 0
         for sequence in corpus:
             sequence = list(sequence)
             if include_delimiters:
-                if not len(sequence) or sequence[0] != self.sos:
+                if self.sos is not None and (
+                    not len(sequence) or sequence[0] != self.sos
+                ):
                     sequence.insert(0, self.sos)
-                if sequence[-1] != self.eos:
+                if self.eos is not None and sequence[-1] != self.eos:
                     sequence.append(self.eos)
             if not len(sequence):
-                warnings.warn("skipping empty sequence (include_delimiters is False)")
+                warnings.warn("skipping empty sequence")
                 continue
             N = len(sequence)
             if sequence[0] == self.sos:
@@ -975,8 +1000,12 @@ def write_arpa(prob_dicts: ProbDicts, out=sys.stdout):
         Path or file object to output to
     """
     if isinstance(out, str):
-        with open(out, "w") as f:
-            return write_arpa(prob_dicts, f)
+        if out.endswith(".gz"):
+            with gzip.open(out, "wt") as f:
+                return write_arpa(prob_dicts, f)
+        else:
+            with open(out, "w") as f:
+                return write_arpa(prob_dicts, f)
     entries_by_order = []
     for idx, dict_ in enumerate(prob_dicts):
         entries = sorted((k, v) if idx else ((k,), v) for (k, v) in dict_.items())
@@ -992,11 +1021,9 @@ def write_arpa(prob_dicts: ProbDicts, out=sys.stdout):
                 out.write("{:f} {}\n".format(entry[1], " ".join(entry[0])))
         else:
             for entry in entries:
-                out.write(
-                    "{:f} {} {:f}\n".format(
-                        entry[1][0], " ".join(entry[0]), entry[1][1]
-                    )
-                )
+                x = f"{entry[1][0]:f} {' '.join(entry[0])} {entry[1][1]:f}\n"
+                assert isinstance(x, str)
+                out.write(x)
         out.write("\n")
     out.write("\\end\\\n")
 
@@ -2235,7 +2262,7 @@ def main(args: Optional[Sequence[str]] = None):
 
     Example call (5-gram, modified Kneser-Ney, hapax >1-gram pruning):
 
-        gunzip -c text.gz | python ngram_lm.py -o 5 -t 0 1 | gzip -c > text.arpa.gz
+        python ngram_lm.py -o 5 -t 0 1 | gzip -c > lm.arpa.gz < train.txt.gz
     """
     logging.captureWarnings(True)
 
@@ -2274,16 +2301,16 @@ def main(args: Optional[Sequence[str]] = None):
         "--in-file",
         "-f",
         metavar="PTH",
-        type=argparse.FileType("r"),
-        default=sys.stdin,
+        type=argparse.FileType("rb"),
+        default=argparse.FileType("rb")("-"),
         help="If specified, reads from this file instead of stdin",
     )
     parser.add_argument(
         "--out-file",
         "-O",
         metavar="PTH",
-        type=argparse.FileType("w"),
-        default=sys.stdout,
+        type=argparse.FileType("wb"),
+        default=None,
         help="If specified, writes to this file instead of stdout",
     )
     parser.add_argument(
@@ -2291,6 +2318,13 @@ def main(args: Optional[Sequence[str]] = None):
     )
     parser.add_argument(
         "--eos", "-e", metavar="STR", default="</s>", help="End-of-sequence token"
+    )
+    parser.add_argument(
+        "--compress",
+        "-c",
+        action="store_true",
+        default=False,
+        help="If set, write gzip-compressed format instead of plaintext",
     )
     parser.add_argument(
         "--sent-end-expr",
@@ -2494,6 +2528,10 @@ def main(args: Optional[Sequence[str]] = None):
                 )
 
     if count_dicts is None:
+        if options.in_file.peek()[:2] == b"\x1f\x8b":
+            options.in_file = gzip.open(options.in_file, "rt")
+        else:
+            options.in_file = TextIOWrapper(options.in_file)
         if options.sent_end_expr is None:
             sents = (x.rstrip("\n") for x in options.in_file)
         else:
@@ -2602,6 +2640,19 @@ def main(args: Optional[Sequence[str]] = None):
         del ngram_lm
 
     logging.info(f"Writing out LM in arpa format")
+    if options.out_file is None:
+        if options.compress:
+            raise ValueError(
+                "compressed output does not work nicely with stdout. Pipe to gzip -c "
+                "if you want this"
+            )
+        else:
+            options.out_file = sys.stdout
+    else:
+        if options.compress:
+            options.out_file = gzip.open(options.out_file, "wt")
+        else:
+            options.out_file = TextIOWrapper(options.out_file)
     write_arpa(prob_list, options.out_file)
     logging.info("Done")
 

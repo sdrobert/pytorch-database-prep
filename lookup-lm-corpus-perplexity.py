@@ -405,7 +405,9 @@ def main_state(options: argparse.Namespace):
     with torch.no_grad():
         for hyps in corpus:
             hyps = hyps.to(options.device)
-            logps = lm(hyps[:-1])
+            logps = lm.calc_full_log_probs_chunked(
+                hyps[:-1], dict(), options.chunk_size
+            )
             non_pad_mask = hyps != pad_idx
             logp = logps.gather(2, hyps.clamp_(0, vocab_size - 1).unsqueeze(2))
             logp = logp.squeeze(2).masked_select(non_pad_mask)
@@ -496,7 +498,8 @@ def main(args: Optional[str] = None):
         help="Integer id associated with unknown/oov LM",
     )
     parser.add_argument("--device", type=torch.device, default=None)
-    parser.add_argument("--batch-size", type=as_nat, default=32)
+    parser.add_argument("--batch-size", type=as_nat, default=1)
+    parser.add_argument("--chunk-size", type=as_nat, default=1)
     parser.add_argument("--num-workers", type=as_nat, default=None)
 
     options = parser.parse_args(args)

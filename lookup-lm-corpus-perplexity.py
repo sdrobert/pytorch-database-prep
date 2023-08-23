@@ -75,6 +75,13 @@ of LM.
 
 This script takes in a corpus as an (optionally gzipped) text file, one line per
 sentence, and an n-gram/lookup LM, and prints the perplexity of the corpus to stdout.
+For example, assuming that a gzipped ARPA lm is saved to "lm.arpa.gz" and the text file
+is "text.gz":
+
+   {FN} --arpa lm.arpa.gz text.gz
+
+While fast and serviceable for small LMs, this pure-Python implementation isn't very
+efficient memory-wise. 
 """
 
 
@@ -441,7 +448,7 @@ def main(args: Optional[str] = None):
         metavar=("STATE_PTH", "TOKEN2ID_PTH"),
         default=None,
         help="Path to a(n optionally gzipped) state dict file (from "
-        "arpa-lm-to-state-dict) and a token2id file",
+        "arpa-lm-to-state-dict.py) and a token2id file for PyTorch decoding",
     )
     parser.add_argument(
         "corpus",
@@ -456,8 +463,8 @@ def main(args: Optional[str] = None):
         default=sys.stdout,
         help="File to write perplexity to. Defaults to stdout",
     )
-
     parser.add_argument("--verbose", "-v", action="store_true", default=False)
+
     parser.add_argument(
         "--sos-token",
         metavar="TOK",
@@ -469,7 +476,7 @@ def main(args: Optional[str] = None):
         type=np.int64,
         metavar="INT",
         default=None,
-        help="Integer id associated with start-of-sequence tokens",
+        help="Integer id associated with start-of-sequence tokens (PyTorch only)",
     )
     parser.add_argument(
         "--eos-token",
@@ -482,7 +489,7 @@ def main(args: Optional[str] = None):
         type=np.int64,
         metavar="INT",
         default=None,
-        help="Integer id associated with end-of-sequence tokens",
+        help="Integer id associated with end-of-sequence tokens (PyTorch only)",
     )
     parser.add_argument(
         "--unk-token",
@@ -495,12 +502,33 @@ def main(args: Optional[str] = None):
         type=np.int64,
         default=None,
         metavar="INT",
-        help="Integer id associated with unknown/oov LM",
+        help="Integer id associated with unknown/oov LM (PyTorch only)",
     )
-    parser.add_argument("--device", type=torch.device, default=None)
-    parser.add_argument("--batch-size", type=as_nat, default=1)
-    parser.add_argument("--chunk-size", type=as_nat, default=1)
-    parser.add_argument("--num-workers", type=as_nat, default=None)
+    parser.add_argument(
+        "--device",
+        type=torch.device,
+        default=None,
+        help="Device to perform PyTorch decoding on. Defaults to CUDA if available",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=as_nat,
+        default=1,
+        help="Number of sentences to process simultaneously (PyTorch only)",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=as_nat,
+        default=1,
+        help="Number of tokens in a sentence to process simultaneously (PyTorch only)",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=as_nat,
+        default=None,
+        help="Number of workers to ready data (PyTorch only). Defaults to number of "
+        "cores on the machine",
+    )
 
     options = parser.parse_args(args)
 

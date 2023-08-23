@@ -19,7 +19,7 @@ import argparse
 import os
 
 from typing import Any, Callable, Collection, Dict, Mapping, Optional, Sequence, Tuple
-from typing_extensions import Literal
+from typing_extensions import Literal, get_args
 from itertools import chain
 
 import param
@@ -51,6 +51,20 @@ from pydrobert.torch.data import (
     SpectDataParams,
     SpectDataSet,
 )
+from pydrobert.torch.argcheck import (
+    is_in,
+    is_closed01f,
+    is_nat,
+    is_bool,
+    is_nonnegi,
+    is_equal,
+    is_lti,
+    as_nat,
+    as_closed01,
+    as_nonnegi,
+    as_dir,
+    as_posf,
+)
 
 __all__ = [
     "BaselineParams",
@@ -80,29 +94,6 @@ TRAIN_DATA_LOADER_PARAMS_SUBSET = {
 }
 
 DECODE_DATA_SET_PARAMS_SUBSET = {"subset_ids", "delta_order", "do_mvn", "eos"}
-
-
-def check_in(name: str, val: str, choices: Collection[str]):
-    if val not in choices:
-        choices = "', '".join(sorted(choices))
-        raise ValueError(f"Expected {name} to be one of '{choices}'; got '{val}'")
-
-
-def check_positive(name: str, val, nonnegative=False):
-    pos = "non-negative" if nonnegative else "positive"
-    if val < 0 or (val == 0 and not nonnegative):
-        raise ValueError(f"Expected {name} to be {pos}; got {val}")
-
-
-def check_equals(name: str, val, other):
-    if val != other:
-        raise ValueError(f"Expected {name} to be equal to {other}; got {val}")
-
-
-def check_less_than(name: str, val, other, equal=False):
-    lt = "less than or equal to" if equal else "less than"
-    if val > other or (val == other and not equal):
-        raise ValueError(f"Expected {name} to be {lt} {other}; got {val}")
 
 
 class Encoder(torch.nn.Module, metaclass=abc.ABCMeta):
@@ -136,8 +127,8 @@ class Encoder(torch.nn.Module, metaclass=abc.ABCMeta):
     hidden_size: int
 
     def __init__(self, input_size: int, hidden_size: int) -> None:
-        check_positive("input_size", input_size)
-        check_positive("hidden_size", hidden_size)
+        input_size = is_nat(input_size, "input_size")
+        hidden_size = is_nat(hidden_size, "hidden_size")
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -154,6 +145,9 @@ class Encoder(torch.nn.Module, metaclass=abc.ABCMeta):
     __call__: Callable[[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]
 
 
+Nonlinearity = Literal["relu", "tanh", "sigmoid"]
+
+
 class FeedForwardEncoder(Encoder):
     """Encoder is a simple feed-forward network"""
 
@@ -163,12 +157,13 @@ class FeedForwardEncoder(Encoder):
         hidden_size: int,
         num_layers: int = 1,
         bias: bool = True,
-        nonlinearity: Literal["relu", "tanh", "sigmoid"] = "relu",
+        nonlinearity: Nonlinearity = "relu",
         dropout: float = 0.0,
     ):
-        check_positive("num_layers", num_layers)
-        check_positive("dropout", dropout, nonnegative=True)
-        check_in("nonlinearity", nonlinearity, {"relu", "tanh", "sigmoid"})
+        num_layers = is_nat(num_layers, "num_layers")
+        dropout = is_closed01f(dropout, "dropout")
+        nonlinearity = is_in(nonlinearity, get_args(Nonlinearity), "nonlinearity")
+        bias = is_bool(bias, "bias")
         super().__init__(input_size, hidden_size)
         drop = torch.nn.Dropout(dropout)
         if nonlinearity == "relu":
@@ -200,6 +195,9 @@ class FeedForwardEncoder(Encoder):
         return self.stack(input), lens
 
 
+RecurrentType = Literal["lstm", "rnn", "gru"]
+
+
 class RecurrentEncoder(Encoder):
     """Recurrent encoder
 
@@ -217,13 +215,16 @@ class RecurrentEncoder(Encoder):
         hidden_size: int,
         num_layers: int = 2,
         bidirectional: bool = True,
-        recurrent_type: Literal["lstm", "rnn", "gru"] = "lstm",
+        recurrent_type: RecurrentType = "lstm",
         dropout: float = 0.0,
     ) -> None:
-        check_positive("num_layers", num_layers)
-        check_in("recurrent_type", recurrent_type, {"lstm", "rnn", "gru"})
-        check_positive("dropout", dropout, nonnegative=True)
-        check_positive("hidden_size", hidden_size)
+        num_layers = is_nat(num_layers, "num_layers")
+        recurrent_type = is_in(
+            recurrent_type, get_args(RecurrentType), "recurrent_type"
+        )
+        dropout = is_closed01f(dropout, "dropout")
+        hidden_size = is_nat(hidden_size, "hidden_size")
+        bidirectional = is_bool(bidirectional, "bidirectional")
         if bidirectional:
             if hidden_size % 2:
                 raise ValueError(
@@ -271,14 +272,14 @@ class RecurrentDecoderWithAttention(MixableSequentialLanguageModel):
         decoder_hidden_size: Optional[int] = None,
         dropout: float = 0.0,
     ):
-        check_positive("hidden_size", hidden_size)
-        check_positive("vocab_size", vocab_size)
-        check_positive("embed_size", embed_size)
-        check_positive("dropout", dropout, nonnegative=True)
+        hidden_size = is_nat(hidden_size, "hidden_size")
+        vocab_size = is_nat(vocab_size, "vocab_size")
+        embed_size = is_nat(embed_size, "hidden_size")
+        dropout = is_closed01f(dropout, "dropout")
         if decoder_hidden_size is None:
             decoder_hidden_size = hidden_size
         else:
-            check_positive("decoder_hidden_size", decoder_hidden_size)
+            decoder_hidden_size = is_nat(decoder_hidden_size, "decoder_hidden_size")
         super().__init__(vocab_size)
         self.embed = torch.nn.Embedding(
             vocab_size + 1, embed_size, padding_idx=vocab_size
@@ -381,7 +382,7 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
     encoder: Encoder
 
     def __init__(self, encoder: Encoder, stack: int = 1) -> None:
-        check_positive("stack", stack)
+        stack = is_nat(stack, "stack")
         super().__init__()
         self.stack, self.encoder = stack, encoder
 
@@ -473,14 +474,14 @@ class CTCSpeechRecognizer(SpeechRecognizer):
         beta: float = 0.0,
         stack: int = 1,
     ) -> None:
-        check_positive("vocab_size", vocab_size)
-        check_positive("beam_width", beam_width, nonnegative=True)
+        vocab_size = is_nat(vocab_size, "vocab_size")
+        beam_width = is_nonnegi(beam_width, "beam_width")
         if lm is not None:
-            check_equals("lm.vocab_size", lm.vocab_size, vocab_size)
+            is_equal(lm.vocab_size, vocab_size, "lm.vocab_size", "vocab_size")
         super().__init__(encoder, stack)
         self.ff = torch.nn.Linear(encoder.hidden_size, vocab_size + 1)
         if beam_width:
-            self.search = CTCPrefixSearch(beam_width, beta, lm)
+            self.search = CTCPrefixSearch(beam_width, beta, lm, True)
         else:
             self.search = MyCTCGreedySearch()
         self.ctc_loss = torch.nn.CTCLoss(vocab_size, zero_infinity=True)
@@ -540,12 +541,13 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
         max_iters: int = 200,
         stack: int = 1,
     ) -> None:
-        check_positive("beam_width", beam_width)
+        beam_width = is_nat(beam_width, "beam_width")
         if lm is not None:
-            check_equals("lm.vocab_size", lm.vocab_size, decoder.vocab_size)
-        check_positive("max_iters", max_iters)
-        if eos is not None:
-            check_less_than("eos", eos, decoder.vocab_size)
+            is_equal(
+                lm.vocab_size, decoder.vocab_size, "lm.vocab_size", "decoder.vocab_size"
+            )
+        max_iters = is_nat(max_iters, "max_iters")
+        eos = is_lti(eos, decoder.vocab_size, "eos", "decoder.vocab_size", True)
         super().__init__(encoder, stack)
         self.decoder = decoder
         self.encoded_name_train = self.encoded_name_decode = encoded_name
@@ -809,12 +811,6 @@ class MyTrainingStateParams(TrainingStateParams):
     )
 
 
-def existing_dir(val: str) -> str:
-    if not os.path.isdir(val):
-        raise ValueError(f"'{val}' is not a directory")
-    return os.path.normpath(val)
-
-
 def _train_for_epoch(
     recognizer: SpeechRecognizer,
     optimizer: torch.optim.Optimizer,
@@ -1019,6 +1015,9 @@ def decode(options: argparse.Namespace):
     else:
         print_ = print
 
+    if options.inverse_beta is not None:
+        options.beta = 1 / options.inverse_beta
+
     if options.lookup_lm_state_dict is not None:
         print_("Loading LM...")
         lm_state_dict: dict = torch.load(options.lookup_lm_state_dict)
@@ -1027,8 +1026,11 @@ def decode(options: argparse.Namespace):
         if vocab_size is None:
             vocab_size = bparams.vocab_size
         else:
-            check_equals(
-                "state dict in --lookup-lm-state-dict", vocab_size, bparams.vocab_size
+            is_equal(
+                vocab_size,
+                bparams.vocab_size,
+                "state_dict['vocab_size']",
+                "bparams.vocab_size",
             )
         lm = LookupLanguageModel(vocab_size, sos)
         lm.load_state_dict(lm_state_dict)
@@ -1163,7 +1165,7 @@ def main(args: Optional[Sequence[str]] = None):
     )
     train_parser.add_argument(
         "--num-workers",
-        type=int,
+        type=as_nonnegi,
         default=0,
         help="Number of data workers. Default (0) is on main thread",
     )
@@ -1179,11 +1181,9 @@ def main(args: Optional[Sequence[str]] = None):
         default=None,
         help="If set, the model will be loaded first with this state dict. ",
     )
+    train_parser.add_argument("train_dir", type=as_dir, help="Training SpectDataSet")
     train_parser.add_argument(
-        "train_dir", type=existing_dir, help="Training SpectDataSet"
-    )
-    train_parser.add_argument(
-        "val_dir", type=existing_dir, help="Validation/dev SpectDataSet"
+        "val_dir", type=as_dir, help="Validation/dev SpectDataSet"
     )
     train_parser.add_argument(
         "best",
@@ -1208,22 +1208,29 @@ def main(args: Optional[Sequence[str]] = None):
     )
     decode_parser.add_argument(
         "--beam-width",
-        type=int,
+        type=as_nonnegi,
         default=8,
         help="Number of prefixes to keep track of in search",
     )
     decode_parser.add_argument(
         "--max-hyp-len",
-        type=int,
-        default=1000,
+        type=as_nat,
+        default=10_000,
         help="Maximum length of hypothesis to output (ensures termination)",
     )
-    decode_parser.add_argument(
+    beta_grp = decode_parser.add_mutually_exclusive_group()
+    beta_grp.add_argument(
         "--beta",
-        type=float,
+        type=as_closed01,
         default=0.0,
         help="Shallow fusion mixing coefficient (only applies if "
         "--lookup-lm-state-dict is set)",
+    )
+    beta_grp.add_argument(
+        "--inverse-beta",
+        type=as_posf,
+        default=None,
+        help="If value is B, sets --beta to 1 / B",
     )
     decode_parser.add_argument(
         "--lookup-lm-state-dict",
@@ -1239,7 +1246,7 @@ def main(args: Optional[Sequence[str]] = None):
         help="Path to the state dictionary of the model to load",
     )
     decode_parser.add_argument(
-        "data_dir", type=existing_dir, help="SpectDataSet directory of input"
+        "data_dir", type=as_dir, help="SpectDataSet directory of input"
     )
     decode_parser.add_argument(
         "hyp_dir", help="Directory to store hypothesis transcriptions"

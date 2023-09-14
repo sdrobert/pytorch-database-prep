@@ -18,7 +18,7 @@ import abc
 import argparse
 import os
 
-from typing import Any, Callable, Collection, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 from typing_extensions import Literal, get_args
 from itertools import chain
 
@@ -424,6 +424,18 @@ class SpeechRecognizer(torch.nn.Module, metaclass=abc.ABCMeta):
         return self.train_loss_from_encoded(input, lens, refs, ref_lens)
 
     @abc.abstractmethod
+    def logits_from_encoded(
+        self, input: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ...
+
+    def logits(
+        self, feats: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        input, lens = self.encode(feats, lens)
+        return self.logits_from_encoded(input, lens)
+
+    @abc.abstractmethod
     def decode_from_encoded(
         self, input: torch.Tensor, lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -500,6 +512,11 @@ class CTCSpeechRecognizer(SpeechRecognizer):
     ) -> torch.Tensor:
         log_probs = torch.nn.functional.log_softmax(self.ff(input), 2)
         return self.ctc_loss(log_probs, refs.T, lens, ref_lens)
+
+    def logits_from_encoded(
+        self, input: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.ff(input), lens
 
     def decode_from_encoded(
         self, input: torch.Tensor, lens: torch.Tensor
@@ -595,6 +612,13 @@ class EncoderDecoderSpeechRecognizer(SpeechRecognizer):
         prev = {self.encoded_name_decode: input, self.encoded_lens_name_decode: lens}
         hyps, lens, _ = self.search(prev, input.size(1), self.max_iters)
         return hyps[..., 0], lens[..., 0]  # most probable
+
+    def logits_from_encoded(
+        self, input: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        hyps, lens = self.decode_from_encoded(input, lens)
+        prev = {self.encoded_name_decode: input, self.encoded_lens_name_decode: lens}
+        return self.search.lm(hyps[:-1], prev), lens
 
 
 class FeedForwardEncoderParams(param.Parameterized):
@@ -1070,17 +1094,22 @@ def decode(options: argparse.Namespace):
 
     os.makedirs(options.hyp_dir, exist_ok=True)
 
-    print_("Beginning decoding...")
+    write_logits: bool = options.write_logits
+    doing = "writing logits" if write_logits else "decoding"
+    print_(f"Beginning {doing}...")
     for feat, _, uttid in ds:
         feats = feat.unsqueeze(1).to(options.device)
         lens = torch.tensor([feats.size(0)], device=options.device)
-        hyps, lens = recognizer.decode(feats, lens)
+        if write_logits:
+            hyps, lens = recognizer.logits(feats, lens)
+        else:
+            hyps, lens = recognizer.decode(feats, lens)
         hyp = hyps[: lens[0], 0].cpu()
         if dparams.eos is not None:
             eos_mask = (hyp == dparams.eos).cumsum(0).bool()
             hyp = hyp.masked_select(~eos_mask)
         torch.save(hyp, os.path.join(options.hyp_dir, uttid + ".pt"))
-    print("Done decoding")
+    print_(f"Done {doing}")
 
 
 def main(args: Optional[Sequence[str]] = None):
@@ -1256,6 +1285,12 @@ def main(args: Optional[Sequence[str]] = None):
         action="store_true",
         default=False,
         help="Whether to perform decoding quietly",
+    )
+    decode_parser.add_argument(
+        "--write-logits",
+        action="store_true",
+        default=False,
+        help="If set, writes per-frame logits to file rather than hypotheses",
     )
 
     options = parser.parse_args(args)

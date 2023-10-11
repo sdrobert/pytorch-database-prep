@@ -275,7 +275,7 @@ def main(args: Optional[Sequence[str]] = None):
         utt_batch.clear()
         logit_batch.clear()
 
-    for logit_pth in logit_dir.iterdir():
+    for logit_pth in sorted(logit_dir.iterdir()):
         utt = logit_pth.name
         if not logit_pth.is_file() or not utt.startswith(fp) or not utt.endswith(fs):
             continue

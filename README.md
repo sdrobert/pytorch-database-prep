@@ -4,8 +4,9 @@ Scripts to aid in the setup of various databases for PyTorch
 
 ## Databases
 
-- The Wall Street Journal Speech Corpus
 - Gigaword Abstractive Summary Corpus
+- Librispeech
+- The Wall Street Journal Speech Corpus
 - TIMIT Acoustic-Phonetic Continuous Speech Corpus
 
 Please consult the
@@ -47,8 +48,12 @@ necessary; if you have a conflicting package, just try that one instead.
 
 For speech corpora such as WSJ, these "borrow" from
 [Kaldi](http://kaldi-asr.org/). Kaldi's license file has been copied to
-``COPYING_kaldi``. Kaldi is Apache 2.0 licensed, as is this repo.
+[COPYING_kaldi](./COPYING_kaldi). Kaldi is Apache 2.0 licensed, as is this repo.
 
 The `rouge-1.5.5.py` script uses code from
 [py-rouge](https://github.com/Diego999/py-rouge), which is
 Apache 2.0 licensed.
+
+`ngram_lm.DbfilenameCountDict` and the various routines surrounding it are
+based on the python 3.11 source of the `shelve` module, subject to the PSF.
+Details are in [LICENSE_python](./LICENSE_python).

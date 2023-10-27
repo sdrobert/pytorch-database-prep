@@ -37,13 +37,10 @@ import sys
 import argparse
 import re
 import warnings
-import locale
 import gzip
 import itertools
-import torch
 import urllib.request as request
 
-from collections import OrderedDict
 from shutil import copy as copy_paths
 
 import ngram_lm  # type: ignore (pylance might complain if in subdirectory)
@@ -51,10 +48,16 @@ import pydrobert.speech.command_line as speech_cmd
 import pydrobert.torch.command_line as torch_cmd
 
 from unlzw import unlzw  # type: ignore
-from common import get_num_avail_cores, glob, mkdir, sort, cat, pipe_to, wc_l  # type: ignore
-
-locale.setlocale(locale.LC_ALL, "C")
-
+from common import (
+    get_num_avail_cores,
+    glob,
+    mkdir,
+    sort,
+    cat,
+    pipe_to,
+    wc_l,
+    utt2spk_to_spk2utt,
+)
 
 ALPHA = set(chr(x) for x in range(ord("A"), ord("Z") + 1))
 
@@ -257,15 +260,6 @@ def normalize_transcript(in_stream, nsn, spn, lexical_equivs):
         yield out
 
 
-def utt2spk_to_spk2utt(in_stream):
-    spk_hash = OrderedDict()
-    for line in in_stream:
-        utt, spk = line.split(" ")
-        spk_hash.setdefault(spk, []).append(utt)
-    for spk, utts in spk_hash.items():
-        yield "{} {}".format(spk, " ".join(utts))
-
-
 def wsj_data_prep(wsj_subdirs, data_root):
     # this follows part of kaldi/egs/wsj/s5/local/wsj_data_prep.sh, but factors
     # out the language modelling stuff to wsj_word_lm in case we don't care
@@ -368,7 +362,8 @@ def wsj_data_prep(wsj_subdirs, data_root):
                 ndx2flist(
                     cat(
                         find_link_dir(
-                            wsj_subdirs, "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
+                            wsj_subdirs,
+                            "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
                         )
                     ),
                     wsj_subdirs,
@@ -390,10 +385,12 @@ def wsj_data_prep(wsj_subdirs, data_root):
                 ndx2flist(
                     cat(
                         find_link_dir(
-                            wsj_subdirs, "13-34.1/wsj1/doc/indices/si_tr_s.ndx",
+                            wsj_subdirs,
+                            "13-34.1/wsj1/doc/indices/si_tr_s.ndx",
                         ),
                         find_link_dir(
-                            wsj_subdirs, "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
+                            wsj_subdirs,
+                            "11-13.1/wsj0/doc/indices/train/tr_s_wv1.ndx",
                         ),
                     ),
                     wsj_subdirs,
@@ -460,7 +457,8 @@ def wsj_data_prep(wsj_subdirs, data_root):
                     x.replace("13_32_1", "13_33_1")
                     for x in cat(
                         find_link_dir(
-                            wsj_subdirs, "13-32.1/wsj1/doc/indices/wsj1/eval/h1_p0.ndx",
+                            wsj_subdirs,
+                            "13-32.1/wsj1/doc/indices/wsj1/eval/h1_p0.ndx",
                         )
                     )
                 ),
@@ -480,7 +478,8 @@ def wsj_data_prep(wsj_subdirs, data_root):
                     x.replace("13_32_1", "13_33_1")
                     for x in cat(
                         find_link_dir(
-                            wsj_subdirs, "13-32.1/wsj1/doc/indices/wsj1/eval/h2_p0.ndx",
+                            wsj_subdirs,
+                            "13-32.1/wsj1/doc/indices/wsj1/eval/h2_p0.ndx",
                         )
                     )
                 ),
@@ -498,7 +497,12 @@ def wsj_data_prep(wsj_subdirs, data_root):
     pipe_to(
         sort(
             ndx2flist(
-                cat(find_link_dir(wsj_subdirs, "13-34.1/wsj1/doc/indices/h1_p0.ndx",)),
+                cat(
+                    find_link_dir(
+                        wsj_subdirs,
+                        "13-34.1/wsj1/doc/indices/h1_p0.ndx",
+                    )
+                ),
                 wsj_subdirs,
             )
         ),
@@ -786,21 +790,21 @@ def write_cmu_vocab_to_path(path):
 
 
 def wsj_train_lm(
-    vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz, deltas=None
+    vocab, count_dicts, max_order, toprune_txt_gz, lm_arpa_gz, deltas=None
 ):
-    to_prune = set(ngram_counts[0]) - vocab
+    to_prune = set(count_dicts[0]) - vocab
     # prune all out-of-vocabulary n-grams and hapax
-    for i, ngram_count in enumerate(ngram_counts[1:]):
+    for i, count_dict in enumerate(count_dicts[1:]):
         if i:
             to_prune |= set(
                 k
-                for (k, v) in ngram_count.items()
+                for (k, v) in count_dict.items()
                 if k[:-1] in to_prune or k[-1] in to_prune or v == 1
             )
         else:
             to_prune |= set(
                 k
-                for (k, v) in ngram_count.items()
+                for (k, v) in count_dict.items()
                 if k[0] in to_prune or k[1] in to_prune or v == 1
             )
     assert not (to_prune & vocab)
@@ -808,8 +812,8 @@ def wsj_train_lm(
         for v in sorted(x if isinstance(x, str) else " ".join(x) for x in to_prune):
             file_.write(v)
             file_.write("\n")
-    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(
-        ngram_counts, sos="<s>", to_prune=to_prune, delta=deltas
+    prob_list = ngram_lm.count_dicts_to_prob_list_kneser_ney(
+        count_dicts, sos="<s>", to_prune=to_prune, delta=deltas
     )
     # remove start-of-sequence probability mass
     # (we don't necessarily have an UNK, so pretend it's something else)
@@ -883,24 +887,22 @@ def wsj_word_lm(wsj_subdirs, config_dir, max_order):
     del text
 
     # count n-grams in sentences
-    ngram_counts = ngram_lm.sents_to_ngram_counts(
-        sents, max_order, sos="<s>", eos="</s>"
-    )
+    count_dicts = ngram_lm.sents_to_count_dicts(sents, max_order, sos="<s>", eos="</s>")
     # ensure all vocab terms have unigram counts (even if 0) for zeroton
     # interpolation
     for v in vocab:
-        ngram_counts[0].setdefault(v, 0)
+        count_dicts[0].setdefault(v, 0)
     del sents
 
     with gzip.open(os.path.join(lmdir, "counts.txt.gz"), "wt") as file_:
-        for ngram_count in ngram_counts:
-            for ngram, count in ngram_count.items():
+        for count_dict in count_dicts:
+            for ngram, count in count_dict.items():
                 if isinstance(ngram, str):
                     file_.write("{} {}\n".format(ngram, count))
                 else:
                     file_.write("{} {}\n".format(" ".join(ngram), count))
 
-    wsj_train_lm(vocab, ngram_counts, max_order, toprune_txt_gz, lm_arpa_gz)
+    wsj_train_lm(vocab, count_dicts, max_order, toprune_txt_gz, lm_arpa_gz)
 
 
 def wsj_init_char_config(
@@ -1055,17 +1057,15 @@ def wsj_char_lm(wsj_subdirs, config_dir, max_order, ngraph_order):
     del text
 
     # count n-grams in sentences
-    ngram_counts = ngram_lm.sents_to_ngram_counts(
-        sents, max_order, sos="<s>", eos="</s>"
-    )
+    count_dicts = ngram_lm.sents_to_count_dicts(sents, max_order, sos="<s>", eos="</s>")
     del sents
     # ensure all vocab terms have unigram counts (even if 0) for zeroton
     # interpolation
     for v in vocab:
-        ngram_counts[0].setdefault(v, 0)
+        count_dicts[0].setdefault(v, 0)
     with gzip.open(os.path.join(lmdir, "counts.txt.gz"), "wt") as file_:
-        for ngram_count in ngram_counts:
-            for ngram, count in ngram_count.items():
+        for count_dict in count_dicts:
+            for ngram, count in count_dict.items():
                 if isinstance(ngram, str):
                     file_.write("{} {}\n".format(ngram, count))
                 else:
@@ -1077,13 +1077,14 @@ def wsj_char_lm(wsj_subdirs, config_dir, max_order, ngraph_order):
     # so we use that here.
     # It turns out that 0.5, 1.0, 1.5 are the default fallbacks in KenLM, and
     # other character-based lms seem to be using that switch. Cool.
+    # UPDATE: I've implemented those deltas as fallbacks in ngram_lm. No need to
+    # hard-code
     wsj_train_lm(
         vocab,
-        ngram_counts,
+        count_dicts,
         max_order,
         toprune_txt_gz,
         lm_arpa_gz,
-        [(0.5, 1.0, 1.5)] * max_order,
     )
 
 
@@ -1319,36 +1320,34 @@ def wsj_subword_lm(wsj_subdirs, config_dir, max_order):
     sents = ngram_lm.text_to_sents(text, sent_end_expr="\n", word_delim_expr=" ")
     del text
 
-    ngram_counts = ngram_lm.sents_to_ngram_counts(
-        sents, max_order, sos="<s>", eos="</s>"
-    )
+    count_dicts = ngram_lm.sents_to_count_dicts(sents, max_order, sos="<s>", eos="</s>")
     for v in vocab:
-        ngram_counts[0].setdefault(v, 0)
+        count_dicts[0].setdefault(v, 0)
     del sents
 
     with gzip.open(os.path.join(lmdir, "counts.txt.gz"), "wt") as file_:
-        for ngram_count in ngram_counts:
-            for ngram, count in ngram_count.items():
+        for count_dict in count_dicts:
+            for ngram, count in count_dict.items():
                 if isinstance(ngram, str):
                     file_.write("{} {}\n".format(ngram, count))
                 else:
                     file_.write("{} {}\n".format(" ".join(ngram), count))
 
-    ngram_counts = [dict() for _ in range(max_order)]
+    count_dicts = [dict() for _ in range(max_order)]
     with gzip.open(os.path.join(lmdir, "counts.txt.gz"), "rt") as file_:
         for line in file_:
             line = line.strip().split(" ")
             count = int(line.pop())
             if len(line) == 1:
-                ngram_counts[0][line[0]] = count
+                count_dicts[0][line[0]] = count
             else:
-                ngram_counts[len(line) - 1][tuple(line)] = count
+                count_dicts[len(line) - 1][tuple(line)] = count
 
     # unless the subword vocabulary is really large, we'll have the same
     # problem inferring deltas as in the character LM case.
     wsj_train_lm(
         vocab,
-        ngram_counts,
+        count_dicts,
         max_order,
         toprune_txt_gz,
         lm_arpa_gz,
@@ -1663,7 +1662,6 @@ def build_parser():
 
 
 def preamble(options):
-
     wsj_subdirs = []
     for wsj_root in options.wsj_roots:
         wsj_subdirs.extend(glob(wsj_root, r"??-?.?"))
@@ -1673,7 +1671,6 @@ def preamble(options):
 
 
 def init_word(options):
-
     wsj_subdirs = []
     for wsj_root in options.wsj_roots:
         wsj_subdirs.extend(glob(wsj_root, r"??-?.?"))
@@ -1693,7 +1690,6 @@ def init_word(options):
 
 
 def init_char(options):
-
     wsj_subdirs = []
     for wsj_root in options.wsj_roots:
         wsj_subdirs.extend(glob(wsj_root, r"??-?.?"))
@@ -1721,7 +1717,6 @@ def init_char(options):
 
 
 def init_subword(options):
-
     wsj_subdirs = []
     for wsj_root in options.wsj_roots:
         wsj_subdirs.extend(glob(wsj_root, r"??-?.?"))
@@ -1752,7 +1747,6 @@ def init_subword(options):
 
 
 def torch_dir(options):
-
     local_dir = os.path.join(options.data_root, "local")
     if options.config_subdir is None:
         dirs = os.listdir(local_dir)
@@ -1894,7 +1888,6 @@ def torch_dir(options):
 
 
 def filter_(options):
-
     dir_ = os.path.join(options.data_root, "local", "data")
     lex_equivs_csv = os.path.join(dir_, "lex_equivs.csv")
 

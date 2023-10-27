@@ -27,12 +27,11 @@
 import argparse
 import glob
 import gzip
-import locale
 import math
 import os
 import sys
-import torch
 import json
+import warnings
 
 from shutil import copy as copy_paths
 from tempfile import SpooledTemporaryFile
@@ -44,12 +43,11 @@ import pydrobert.torch.command_line as torch_cmd
 
 import ngram_lm  # type: ignore (pylance might complain if in subdirectory)
 from pydrobert.speech.compute import FrameComputer
+from pydrobert.speech.post import PostProcessor, Stack
 from pydrobert.speech.util import alias_factory_subclass_from_arg
 
 from common import get_num_avail_cores  # type: ignore
 
-
-locale.setlocale(locale.LC_ALL, "C")
 
 RESOURCE_DIR = os.path.join(os.path.dirname(__file__), "resources", "timit")
 if not os.path.isdir(RESOURCE_DIR):
@@ -254,7 +252,6 @@ def preamble(options):
 
 
 def write_mapped_trn(src, dst, map_, utts=None):
-
     if isinstance(src, str):
         if isinstance(dst, str):
             with open(src) as in_trn, open(dst, "w") as out_trn:
@@ -294,7 +291,6 @@ def write_mapped_trn(src, dst, map_, utts=None):
 
 
 def write_mapped_stm(src, dst, map_, wcinfo=None):
-
     if isinstance(src, str):
         if isinstance(dst, str):
             with open(src) as in_stm, open(dst, "w") as out_stm:
@@ -364,7 +360,6 @@ def write_mapped_stm(src, dst, map_, wcinfo=None):
 
 
 def write_mapped_ctm(src, dst, map_, wclist=None):
-
     if isinstance(src, str):
         if isinstance(dst, str):
             with open(src) as in_ctm, open(dst, "w") as out_ctm:
@@ -419,7 +414,6 @@ def write_mapped_ctm(src, dst, map_, wclist=None):
 
 
 def init_phn(options):
-
     local_dir = os.path.join(options.data_root, "local")
     data_dir = os.path.join(local_dir, "data")
     if not os.path.isdir(data_dir):
@@ -432,14 +426,16 @@ def init_phn(options):
 
     phone_map = get_phone_map()
     for key in set(phone_map):
-        if options.vocab_size == 61:
+        if options.vocab_size >= 60:
             phone_map[key] = phone_map[key][0]
         elif options.vocab_size == 48:
             phone_map[key] = phone_map[key][1]
         else:
             phone_map[key] = phone_map[key][2]
+    if options.vocab_size == 60:
+        phone_map["q"] = None
     phone_set = sorted(set(val for val in phone_map.values() if val is not None))
-    phone_set += ["</s>", "<s>"]
+    assert len(phone_set) == options.vocab_size
 
     os.makedirs(config_dir, exist_ok=True)
 
@@ -486,7 +482,6 @@ def init_phn(options):
 
 
 def train_phn_lm(config_dir, max_order):
-
     spk2utts = dict()
     with open(os.path.join(config_dir, "utt2spk")) as utt2spk:
         for line in utt2spk:
@@ -523,21 +518,20 @@ def train_phn_lm(config_dir, max_order):
     sents = sorted(set(sents))
 
     # write the training data to a gzipped trn file in case someone wants to train with
-    # it. We don't reuse utterance ids because we dropped duplicate entries previously.
+    # it. We don't reuse utterance ids because we've dropped duplicate entries
+    # previously.
     num_digits = int(math.log10(len(sents)) + 1)
     utt_format_str = f" (lm{{:0{num_digits}d}})\n"
     with gzip.open(os.path.join(config_dir, "lm_train.trn.gz"), "wt") as file_:
         for idx, sent in enumerate(sents):
             file_.write(" ".join(sent) + utt_format_str.format(idx))
 
-    ngram_counts = ngram_lm.sents_to_ngram_counts(
-        sents, max_order, sos="<s>", eos="</s>"
-    )
+    count_dicts = ngram_lm.sents_to_count_dicts(sents, max_order, sos="<s>", eos="</s>")
     # 4-fold cross-validation said K&M with delta=0.5 lead to the best perplexity for
     # both 2-grams and 3-grams. Too small for Katz. Perplexity for add k was higher
     # for a variety of k.
     # I suspect the primary benefit of the LM is to forbid invalid phone sequences.
-    prob_list = ngram_lm.ngram_counts_to_prob_list_kneser_ney(ngram_counts, delta=0.5)
+    prob_list = ngram_lm.count_dicts_to_prob_list_kneser_ney(count_dicts, delta=0.5)
     lm = ngram_lm.BackoffNGramLM(prob_list, sos="<s>", eos="</s>", unk="<s>")
     lm.prune_by_name({"<s>"})
     prob_list = lm.to_prob_list()
@@ -546,7 +540,6 @@ def train_phn_lm(config_dir, max_order):
 
 
 def torch_dir(options):
-
     local_dir = os.path.join(options.data_root, "local")
     if options.config_subdir is None:
         dirs = os.listdir(local_dir)
@@ -586,7 +579,7 @@ def torch_dir(options):
     ):
         copy_paths(os.path.join(config_dir, fn), os.path.join(ext, fn))
 
-    lm_arpa_gz = os.path.join(config_dir, "lm", "lm.arpa.gz")
+    lm_arpa_gz = os.path.join(config_dir, "lm.arpa.gz")
     if os.path.exists(lm_arpa_gz):
         copy_paths(lm_arpa_gz, ext)
 
@@ -701,6 +694,33 @@ def torch_dir(options):
         frame_shift_ms = computer.frame_shift_ms
         del computer, json_
 
+    # FIXME(sdrobert): brittle. Needs to be manually updated with new postprocessors
+    # and preprocessors
+    do_strict = True
+    try:
+        with open(options.postprocess) as f:
+            json_ = json.load(f)
+    except IOError:
+        json_ = json.loads(options.postprocess)
+    postprocessors = []
+    if isinstance(json_, dict):
+        postprocessors.append(alias_factory_subclass_from_arg(PostProcessor, json_))
+    else:
+        for element in json_:
+            postprocessors.append(
+                alias_factory_subclass_from_arg(PostProcessor, element)
+            )
+    for postprocessor in postprocessors:
+        if isinstance(postprocessor, Stack):
+            if postprocessor._pad_mode is None:
+                warnings.warn(
+                    "Found a stack postprocessor with no pad_mode. This will likely "
+                    "mess up the segment boundaries. Disabling --strict check."
+                )
+                do_strict = False
+            frame_shift_ms *= postprocessor.num_vectors
+    del postprocessors, json_
+
     ctm_src = os.path.join(config_dir, "all.ctm")
     stm_src = os.path.join(config_dir, "all.stm")
     trn_src = os.path.join(config_dir, "all.trn")
@@ -770,8 +790,9 @@ def torch_dir(options):
         args = [
             part_dir,
             os.path.join(ext, f"{part}.info.ark"),
-            "--strict",
         ]
+        if do_strict:
+            args.append("--strict")
         assert not torch_cmd.get_torch_spect_data_dir_info(args)
 
 
@@ -785,7 +806,6 @@ def filter(options):
         return
 
     if options.both_stm:
-
         # these files shouldn't change for specific subdirectory configurations, so
         # we won't bother the user with 'em.
         config_dir = os.path.join(options.data_root, "local", "data")
@@ -883,20 +903,20 @@ def build_init_phn_parser(subparsers):
     parser = subparsers.add_parser(
         "init_phn",
         help="Perform setup common to all phone-based parsing. "
-        "Needs to be done only once for a specific vocabulary size",
+        "Needs to be done only once for a specific vocabulary size (and language "
+        "model, if training one).",
     )
     parser.add_argument(
         "--config-subdir",
         default=None,
         help="Name of sub directory in data/local/ under which to store setup "
-        "specific to this vocabulary size. Defaults to "
-        "``phn<vocab_size>``",
+        "specific to this vocabulary size + lm. Defaults to 'phn<vocab_size>'",
     )
     parser.add_argument(
         "--vocab-size",
         default=48,
         type=int,
-        choices=[48, 61, 39],
+        choices=[48, 60, 61, 39],
         help="The number of phones to train against. For smaller phone sets, a "
         "surjective mapping is applied. WARNING: stored labels for test data will "
         "have the same vocabulary size as the training data. You should NOT report "

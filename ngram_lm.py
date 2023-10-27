@@ -1,4 +1,11 @@
-# Copyright 2021 Sean Robertson
+#!/usr/bin/env python
+
+# Caching is based off the Python module `shelve`; DbCountDict.update on Counter.update.
+# Both are PSF-licensed.
+#
+#   https://docs.python.org/3/license.html
+
+# Copyright 2023 Sean Robertson
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,31 +19,83 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import argparse
+from typing import (
+    Generator,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    TypeVar,
+)
 import warnings
 import sys
-import locale
 import re
+import struct
+import logging
+import gzip
 
 from collections import OrderedDict, Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableMapping, Mapping
 from itertools import product
+from typing_extensions import Final
+from tempfile import TemporaryDirectory
+from pathlib import Path
+from io import TextIOWrapper
 
 import numpy as np
 
+try:
+    from diskcache import Cache
+except:
+    Cache = None
+
+try:
+    from sortedcontainers import SortedList as sorted
+except ImportError:
+    pass
+
 __all__ = [
     "BackoffNGramLM",
-    "write_arpa",
-    "ngram_counts_to_prob_list_mle",
-    "ngram_counts_to_prob_list_add_k",
-    "ngram_counts_to_prob_list_simple_good_turing",
-    "ngram_counts_to_prob_list_katz_backoff",
-    "ngram_counts_to_prob_list_absolute_discounting",
-    "ngram_counts_to_prob_list_kneser_ney",
+    "main",
+    "count_dicts_to_prob_list_absolute_discounting",
+    "count_dicts_to_prob_list_add_k",
+    "count_dicts_to_prob_list_katz_backoff",
+    "count_dicts_to_prob_list_kneser_ney",
+    "count_dicts_to_prob_list_mle",
+    "count_dicts_to_prob_list_simple_good_turing",
+    "sents_to_count_dicts",
     "text_to_sents",
-    "sents_to_ngram_counts",
+    "write_arpa",
+    "DbCountDict",
+    "open_count_dict",
 ]
 
-locale.setlocale(locale.LC_ALL, "C")
+DEFT_SENT_END_EXPR: Final[re.Pattern] = re.compile(r"[.?!]+")
+DEFT_WORD_DELIM_EXPR: Final[re.Pattern] = re.compile(r"\W+")
+DEFT_EPS_LPROB: Final[float] = -99.999
+DEFT_ADD_K_K: Final[float] = 0.5
+DEFAULT_KATZ_THRESH: Final[int] = 7
+COUNTFILE_FMT_PREFIX: Final[str] = "counts.{order}"
+LPROBFILE_FMT_PREFIX: Final[str] = "lprobs.{order}"
+COMPLETE_SUFFIX: Final[str] = ".complete"
+DEFT_MAX_CACHE_LEN: Final[int] = 1_000_000
+DEFT_MAX_CACHE_AGE_SECONDS: Final[float] = 10.0
+SENTS_PER_INFO: Final[int] = 1_000
+
+FALLBACK_DELTAS: Final[Tuple[float, float, float]] = (0.5, 1.0, 1.5)
+
+Ngram = Union[str, Tuple[str, ...]]
+CountDict = MutableMapping[Ngram, int]
+CountDicts = List[CountDict]
+LProb = Union[float, Tuple[float, float]]
+ProbDict = MutableMapping[Ngram, LProb]
+ProbDicts = List[ProbDict]
+
 warnings.simplefilter("error", RuntimeWarning)
 
 
@@ -49,33 +108,45 @@ class BackoffNGramLM(object):
 
     Parameters
     ----------
-    prob_list : sequence
+    prob_dicts
         See :mod:`pydrobert.torch.util.parse_arpa_lm`
-    sos : str, optional
+    sos
         The start-of-sequence symbol. When calculating the probability of a
         sequence, :math:`P(sos) = 1` when `sos` starts the sequence. Defaults
         to ``'<S>'`` if that symbol is in the vocabulary, otherwise
         ``'<s>'``
-    eos : str, optional
+    eos
         The end-of-sequence symbol. This symbol is expected to terminate each
         sequence when calculating sequence or corpus perplexity. Defaults to
         ``</S>`` if that symbol is in the vocabulary, otherwise ``</s>``
-    unk : str, optional
+    unk
         The out-of-vocabulary symbol. If a unigram probability does not exist
         for a token, the token is replaced with this symbol. Defaults to
         ``'<UNK>'`` if that symbol is in the vocabulary, otherwise
         ``'<unk>'``
+    destructive
     """
 
-    def __init__(self, prob_list, sos=None, eos=None, unk=None):
+    def __init__(
+        self,
+        prob_dicts: ProbDicts,
+        sos: Optional[str] = None,
+        eos: Optional[str] = None,
+        unk: Optional[str] = None,
+        destructive: bool = False,
+    ):
         self.trie = self.TrieNode(0.0, 0.0)
         self.vocab = set()
-        if not len(prob_list) or not len(prob_list[0]):
-            raise ValueError("prob_list must contain (all) unigrams")
-        for order, dict_ in enumerate(prob_list):
+        max_order = len(prob_dicts)
+        if not max_order or not len(prob_dicts[0]):
+            raise ValueError("prob_dicts must contain (all) unigrams")
+        for order, prob_dict in enumerate(prob_dicts):
             is_first = not order
-            is_last = order == len(prob_list) - 1
-            for context, value in dict_.items():
+            is_last = order == max_order - 1
+            if not destructive:
+                prob_dict = prob_dict.copy()
+            while prob_dict:
+                context, value = prob_dict.popitem()
                 if is_first:
                     self.vocab.add(context)
                     context = (context,)
@@ -87,39 +158,49 @@ class BackoffNGramLM(object):
         if sos is None:
             if "<S>" in self.vocab:
                 sos = "<S>"
-            else:
+            elif "<s>" in self.vocab:
                 sos = "<s>"
-        if sos not in self.vocab:
+            else:
+                warnings.warn(
+                    "start-of-sequence symbol could not be found. Will not include "
+                    "in computations"
+                )
+        elif sos not in self.vocab:
             raise ValueError(
-                'start-of-sequence symbol "{}" does not have unigram '
-                "entry.".format(sos)
+                f"start-of-sequence symbol '{sos}' does not have unigram entry "
             )
         self.sos = self.trie.sos = sos
         if eos is None:
             if "</S>" in self.vocab:
                 eos = "</S>"
-            else:
+            elif "</s>" in self.vocab:
                 eos = "</s>"
-        if eos not in self.vocab:
+            else:
+                warnings.warn(
+                    "end-of-sequence symbol could not be found. Will not include "
+                    "in computations"
+                )
+        elif eos not in self.vocab:
             raise ValueError(
-                'end-of-sequence symbol "{}" does not have unigram '
-                "entry.".format(eos)
+                f"end-of-sequence symbol '{eos}' does not have a unigram entry"
             )
         self.eos = self.trie.eos = eos
         if unk is None:
             if "<UNK>" in self.vocab:
                 unk = "<UNK>"
-            else:
+            elif "<unk>" in self.vocab:
                 unk = "<unk>"
-        if unk in self.vocab:
-            self.unk = unk
-        else:
-            warnings.warn(
-                'out-of-vocabulary symbol "{}" does not have unigram count. '
-                "Out-of-vocabulary tokens will raise an error".format(unk)
+            else:
+                warnings.warn(
+                    "out-of-vocabulary symbol could not be found. OOVs will raise an "
+                    "error"
+                )
+        elif unk not in self.vocab:
+            raise ValueError(
+                f"out-of-vocabulary symbol '{unk}' does not have a unigram entry"
             )
-            self.unk = None
-        assert self.trie.depth == len(prob_list)
+        self.unk = unk
+        assert self.trie.depth == len(prob_dicts)
 
     class TrieNode(object):
         def __init__(self, lprob, bo):
@@ -207,7 +288,7 @@ class BackoffNGramLM(object):
                 denom = 0.0
                 for w, child in node.children.items():
                     assert child.lprob is not None
-                    num -= 10.0 ** child.lprob
+                    num -= 10.0**child.lprob
                     denom -= 10.0 ** self.conditional(h[1:] + (w,))
                 # these values may be ridiculously close to 1, but still valid.
                 if num < -1.0:
@@ -254,10 +335,10 @@ class BackoffNGramLM(object):
                     P_h = 10 ** self.log_prob(h, _srilm_hacks=_srilm_hacks)
                     for w, child in node.children.items():
                         assert child.lprob is not None
-                        num -= 10.0 ** child.lprob
+                        num -= 10.0**child.lprob
                         logP_w_given_hprime = self.conditional(h[1:] + (w,))
                         logP_w_given_hprimes.append(logP_w_given_hprime)
-                        denom -= 10.0 ** logP_w_given_hprime
+                        denom -= 10.0**logP_w_given_hprime
                     if num + 1 < eps or denom + 1 < eps:
                         warnings.warn(
                             "Malformed backoff weight for context {}. Leaving "
@@ -282,9 +363,9 @@ class BackoffNGramLM(object):
                         if child.bo:
                             continue  # don't prune children with backoffs
                         logP_w_given_h = child.lprob
-                        P_w_given_h = 10 ** logP_w_given_h
+                        P_w_given_h = 10**logP_w_given_h
                         logP_w_given_hprime = logP_w_given_hprimes[idx]
-                        P_w_given_hprime = 10 ** logP_w_given_hprime
+                        P_w_given_hprime = 10**logP_w_given_hprime
                         new_num = num + P_w_given_h
                         new_denom = denom + P_w_given_hprime
                         log_alphaprime = np.log1p(new_num)
@@ -296,7 +377,7 @@ class BackoffNGramLM(object):
                             P_w_given_h * log_delta_prob
                             + (log_alphaprime - log_alpha) * (1.0 + num)
                         )
-                        delta_perplexity = 10.0 ** KL - 1
+                        delta_perplexity = 10.0**KL - 1
                         if delta_perplexity < threshold:
                             node.children.pop(w)
                     # we don't have to set backoff properly (we'll renormalize at end).
@@ -511,9 +592,9 @@ class BackoffNGramLM(object):
         """
         sequence = list(sequence)
         if include_delimiters:
-            if not len(sequence) or sequence[0] != self.sos:
+            if self.sos is not None and (not len(sequence) or sequence[0] != self.sos):
                 sequence.insert(0, self.sos)
-            if sequence[-1] != self.eos:
+            if self.eos is not None and sequence[-1] != self.eos:
                 sequence.append(self.eos)
         if not len(sequence):
             raise ValueError(
@@ -524,7 +605,7 @@ class BackoffNGramLM(object):
             N -= 1
         return 10.0 ** (-self.log_prob(sequence) / N)
 
-    def corpus_perplexity(self, corpus, include_delimiters=True):
+    def corpus_perplexity(self, corpus, include_delimiters=True) -> float:
         r"""Calculate the perplexity of an entire corpus using this model
 
         A `corpus` is a sequence of sequences ``[s_1, s_2, ..., s_S]``. Each
@@ -547,21 +628,22 @@ class BackoffNGramLM(object):
         ----------
         corpus : sequence
         include_delimiters : bool, optional
-            Whether to add start- and end-of-sequence delimiters to each
-            sequence (if necessary). See :func:`sequence_complexity` for more
-            info
+            Whether to add start- and end-of-sequence delimiters to each sequence if
+            necessary and available. See :func:`sequence_complexity` for more info
         """
         joint = 0.0
         M = 0
         for sequence in corpus:
             sequence = list(sequence)
             if include_delimiters:
-                if not len(sequence) or sequence[0] != self.sos:
+                if self.sos is not None and (
+                    not len(sequence) or sequence[0] != self.sos
+                ):
                     sequence.insert(0, self.sos)
-                if sequence[-1] != self.eos:
+                if self.eos is not None and sequence[-1] != self.eos:
                     sequence.append(self.eos)
             if not len(sequence):
-                warnings.warn("skipping empty sequence (include_delimiters is False)")
+                warnings.warn("skipping empty sequence")
                 continue
             N = len(sequence)
             if sequence[0] == self.sos:
@@ -590,7 +672,7 @@ class BackoffNGramLM(object):
         """
         self.trie.prune_by_threshold(lprob)
 
-    def prune_by_name(self, to_prune, eps_lprob=-99.999):
+    def prune_by_name(self, to_prune, eps_lprob=DEFT_EPS_LPROB):
         """Prune n-grams by name
 
         This method prunes n-grams of arbitrary order by name. For n-grams of order > 1,
@@ -618,22 +700,314 @@ class BackoffNGramLM(object):
         self.trie.prune_by_name(to_prune, eps_lprob)
 
 
-def write_arpa(prob_list, out=sys.stdout):
+class _NoCacheDict(MutableMapping):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def __getitem__(self, key):
+        raise KeyError
+
+    def __setitem__(self, key, value) -> None:
+        pass
+
+    def __len__(self) -> int:
+        return 0
+
+    def __delitem__(self, key) -> None:
+        pass
+
+    def __iter__(self) -> Iterator:
+        return iter(tuple())
+
+
+V = TypeVar("V")
+
+
+class DbNgramDict(MutableMapping[Ngram, V]):
+    VALUE_FMT: str = NotImplemented
+
+    store: MutableMapping[bytes, bytes]
+    cache: MutableMapping[Ngram, V]
+    ngram_encoding: str
+    separator: str
+    _is_diskcache: bool
+
+    @classmethod
+    def __init_subclass__(cls, *args, **kwargs):
+        super().__init_subclass__(*args, **kwargs)
+
+        if cls.VALUE_FMT is NotImplemented:
+            raise NotImplementedError(f"{cls} needs to define VALUE_FMT")
+
+    def __init__(
+        self,
+        store: MutableMapping,
+        ngram_encoding: str = "utf-8",
+        separator: str = "\n",
+        max_cache_len: Optional[int] = DEFT_MAX_CACHE_LEN,
+        max_cache_age_seconds: Optional[float] = DEFT_MAX_CACHE_AGE_SECONDS,
+    ) -> None:
+        if not len(separator):
+            raise ValueError("separator cannot be empty")
+        super().__init__()
+        self.store = store
+        self._is_diskcache = Cache is not None and isinstance(store, Cache)
+        if max_cache_age_seconds * max_cache_len > 0:
+            try:
+                from expiringdict import ExpiringDict
+
+                self.cache = ExpiringDict(max_cache_len, max_cache_age_seconds)
+            except ImportError:
+                warnings.warn("expiringdict not installed. not caching counts")
+                self.cache = _NoCacheDict()
+        else:
+            self.cache = _NoCacheDict()
+        self.ngram_encoding, self.separator = ngram_encoding, separator
+
+    def encode_ngram(self, ngram: Ngram) -> bytes:
+        if not isinstance(ngram, str):
+            ngram = self.separator.join(ngram)
+        return ngram.encode(self.ngram_encoding)
+
+    def decode_ngram(self, ngram_b: bytes) -> Ngram:
+        key = ngram_b.decode(self.ngram_encoding)
+        assert isinstance(key, str)
+        if self.separator in key:
+            key = tuple(key.split(self.separator))
+        return key
+
+    def encode_value(self, val: V) -> bytes:
+        return struct.pack(self.VALUE_FMT, val)
+
+    def decode_value(self, val_b: bytes) -> V:
+        return struct.unpack(self.VALUE_FMT, val_b)[0]
+
+    def encode_pair(self, ngram: Ngram, val: V) -> Tuple[bytes, bytes]:
+        return self.encode_ngram(ngram), self.encode_value(val)
+
+    def decode_pair(self, ngram_b: bytes, val_b: bytes) -> Tuple[Ngram, V]:
+        return self.decode_ngram(ngram_b), self.decode_value(val_b)
+
+    def __iter__(self):
+        if self._is_diskcache:
+            for ngram_b in self.store:
+                yield self.decode_ngram(ngram_b)
+        else:
+            for ngram_b in self.store.keys():
+                yield self.decode_ngram(ngram_b)
+
+    def __len__(self) -> int:
+        return len(self.store)
+
+    def __contains__(self, ngram: Ngram) -> bool:
+        return (ngram in self.cache) or (self.encode_ngram(ngram) in self.store)
+
+    def get(self, ngram: Ngram, default=None):
+        try:
+            return self.cache[ngram]
+        except KeyError:
+            ngram_b = self.encode_ngram(ngram)
+            try:
+                val = self.cache[ngram] = self.decode_value(self.store[ngram_b])
+                return val
+            except KeyError:
+                return default
+
+    def __getitem__(self, ngram: Ngram) -> V:
+        try:
+            return self.cache[ngram]
+        except KeyError:
+            pass
+        ngram_b = self.encode_ngram(ngram)
+        val = self.cache[ngram_b] = self.decode_value(self.store[ngram_b])
+        return val
+
+    def __setitem__(self, ngram: Ngram, val: V):
+        ngram_b, val_b = self.encode_pair(ngram, val)
+        self.cache[ngram] = val
+        self.store[ngram_b] = val_b
+
+    def __delitem__(self, ngram: Ngram) -> None:
+        ngram_b = self.encode_ngram(ngram)
+        del self.store[ngram_b]
+        try:
+            del self.cache[ngram]
+        except KeyError:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.close()
+
+    def __del__(self):
+        self.close()
+
+    def close(self):
+        try:
+            if self.store is not None and hasattr(self.store, "close"):
+                self.store.close()
+        finally:
+            self.store = None
+
+
+class DbCountDict(DbNgramDict[int]):
+    """Disk-backed dictionary of n-gram counts
+
+    Update shares semantics with :func:`collections.Counter.update`, i.e.
+
+    >>> count_dict.update(ngrams)
+
+    adds 1 to the value of every n-gram in `ngrams`, whereas
+
+    >>> count_dict.update(other_count_dict)
+
+    adds the counts in `other_count_dict` to `count_dict`
+    """
+
+    VALUE_FMT: Final[str] = "Q"
+
+    def encode_value(self, val: int) -> Union[int, bytes]:
+        if self._is_diskcache:
+            return val
+        else:
+            return super().encode_value(val)
+
+    def decode_value(self, val_b: Union[int, bytes]) -> int:
+        if isinstance(val_b, int):
+            return val_b
+        else:
+            return super().decode_value(val_b)
+
+    def update(self, iterable=None, /, **kwds):
+        if iterable is not None:
+            if isinstance(iterable, Mapping):
+                if not self:
+                    super().update(iterable)
+                elif self._is_diskcache:
+                    assert isinstance(self.store, Cache)
+                    with self.store.transact():
+                        for ngram, count in iterable.items():
+                            ngram_b = self.encode_ngram(ngram)
+                            self.cache[ngram] = self.store.incr(ngram_b, count)
+                else:
+                    for ngram, count in iterable.items():
+                        ngram_b = self.encode_ngram(ngram)
+                        old_count = self.cache.get(ngram, None)
+                        if old_count is None:
+                            old_count_b = self.store.get(ngram_b, None)
+                            if old_count_b is None:
+                                old_count = 0
+                            else:
+                                old_count = self.decode_value(old_count_b)
+                        count += old_count
+                        self.cache[ngram] = count
+                        self.store[ngram_b] = self.encode_value(count)
+            else:
+                counter = Counter(iterable)
+                kwds.update(counter)
+
+        if kwds:
+            self.update(kwds)
+
+
+class DbProbDict(DbNgramDict[LProb]):
+    VALUE_FMT: Final[str] = "d"
+
+    def encode_value(self, val: LProb) -> bytes:
+        if isinstance(val, float) or isinstance(val, int):
+            return super().encode_value(float(val))
+        else:
+            return struct.pack(self.VALUE_FMT * 2, float(val[0]), float(val[1]))
+
+    def decode_value(self, val_b: bytes) -> LProb:
+        val = tuple(x[0] for x in struct.iter_unpack(self.VALUE_FMT, val_b))
+        if len(val) == 1:
+            return val[0]
+        else:
+            return val
+
+
+def get_store(
+    filename: Optional[os.PathLike] = None, protocol: str = "c"
+) -> MutableMapping[str, str]:
+    if filename is None:
+        filename = TemporaryDirectory()
+    filename_ = os.fspath(filename)
+    try:
+        import diskcache
+
+        os.makedirs(filename_, exist_ok=True)
+        store = diskcache.Cache(filename_)
+        if protocol == "n":
+            store.clear()
+    except ImportError:
+        import dbm
+
+        store = dbm.open(filename_, protocol)
+
+    return store
+
+
+def open_count_dict(
+    filename: Optional[os.PathLike] = None,
+    protocol: str = "c",
+    ngram_encoding: str = "utf-8",
+    separator: str = "\n",
+    max_cache_len: Optional[int] = DEFT_MAX_CACHE_LEN,
+    max_cache_age_seconds: Optional[float] = DEFT_MAX_CACHE_AGE_SECONDS,
+) -> DbCountDict:
+    store = get_store(filename, protocol)
+
+    return DbCountDict(
+        store,
+        ngram_encoding,
+        separator,
+        max_cache_len,
+        max_cache_age_seconds,
+    )
+
+
+def open_prob_dict(
+    filename: Optional[os.PathLike] = None,
+    protocol: str = "c",
+    ngram_encoding: str = "utf-8",
+    separator: str = "\n",
+    max_cache_len: Optional[int] = DEFT_MAX_CACHE_LEN,
+    max_cache_age_seconds: Optional[float] = DEFT_MAX_CACHE_AGE_SECONDS,
+) -> DbProbDict:
+    store = get_store(filename, protocol)
+
+    return DbProbDict(
+        store,
+        ngram_encoding,
+        separator,
+        max_cache_len,
+        max_cache_age_seconds,
+    )
+
+
+def write_arpa(prob_dicts: ProbDicts, out=sys.stdout):
     """Convert an lists of n-gram probabilities to arpa format
 
     The inverse operation of :func:`pydrobert.torch.util.parse_arpa_lm`
 
     Parameters
     ----------
-    prob_list : list of dict
+    prob_dicts : list of dict
     out : file or str, optional
         Path or file object to output to
     """
     if isinstance(out, str):
-        with open(out, "w") as f:
-            return write_arpa(prob_list, f)
+        if out.endswith(".gz"):
+            with gzip.open(out, "wt") as f:
+                return write_arpa(prob_dicts, f)
+        else:
+            with open(out, "w") as f:
+                return write_arpa(prob_dicts, f)
     entries_by_order = []
-    for idx, dict_ in enumerate(prob_list):
+    for idx, dict_ in enumerate(prob_dicts):
         entries = sorted((k, v) if idx else ((k,), v) for (k, v) in dict_.items())
         entries_by_order.append(entries)
     out.write("\\data\\\n")
@@ -644,17 +1018,17 @@ def write_arpa(prob_list, out=sys.stdout):
         out.write("\\{}-grams:\n".format(idx + 1))
         if idx == len(entries_by_order) - 1:
             for entry in entries:
-                out.write("{} {}\n".format(" ".join(entry[0]), entry[1]))
+                out.write("{:f} {}\n".format(entry[1], " ".join(entry[0])))
         else:
             for entry in entries:
-                out.write(
-                    "{} {} {}\n".format(entry[1][0], " ".join(entry[0]), entry[1][1])
-                )
+                x = f"{entry[1][0]:f} {' '.join(entry[0])} {entry[1][1]:f}\n"
+                assert isinstance(x, str)
+                out.write(x)
         out.write("\n")
     out.write("\\end\\\n")
 
 
-def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
+def count_dicts_to_prob_list_mle(count_dicts, eps_lprob=DEFT_EPS_LPROB):
     r"""Determine probabilities based on MLE of observed n-gram counts
 
     For a given n-gram :math:`p, w`, where :math:`p` is a prefix, :math:`w` is the next
@@ -670,9 +1044,9 @@ def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
 
     Parameters
     ----------
-    ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
-        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+    count_dicts : sequence
+        A list of dictionaries. ``count_dicts[0]`` should correspond to unigram counts
+        in a corpus, ``count_dicts[1]`` to bi-grams, etc. Keys are tuples of tokens
         (n-grams) of the appropriate length, with the exception of unigrams, whose keys
         are the tokens themselves. Values are the counts of those n-grams in the corpus.
     eps_lprob : float, optional
@@ -688,7 +1062,7 @@ def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
     --------
     >>> from collections import Counter
     >>> text = 'a man a plan a canal panama'
-    >>> ngram_counts = [
+    >>> count_dicts = [
     >>>     Counter(
     >>>         tuple(text[offs:offs + order]) if order > 1
     >>>         else text[offs:offs + order]
@@ -696,16 +1070,16 @@ def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
     >>>     )
     >>>     for order in range(1, 4)
     >>> ]
-    >>> ngram_counts[0]['<unk>'] = 0  # add oov to vocabulary
-    >>> ngram_counts[0]['a']
+    >>> count_dicts[0]['<unk>'] = 0  # add oov to vocabulary
+    >>> count_dicts[0]['a']
     10
-    >>> sum(ngram_counts[0].values())
+    >>> sum(count_dicts[0].values())
     27
-    >>> ngram_counts[1][('a', ' ')]
+    >>> count_dicts[1][('a', ' ')]
     3
-    >>> sum(v for (k, v) in ngram_counts[1].items() if k[0] == 'a')
+    >>> sum(v for (k, v) in count_dicts[1].items() if k[0] == 'a')
     9
-    >>> prob_list = ngram_counts_to_prob_list_mle(ngram_counts)
+    >>> prob_list = count_dicts_to_prob_list_mle(count_dicts)
     >>> prob_list[0]['a']   # (log10(10 / 27), eps_lprob)
     (-0.43136376415898736, -99.99)
     >>> '<unk>' in prob_list[0]  # no probability mass gets removed
@@ -719,7 +1093,7 @@ def ngram_counts_to_prob_list_mle(ngram_counts, eps_lprob=-99.999):
     probability (`eps_lprob`) to n-grams where necessary. This means the probability
     mass might not exactly sum to one.
     """
-    return ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=eps_lprob, k=0.0)
+    return count_dicts_to_prob_list_add_k(count_dicts, eps_lprob=eps_lprob, k=0.0)
 
 
 def _get_cond_mle(order, counts, vocab, k):
@@ -737,10 +1111,12 @@ def _get_cond_mle(order, counts, vocab, k):
     )
 
 
-def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=0.5):
+def count_dicts_to_prob_list_add_k(
+    count_dicts: CountDicts, eps_lprob=DEFT_EPS_LPROB, k=DEFT_ADD_K_K
+):
     r"""MLE probabilities with constant discount factor added to counts
 
-    Similar to :func:`ngram_counts_to_prob_list_mle`, but with a constant added to each
+    Similar to :func:`count_dicts_to_prob_list_mle`, but with a constant added to each
     count to smooth out probabilities:
 
     .. math::
@@ -754,9 +1130,9 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=0.5):
 
     Parameters
     ----------
-    ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
-        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+    count_dicts : sequence
+        A list of dictionaries. ``count_dicts[0]`` should correspond to unigram counts
+        in a corpus, ``count_dicts[1]`` to bi-grams, etc. Keys are tuples of tokens
         (n-grams) of the appropriate length, with the exception of unigrams, whose keys
         are the tokens themselves. Values are the counts of those n-grams in the corpus.
     eps_lprob : float, optional
@@ -772,7 +1148,7 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=0.5):
     --------
     >>> from collections import Counter
     >>> text = 'a man a plan a canal panama'
-    >>> ngram_counts = [
+    >>> count_dicts = [
     >>>     Counter(
     >>>         tuple(text[offs:offs + order]) if order > 1
     >>>         else text[offs:offs + order]
@@ -780,16 +1156,16 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=0.5):
     >>>     )
     >>>     for order in range(1, 4)
     >>> ]
-    >>> ngram_counts[0]['<unk>'] = 0  # add oov to vocabulary
-    >>> ngram_counts[0]['a']
+    >>> count_dicts[0]['<unk>'] = 0  # add oov to vocabulary
+    >>> count_dicts[0]['a']
     10
-    >>> sum(ngram_counts[0].values())
+    >>> sum(count_dicts[0].values())
     27
-    >>> ('a', '<unk>') not in ngram_counts[1]
+    >>> ('a', '<unk>') not in count_dicts[1]
     True
-    >>> sum(v for (k, v) in ngram_counts[1].items() if k[0] == 'a')
+    >>> sum(v for (k, v) in count_dicts[1].items() if k[0] == 'a')
     9
-    >>> prob_list = ngram_counts_to_prob_list_add_k(ngram_counts, k=1)
+    >>> prob_list = count_dicts_to_prob_list_add_k(count_dicts, k=1)
     >>> prob_list[0]['a']   # (log10((10 + 1) / (27 + 8)), eps_lprob)
     (-0.5026753591920505, -99.999)
     >>> # Pr('a' | '<unk>') = (C('<unk>', 'a') + k) / (C('<unk>', .) + k|V|)
@@ -801,12 +1177,12 @@ def ngram_counts_to_prob_list_add_k(ngram_counts, eps_lprob=-99.999, k=0.5):
     >>> prob_list[1][('a', '<unk>')]  # (log10(1 / 17), eps_lprob)
     (-1.2304489213782739, -99.999)
     """
-    max_order = len(ngram_counts) - 1
-    if not len(ngram_counts):
+    max_order = len(count_dicts) - 1
+    if not len(count_dicts):
         raise ValueError("At least unigram counts must exist")
-    vocab = set(ngram_counts[0])
+    vocab = set(count_dicts[0])
     prob_list = []
-    for order, counts in enumerate(ngram_counts):
+    for order, counts in enumerate(count_dicts):
         probs = _get_cond_mle(order, counts, vocab, k)
         if not order:
             for v in vocab:
@@ -907,12 +1283,14 @@ def _simple_good_turing_counts(counts, eps_lprob):
     log_Np = np.log10((N_r[1:-1] * 10 ** (log_r_star[1:] - max_log_r_star)).sum())
     log_Np += max_log_r_star
     log_p_0 = log_r_star[0] - log_N
-    log_r_star[1:] += -log_Np + np.log10(1 - 10 ** log_p_0) + log_N
+    log_r_star[1:] += -log_Np + np.log10(1 - 10**log_p_0) + log_N
 
     return log_r_star
 
 
-def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999):
+def count_dicts_to_prob_list_simple_good_turing(
+    count_dicts: CountDicts, eps_lprob=DEFT_EPS_LPROB
+):
     r"""Determine probabilities based on n-gram counts using simple good-turing
 
     Simple Good-Turing smoothing discounts counts of n-grams according to the following
@@ -940,9 +1318,9 @@ def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999
 
     Parameters
     ----------
-    ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
-        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+    count_dicts : sequence
+        A list of dictionaries. ``count_dicts[0]`` should correspond to unigram counts
+        in a corpus, ``count_dicts[1]`` to bi-grams, etc. Keys are tuples of tokens
         (n-grams) of the appropriate length, with the exception of unigrams, whose keys
         are the tokens themselves. Values are the counts of those n-grams in the corpus.
     eps_lprob : float, optional
@@ -982,7 +1360,7 @@ def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999
     --------
     >>> from collections import Counter
     >>> text = 'a man a plan a canal panama'
-    >>> ngram_counts = [
+    >>> count_dicts = [
     >>>     Counter(
     >>>         tuple(text[offs:offs + order]) if order > 1
     >>>         else text[offs:offs + order]
@@ -990,13 +1368,13 @@ def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999
     >>>     )
     >>>     for order in range(1, 4)
     >>> ]
-    >>> ngram_counts[0]['<unk>'] = 0  # add oov to vocabulary
-    >>> sum(ngram_counts[0].values())
+    >>> count_dicts[0]['<unk>'] = 0  # add oov to vocabulary
+    >>> sum(count_dicts[0].values())
     27
-    >>> Counter(ngram_counts[0].values())
+    >>> Counter(count_dicts[0].values())
     Counter({2: 3, 10: 1, 6: 1, 4: 1, 1: 1, 0: 1})
     >>> # N_1 = 1, N_2 = 3, N_3 = 1
-    >>> prob_list = ngram_counts_to_prob_list_simple_good_turing(ngram_counts)
+    >>> prob_list = count_dicts_to_prob_list_simple_good_turing(count_dicts)
     >>> # Pr('<unk>') = Pr(r=0) = N_1 / N_0 / N = 1 / 27
     >>> prob_list[0]['<unk>']   # (log10(1 / 27), eps_lprob)
     (-1.4313637641589874, -99.999)
@@ -1007,16 +1385,16 @@ def ngram_counts_to_prob_list_simple_good_turing(ngram_counts, eps_lprob=-99.999
 
     References
     ----------
-    .. [gale1995] W. A. Gale and G. Sampson, "Good‐Turing frequency estimation without
+    .. [gale1995] W. A. Gale and G. Sampson, "Good-Turing frequency estimation without
        tears," Journal of Quantitative Linguistics, vol. 2, no. 3, pp. 217-237, Jan.
        1995.
     """
-    if len(ngram_counts) < 1:
+    if len(count_dicts) < 1:
         raise ValueError("At least unigram counts must exist")
-    max_order = len(ngram_counts) - 1
-    vocab = set(ngram_counts[0])
+    max_order = len(count_dicts) - 1
+    vocab = set(count_dicts[0])
     prob_list = []
-    for order, counts in enumerate(ngram_counts):
+    for order, counts in enumerate(count_dicts):
         N_0_vocab = set()
         log_r_stars = _simple_good_turing_counts(counts, eps_lprob)
         n_counts = dict()
@@ -1073,7 +1451,7 @@ def _get_katz_discounted_counts(counts, k):
         log_num = log_num_minu + np.log1p(
             -(10 ** (log_subtra - log_num_minu))
         ) / np.log(10)
-        log_denom = np.log1p(-(10 ** log_subtra)) / np.log(10)
+        log_denom = np.log1p(-(10**log_subtra)) / np.log(10)
         log_d_rp1[:k] = log_num - log_denom
     else:
         log_d_rp1 = log_r_star[1:] - log_rp1[:-1]
@@ -1084,8 +1462,11 @@ def _get_katz_discounted_counts(counts, k):
     return log_r_star
 
 
-def ngram_counts_to_prob_list_katz_backoff(
-    ngram_counts, k=7, eps_lprob=-99.999, _cmu_hacks=False
+def count_dicts_to_prob_list_katz_backoff(
+    count_dicts: CountDicts,
+    thresh=DEFAULT_KATZ_THRESH,
+    eps_lprob=DEFT_EPS_LPROB,
+    _cmu_hacks=False,
 ):
     r"""Determine probabilities based on Katz's backoff algorithm
 
@@ -1107,12 +1488,12 @@ def ngram_counts_to_prob_list_katz_backoff(
 
     Parameters
     ----------
-    ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
-        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+    count_dicts : sequence
+        A list of dictionaries. ``count_dicts[0]`` should correspond to unigram counts
+        in a corpus, ``count_dicts[1]`` to bi-grams, etc. Keys are tuples of tokens
         (n-grams) of the appropriate length, with the exception of unigrams, whose keys
         are the tokens themselves. Values are the counts of those n-grams in the corpus.
-    k : int, optional
+    thresh : int, optional
         `k` is a threshold such that, if :math:`C(w) > k`, no discounting will be
         applied to the term. That is, the probability mass assigned for backoff will be
         entirely from n-grams s.t. :math:`C(w) \leq k`.
@@ -1143,7 +1524,7 @@ def ngram_counts_to_prob_list_katz_backoff(
     >>> from nltk.corpus import brown
     >>> from collections import Counter
     >>> text = tuple(brown.words())[:20000]
-    >>> ngram_counts = [
+    >>> count_dicts = [
     >>>     Counter(
     >>>         text[offs:offs + order] if order > 1
     >>>         else text[offs]
@@ -1152,7 +1533,7 @@ def ngram_counts_to_prob_list_katz_backoff(
     >>>     for order in range(1, 4)
     >>> ]
     >>> del text
-    >>> prob_list = ngram_counts_to_prob_list_katz_backoff(ngram_counts)
+    >>> prob_list = count_dicts_to_prob_list_katz_backoff(count_dicts)
 
     References
     ----------
@@ -1160,18 +1541,18 @@ def ngram_counts_to_prob_list_katz_backoff(
        language model component of a speech recognizer," IEEE Transactions on Acoustics,
        Speech, and Signal Processing, vol. 35, no. 3, pp. 400-401, Mar. 1987.
     """
-    if len(ngram_counts) < 1:
+    if len(count_dicts) < 1:
         raise ValueError("At least unigram counts must exist")
-    if k < 1:
+    if thresh < 1:
         raise ValueError("k too low")
     prob_list = []
-    max_order = len(ngram_counts) - 1
-    probs = _get_cond_mle(0, ngram_counts[0], set(ngram_counts[0]), 0)
+    max_order = len(count_dicts) - 1
+    probs = _get_cond_mle(0, count_dicts[0], set(count_dicts[0]), 0)
     if 0 != max_order:
         probs = dict((ngram, (prob, 0.0)) for (ngram, prob) in probs.items())
     prob_list.append(probs)
     log_r_stars = [
-        _get_katz_discounted_counts(counts, k) for counts in ngram_counts[1:]
+        _get_katz_discounted_counts(counts, thresh) for counts in count_dicts[1:]
     ]
     if _cmu_hacks:
         # A note on CMU compatibility. First, the standard non-ML estimate of
@@ -1184,19 +1565,19 @@ def ngram_counts_to_prob_list_katz_backoff(
         # greater than k, but I don't want to reinforce this behaviour). Note
         # that it is applied AFTER the MLE for unigrams, and AFTER deriving
         # discounted counts.
-        for order in range(len(ngram_counts) - 1, 0, -1):
+        for order in range(len(count_dicts) - 1, 0, -1):
             prefix2children = dict()
-            for ngram, count in ngram_counts[order].items():
+            for ngram, count in count_dicts[order].items():
                 prefix2children.setdefault(ngram[:-1], []).append(ngram)
             for prefix, children in prefix2children.items():
-                if len(children) == 1 and ngram_counts[order][children[0]] > k:
+                if len(children) == 1 and count_dicts[order][children[0]] > thresh:
                     for oo in range(order):
                         pp = prefix[: oo + 1]
                         if not oo:
                             pp = pp[0]
-                        ngram_counts[oo][pp] += 1
-    for order in range(1, len(ngram_counts)):
-        counts = ngram_counts[order]
+                        count_dicts[oo][pp] += 1
+    for order in range(1, len(count_dicts)):
+        counts = count_dicts[order]
         probs = dict()
         # P_katz(w|pr) = C*(pr, w) / \sum_x C*(pr, x) if C(pr, w) > 0
         #                alpha(pr) Pr_katz(w|pr[1:]) else
@@ -1226,7 +1607,7 @@ def ngram_counts_to_prob_list_katz_backoff(
             if _cmu_hacks:
                 if order == 1:
                     prefix = prefix[0]
-                lg_norm = np.log10(ngram_counts[order - 1][prefix])
+                lg_norm = np.log10(count_dicts[order - 1][prefix])
             else:
                 lg_norm = lg_pref_counts[prefix]
             probs[ngram] -= lg_norm
@@ -1234,13 +1615,13 @@ def ngram_counts_to_prob_list_katz_backoff(
             lg_den_subtra = lg_den_subtras[prefix]
             if _cmu_hacks:
                 if order == 1:
-                    lg_norm = np.log10(ngram_counts[order - 1][prefix[0]])
+                    lg_norm = np.log10(count_dicts[order - 1][prefix[0]])
                 else:
-                    lg_norm = np.log10(ngram_counts[order - 1][prefix])
+                    lg_norm = np.log10(count_dicts[order - 1][prefix])
             else:
                 lg_norm = lg_pref_counts[prefix]
             num_subtra = 10.0 ** (lg_num_subtra - lg_norm)
-            den_subtra = 10.0 ** lg_den_subtra
+            den_subtra = 10.0**lg_den_subtra
             if np.isclose(den_subtra, 1.0):  # 1 - den_subtra = 0
                 # If the denominator is zero, it means nothing we're backing
                 # off to has a nonzero probability. It doesn't really matter
@@ -1261,7 +1642,7 @@ def ngram_counts_to_prob_list_katz_backoff(
             else:
                 log_alpha = np.log1p(-num_subtra) - np.log1p(-den_subtra)
                 log_alpha /= np.log(10)
-            log_prob, bad_backoff = prob_list[-1][prefix]
+            log_prob = prob_list[-1][prefix][0]
             prob_list[-1][prefix] = (log_prob, log_alpha)
         if order != max_order:
             probs = dict((ngram, (prob, eps_lprob)) for (ngram, prob) in probs.items())
@@ -1287,15 +1668,17 @@ def _optimal_deltas(counts, y):
     return deltas
 
 
-def _absolute_discounting(ngram_counts, deltas, to_prune):
-    V = len(set(ngram_counts[0]) - to_prune)
+def _absolute_discounting(
+    count_dicts: CountDicts, deltas, to_prune, temp: Optional[Path] = None
+):
+    V = len(set(count_dicts[0]) - to_prune)
     prob_list = [{tuple(): (-np.log10(V), 0.0)}]
-    max_order = len(ngram_counts) - 1
-    for order, counts, delta in zip(range(len(ngram_counts)), ngram_counts, deltas):
+    max_order = len(count_dicts) - 1
+
+    for order, counts, delta in zip(range(len(count_dicts)), count_dicts, deltas):
+        logging.info(f"Discounting order {order + 1}")
         delta = np.array(delta, dtype=float)
-        n_counts = dict()
-        d_counts = dict()
-        pr2bin = dict()
+        n_counts, d_counts, pr2bin = dict(), dict(), dict()
         for ngram, count in counts.items():
             in_prune = ngram in to_prune
             if not order:
@@ -1323,9 +1706,14 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
                 prefix_bins[:-1] += np.log10(delta)
             gamma = _log10sumexp(prefix_bins)
             gamma -= np.log10(d_counts[prefix])
-            lprob, bo = prob_list[-1][prefix]
+            lprob = prob_list[-1][prefix][0]
             prob_list[-1][prefix] = (lprob, gamma)
-        probs = dict()
+        if temp is None or order == 0:
+            probs = dict()
+        else:
+            probs = open_prob_dict(
+                temp / LPROBFILE_FMT_PREFIX.format(order=order + 1), "n"
+            )
         for ngram, n_count in n_counts.items():
             prefix = ngram[:-1]
             if n_count:
@@ -1346,12 +1734,17 @@ def _absolute_discounting(ngram_counts, deltas, to_prune):
             probs[ngram] = lprob
         prob_list.append(probs)
     del prob_list[0]  # zero-th order
-    prob_list[0] = dict((ngram[0], p) for (ngram, p) in prob_list[0].items())
+    prob_list_ = prob_list[0]
+    if temp is None:
+        prob_list[0] = dict()
+    else:
+        prob_list[0] = open_prob_dict(temp / LPROBFILE_FMT_PREFIX.format(order=1), "n")
+    prob_list[0].update((ngram[0], p) for (ngram, p) in prob_list_.items())
     return prob_list
 
 
-def ngram_counts_to_prob_list_absolute_discounting(
-    ngram_counts, delta=None, to_prune=set()
+def count_dicts_to_prob_list_absolute_discounting(
+    count_dicts: CountDicts, delta=None, to_prune=set()
 ):
     r"""Determine probabilities from n-gram counts using absolute discounting
 
@@ -1384,9 +1777,9 @@ def ngram_counts_to_prob_list_absolute_discounting(
 
     Parameters
     ----------
-    ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
-        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+    count_dicts : sequence
+        A list of dictionaries. ``count_dicts[0]`` should correspond to unigram counts
+        in a corpus, ``count_dicts[1]`` to bi-grams, etc. Keys are tuples of tokens
         (n-grams) of the appropriate length, with the exception of unigrams, whose keys
         are the tokens themselves. Values are the counts of those n-grams in the corpus.
     delta : float or tuple or :obj:`None`, optional
@@ -1394,12 +1787,12 @@ def ngram_counts_to_prob_list_absolute_discounting(
         forms: a :class:`float` to be used identically for all orders of the recursion;
         :obj:`None` specifies that the above formula for calculating `delta` should be
         used separately for each order of the recursion; or a tuple of length
-        ``len(ngram_counts)``, where each element is either a :class:`float` or
+        ``len(count_dicts)``, where each element is either a :class:`float` or
         :obj:`None`, specifying either a fixed value or the default value for every
         order of the recursion (except the zeroth-order), unigrams first.
     to_prune : set, optional
         A set of n-grams that will not be explicitly set in the return value. This
-        differs from simply removing those n-grams from `ngram_counts` in some key ways.
+        differs from simply removing those n-grams from `count_dicts` in some key ways.
         First, pruned counts can still be used to calculate default `delta` values.
         Second, as per [chen1999]_, pruned counts are still summed in the denominator,
         :math:`\sum_w' C(w_1, \ldots, w_{n-1}, w')`, which then make their way into the
@@ -1415,7 +1808,7 @@ def ngram_counts_to_prob_list_absolute_discounting(
     --------
     >>> from collections import Counter
     >>> text = 'a man a plan a canal panama'
-    >>> ngram_counts = [
+    >>> count_dicts = [
     >>>     Counter(
     >>>         tuple(text[offs:offs + order]) if order > 1
     >>>         else text[offs:offs + order]
@@ -1423,30 +1816,30 @@ def ngram_counts_to_prob_list_absolute_discounting(
     >>>     )
     >>>     for order in range(1, 4)
     >>> ]
-    >>> ngram_counts[0]['a']
+    >>> count_dicts[0]['a']
     10
-    >>> sum(ngram_counts[0].values())
+    >>> sum(count_dicts[0].values())
     27
-    >>> len(ngram_counts[0])
+    >>> len(count_dicts[0])
     7
-    >>> sum(1 for k in ngram_counts[1] if k[0] == 'a')
+    >>> sum(1 for k in count_dicts[1] if k[0] == 'a')
     4
-    >>> sum(v for k, v in ngram_counts[1].items() if k[0] == 'a')
+    >>> sum(v for k, v in count_dicts[1].items() if k[0] == 'a')
     9
-    >>> prob_list = ngram_counts_to_prob_list_absolute_discounting(
-    >>>     ngram_counts, delta=0.5)
+    >>> prob_list = count_dicts_to_prob_list_absolute_discounting(
+    >>>     count_dicts, delta=0.5)
     >>> # gamma_0() = 0.5 * 7 / 27
     >>> # Pr(a) = (10 - 0.5) / 27 + 0.5 (7 / 27) (1 / 7) = 10 / 27
     >>> # BO(a) = gamma_1(a) = 0.5 * 4 / 9 = 2 / 9
     >>> prob_list[0]['a']  # (log10 Pr(a), log10 gamma_1(a))
     (-0.4313637641589874, -0.6532125137753437)
-    >>> ngram_counts[1][('a', 'n')]
+    >>> count_dicts[1][('a', 'n')]
     4
-    >>> ngram_counts[0]['n']
+    >>> count_dicts[0]['n']
     4
-    >>> sum(1 for k in ngram_counts[2] if k[:2] == ('a', 'n'))
+    >>> sum(1 for k in count_dicts[2] if k[:2] == ('a', 'n'))
     2
-    >>> sum(v for k, v in ngram_counts[2].items() if k[:2] == ('a', 'n'))
+    >>> sum(v for k, v in count_dicts[2].items() if k[:2] == ('a', 'n'))
     4
     >>> # Pr(n) = (4 - 0.5) / 27 + 0.5 (7 / 27) (1 / 7) = 4 / 27
     >>> # Pr(n|a) = (4 - 0.5) / 9 + gamma_1(a) Pr(n)
@@ -1463,23 +1856,27 @@ def ngram_counts_to_prob_list_absolute_discounting(
        techniques for language modeling," Computer Speech & Language, vol. 13,
        no. 4, pp. 359-394, Oct. 1999, doi: 10.1006/csla.1999.0128.
     """
-    if len(ngram_counts) < 1:
+    if len(count_dicts) < 1:
         raise ValueError("At least unigram counts must exist")
     if not isinstance(delta, Iterable):
-        delta = (delta,) * len(ngram_counts)
-    if len(delta) != len(ngram_counts):
+        delta = (delta,) * len(count_dicts)
+    if len(delta) != len(count_dicts):
         raise ValueError(
-            "Expected {} deltas, got {}".format(len(ngram_counts), len(delta))
+            "Expected {} deltas, got {}".format(len(count_dicts), len(delta))
         )
     delta = tuple(
         _optimal_deltas(counts, 1) if d is None else [d]
-        for (d, counts) in zip(delta, ngram_counts)
+        for (d, counts) in zip(delta, count_dicts)
     )
-    return _absolute_discounting(ngram_counts, delta, to_prune)
+    return _absolute_discounting(count_dicts, delta, to_prune)
 
 
-def ngram_counts_to_prob_list_kneser_ney(
-    ngram_counts, delta=None, sos=None, to_prune=set()
+def count_dicts_to_prob_list_kneser_ney(
+    count_dicts: CountDicts,
+    delta=None,
+    sos=None,
+    to_prune=set(),
+    temp: Optional[os.PathLike] = None,
 ):
     r"""Determine probabilities from counts using Kneser-Ney(-like) estimates
 
@@ -1512,7 +1909,7 @@ def ngram_counts_to_prob_list_kneser_ney(
     :math:`Pr_{KN}(\emptyset) = 1 / \left\|V\right\|`.
 
     Letting :math:`N_c` be defined as in
-    :func:`ngram_counts_to_prob_list_absolute_discounting`, and :math:`y = N_1 / (N_1 +
+    :func:`count_dicts_to_prob_list_absolute_discounting`, and :math:`y = N_1 / (N_1 +
     2 N_2)`, the default value for :math:`\delta(\cdot)` is
 
     .. math::
@@ -1523,9 +1920,9 @@ def ngram_counts_to_prob_list_kneser_ney(
 
     Parameters
     ----------
-    ngram_counts : sequence
-        A list of dictionaries. ``ngram_counts[0]`` should correspond to unigram counts
-        in a corpus, ``ngram_counts[1]`` to bi-grams, etc. Keys are tuples of tokens
+    count_dicts : sequence
+        A list of dictionaries. ``count_dicts[0]`` should correspond to unigram counts
+        in a corpus, ``count_dicts[1]`` to bi-grams, etc. Keys are tuples of tokens
         (n-grams) of the appropriate length, with the exception of unigrams, whose keys
         are the tokens themselves. Values are the counts of those n-grams in the corpus.
     delta : float or tuple or :obj:`None`, optional
@@ -1533,7 +1930,7 @@ def ngram_counts_to_prob_list_kneser_ney(
         :class:`float`, at which point a fixed discount will be applied to all orders of
         the recursion. If :obj:`None`, the default values defined above will be
         employed. `delta` can be a :class:`tuple` of the same length as
-        ``len(ngram_counts)``, which can be used to specify discounts at each level of
+        ``len(count_dicts)``, which can be used to specify discounts at each level of
         the recursion (excluding the zero-th order), unigrams first. If an element is a
         :class:`float`, that fixed discount will be applied to all nonzero counts at
         that order. If :obj:`None`, `delta` will be calculated in the default manner for
@@ -1548,7 +1945,7 @@ def ngram_counts_to_prob_list_kneser_ney(
         vocabulary, otherwise ``'<s>'``
     to_prune : set, optional
         A set of n-grams that will not be explicitly set in the return value. This
-        differs from simply removing those n-grams from `ngram_counts` in some key ways.
+        differs from simply removing those n-grams from `count_dicts` in some key ways.
         First, nonzero counts of pruned n-grams are used when calculating adjusted
         counts of the remaining terms. Second, pruned counts can still be used to
         calculate default `delta` values. Third, as per [chen1999]_, pruned counts are
@@ -1566,7 +1963,7 @@ def ngram_counts_to_prob_list_kneser_ney(
     --------
     >>> from collections import Counter
     >>> text = 'a man a plan a canal panama'
-    >>> ngram_counts = [
+    >>> count_dicts = [
     >>>     Counter(
     >>>         tuple(text[offs:offs + order]) if order > 1
     >>>         else text[offs:offs + order]
@@ -1574,21 +1971,21 @@ def ngram_counts_to_prob_list_kneser_ney(
     >>>     )
     >>>     for order in range(1, 5)
     >>> ]
-    >>> ngram_counts[0]
+    >>> count_dicts[0]
     Counter({'a': 10, ' ': 6, 'n': 4, 'm': 2, 'p': 2, 'l': 2, 'c': 1})
     >>> adjusted_unigrams = dict(
-    >>>     (k, sum(1 for kk in ngram_counts[1] if kk[1] == k))
-    >>>     for k in ngram_counts[0]
+    >>>     (k, sum(1 for kk in count_dicts[1] if kk[1] == k))
+    >>>     for k in count_dicts[0]
     >>> )
     >>> adjusted_unigrams
     {'a': 6, ' ': 3, 'm': 2, 'n': 1, 'p': 1, 'l': 2, 'c': 1}
     >>> adjusted_bigrams = dict(
-    >>>     (k, sum(1 for kk in ngram_counts[2] if kk[1:] == k))
-    >>>     for k in ngram_counts[1]
+    >>>     (k, sum(1 for kk in count_dicts[2] if kk[1:] == k))
+    >>>     for k in count_dicts[1]
     >>> )
     >>> adjusted_trigrams = dict(
-    >>>     (k, sum(1 for kk in ngram_counts[3] if kk[1:] == k))
-    >>>     for k in ngram_counts[2]
+    >>>     (k, sum(1 for kk in count_dicts[3] if kk[1:] == k))
+    >>>     for k in count_dicts[2]
     >>> )
     >>> len(adjusted_unigrams)
     7
@@ -1598,8 +1995,8 @@ def ngram_counts_to_prob_list_kneser_ney(
     4
     >>> sum(v for k, v in adjusted_bigrams.items() if k[0] == 'a')
     7
-    >>> prob_list = ngram_counts_to_prob_list_kneser_ney(
-    >>>     ngram_counts, delta=.5)
+    >>> prob_list = count_dicts_to_prob_list_kneser_ney(
+    >>>     count_dicts, delta=.5)
     >>> # gamma_0() = 0.5 * 7 / 16
     >>> # Pr(a) = (6 - 0.5) / 16 + 0.5 * (7 / 16) * (1 / 7)
     >>> # Pr(a) = 3 / 8
@@ -1634,41 +2031,56 @@ def ngram_counts_to_prob_list_kneser_ney(
        for language modeling," Computer Speech & Language, vol. 13, no. 4, pp. 359-394,
        Oct. 1999, doi: 10.1006/csla.1999.0128.
     .. [heafield2013] K. Heafield, I. Pouzyrevsky, J. H. Clark, and P. Koehn, "Scalable
-       modified Kneser-Ney language model estimation,” in Proceedings of the 51st Annual
+       modified Kneser-Ney language model estimation," in Proceedings of the 51st Annual
        Meeting of the Association for Computational Linguistics, Sofia, Bulgaria, 2013,
        vol. 2, pp. 690-696.
     """
-    if len(ngram_counts) < 1:
+    if len(count_dicts) < 1:
         raise ValueError("At least unigram counts must exist")
     if not isinstance(delta, Iterable):
-        delta = (delta,) * len(ngram_counts)
-    if len(delta) != len(ngram_counts):
+        delta = (delta,) * len(count_dicts)
+    if len(delta) != len(count_dicts):
         raise ValueError(
-            "Expected {} deltas, got {}".format(len(ngram_counts), len(delta))
+            "Expected {} deltas, got {}".format(len(count_dicts), len(delta))
         )
     if sos is None:
-        sos = "<S>" if "<S>" in ngram_counts[0] else "<s>"
-    new_ngram_counts = [ngram_counts[-1]]
-    for order in range(len(ngram_counts) - 2, -1, -1):
-        if order:
+        sos = "<S>" if "<S>" in count_dicts[0] else "<s>"
+
+    if temp:
+
+        class MyDict(DbNgramDict[int]):
+            VALUE_FMT: Final[str] = "!Q"
+
+        temp = Path(temp)
+        acount_tmp = temp / "acount"
+        acount_tmp.mkdir(exist_ok=True)
+
+    new_count_dicts = [count_dicts[-1]]
+    for order in range(len(count_dicts) - 2, -1, -1):
+        if temp:
+            new_counts = MyDict(
+                get_store(acount_tmp / COUNTFILE_FMT_PREFIX.format(order=order + 1))
+            )
+        else:
             new_counts = dict()
-        else:  # preserve vocabulary
-            new_counts = dict.fromkeys(ngram_counts[order], 0)
-        for ngram, count in ngram_counts[order + 1].items():
+        if order == 0:
+            for ngram in count_dicts[order].keys():
+                new_counts[ngram] = 0
+        for ngram, count in count_dicts[order + 1].items():
             if not count:
                 continue
             suffix = ngram[1:] if order else ngram[1]
             new_counts[suffix] = new_counts.get(suffix, 0) + 1
         new_counts.update(
             (k, v)
-            for (k, v) in ngram_counts[order].items()
+            for (k, v) in count_dicts[order].items()
             if ((order and k[0] == sos) or (not order and k == sos))
         )
-        new_ngram_counts.insert(0, new_counts)
-    ngram_counts = new_ngram_counts
+        new_count_dicts.insert(0, new_counts)
+    count_dicts = new_count_dicts
     delta = list(delta)
     for i in range(len(delta)):
-        ds, counts = delta[i], ngram_counts[i]
+        ds, counts = delta[i], count_dicts[i]
         if ds is None:
             ds = (None, None, None)
         if not isinstance(ds, Iterable):
@@ -1680,92 +2092,107 @@ def ngram_counts_to_prob_list_kneser_ney(
             assert len(optimals) == len(ds)
             ds = tuple(y if x is None else x for (x, y) in zip(ds, optimals))
         except ValueError:
-            if None in ds:
-                raise
+            warnings.warn(f"Falling back to default discounts for {i+1}-th order")
+            ds = FALLBACK_DELTAS
         delta[i] = ds
-    return _absolute_discounting(ngram_counts, delta, to_prune)
+    return _absolute_discounting(count_dicts, delta, to_prune, temp)
 
 
 def text_to_sents(
-    text,
-    sent_end_expr=r"[.?!]+",
-    word_delim_expr=r"\W+",
-    to_case="upper",
-    trim_empty_sents=False,
-):
+    text: str,
+    sent_end_expr: Union[str, re.Pattern] = DEFT_SENT_END_EXPR,
+    word_delim_expr: Union[str, re.Pattern] = DEFT_WORD_DELIM_EXPR,
+    to_case: Literal["upper", "lower", None] = "upper",
+    trim_empty_sents: bool = False,
+) -> List[Tuple[str, ...]]:
     """Convert a block of text to a list of sentences, each a list of words
 
     Parameters
     ----------
     text : str
         The text to parse
-    set_end_expr : str or re.Pattern, optional
+    set_end_expr
         A regular expression indicating an end of a sentence. By default, this is one or
         more of the characters ".?!"
-    word_delim_expr : str or re.Pattern, optional
+    word_delim_expr
         A regular expression used for splitting words. By default, it is one or more of
         any non-alphanumeric character (including ' and -). Any empty words are removed
         from the sentence
-    to_case : {'lower', 'upper', :obj:`None`}, optional
+    to_case
         Convert all words to a specific case: ``'lower'`` is lower case, ``'upper'`` is
         upper case, anything else performs no conversion
-    trim_empty_sents : bool, optional
+    trim_empty_sents
         If :obj:`True`, any sentences with no words in them will be removed from the
         return value. The exception is an empty final string, which is always removed.
 
     Returns
     -------
-    sents : list of tuples
+    sents : list of tuple of str
         A list of sentences from `text`. Each sentence/element is actually a tuple of
         the words in the sentences
     """
     if not isinstance(sent_end_expr, re.Pattern):
         sent_end_expr = re.compile(sent_end_expr)
+    sents = list(
+        titer_to_siter(
+            sent_end_expr.split(text), word_delim_expr, to_case, trim_empty_sents
+        )
+    )
+    if sents and not sents[-1]:
+        del sents[-1]
+    return sents
+
+
+def titer_to_siter(
+    titer: Iterable[str],
+    word_delim_expr: Union[str, re.Pattern] = DEFT_WORD_DELIM_EXPR,
+    to_case: Literal["lower", "upper", None] = "upper",
+    trim_empty_sents: bool = False,
+) -> Generator[Tuple[str, ...], None, None]:
     if not isinstance(word_delim_expr, re.Pattern):
         word_delim_expr = re.compile(word_delim_expr)
-    sents = sent_end_expr.split(text)
-    i = 0
-    while i < len(sents):
-        sent = word_delim_expr.split(sents[i])
+    for sent in titer:
+        sent = word_delim_expr.split(sent)
         sent = tuple(w for w in sent if w)
         if to_case == "lower":
             sent = tuple(w.lower() for w in sent)
         elif to_case == "upper":
             sent = tuple(w.upper() for w in sent)
         if trim_empty_sents and not sent:
-            del sents[i]
-        else:
-            sents[i] = sent
-            i += 1
-    if sents and not sents[-1]:
-        del sents[-1]
-    return sents
+            continue
+        yield sent
 
 
-def sents_to_ngram_counts(
-    sents, max_order, sos="<S>", eos="</S>", count_unigram_sos=False
-):
+def sents_to_count_dicts(
+    sents: Iterable[str],
+    N: Union[int, List[DbCountDict]],
+    sos: str = "<S>",
+    eos: str = "</S>",
+    count_unigram_sos: bool = False,
+) -> CountDicts:
     """Count n-grams in sentence lists up to a maximum order
 
     Parameters
     ----------
-    sents : list of tuples
+    sents
         A list of sentences, where each sentence is a tuple of its words.
-    max_order : int
-        The maximum order (inclusive) of n-gram to count.
-    sos : str, optional
+    N
+        Either the maximum order (inclusive) of n-gram to count, or a list of
+        DbCountDict to populate of the same format as `count_dicts`. In the latter
+        case, counts will be added to these dictionaries and returned.
+    sos
         A token representing the start-of-sequence.
-    eos : str, optional
+    eos
         A token representing the end-of-sequence.
-    count_unigram_sos : bool, optional
+    count_unigram_sos
         If :obj:`False`, the unigram count of the start-of-sequence token will always be
         zero (though higher-order n-grams beginning with the SOS can have counts).
 
     Returns
     -------
-    ngram_counts : list of dicts
-        A list of length `max_order` where ``ngram_counts[0]`` is a dictionary of
-        unigram counts, ``ngram_counts[1]`` of bigram counts, etc.
+    count_dicts : list of dicts
+        A list of the same length as the maximum order where ``count_dicts[0]`` is a
+        dictionary of unigram counts, ``count_dicts[1]`` of bigram counts, etc.
 
     Notes
     -----
@@ -1781,23 +2208,454 @@ def sents_to_ngram_counts(
     language model should never predict the next word to be the start-of-sequence token.
     Rather, it always exists prior to the first word being predicted. This exception can
     be disabled by setting `count_unigram_sos` to :obj:`True`.
+
+    See Also
+    --------
+    shelve
+        A module for creating disk-backed mutable dictionaries. Use as `N` to decrease
+        memory load.
     """
-    if max_order < 1:
-        raise ValueError("max_order ({}) must be >= 1".format(max_order))
-    ngram_counts = [Counter() for _ in range(max_order)]
-    ngram_counts[0].setdefault(sos, 0)
-    for sent in sents:
+    if not isinstance(N, int):
+        count_dicts, N = N, len(N)
+    else:
+        count_dicts = [Counter() for _ in range(N)]
+    if N < 1:
+        raise ValueError("max order must be >= 1")
+    count_dicts[0].setdefault(sos, 0)
+    for i, sent in enumerate(sents):
         if {sos, eos} & set(sent):
             raise ValueError(
                 "start-of-sequence ({}) or end-of-sequence ({}) found in "
                 'sentence "{}"'.format(sos, eos, " ".join(sent))
             )
         sent = (sos,) + tuple(sent) + (eos,)
-        for order, counter in zip(range(1, max_order + 1), ngram_counts):
+        for order, counter in zip(range(1, N + 1), count_dicts):
             if order == 1:
                 counter.update(sent if count_unigram_sos else sent[1:])
             else:
                 counter.update(
                     sent[s : s + order] for s in range(len(sent) - order + 1)
                 )
-    return ngram_counts
+        if (i + 1) % SENTS_PER_INFO == 0:
+            logging.info(f"Processed {i + 1} sentences")
+    return count_dicts
+
+
+def _pos_int(val):
+    val = int(val)
+    if val < 1:
+        raise ValueError("value not positive")
+    return val
+
+
+def _nonneg_int(val):
+    val = int(val)
+    if val < 0:
+        raise ValueError("value negative")
+    return val
+
+
+def main(args: Optional[Sequence[str]] = None):
+    """Construct an n-gram LM
+
+    Convenient, but slow. You should prefer KenLM (https://github.com/kpu/kenlm).
+
+    Example call (5-gram, modified Kneser-Ney, hapax >1-gram pruning):
+
+        python ngram_lm.py -o 5 -t 0 1 | gzip -c > lm.arpa.gz < train.txt.gz
+    """
+    logging.captureWarnings(True)
+
+    parser = argparse.ArgumentParser(
+        description=main.__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Smoothing methods (--methods, -m):
+
+- abs: absolute discounting
+    Special flags:
+      --delta,-d: Absolute discount to apply to non-zero values. A single value will
+                  be applied to all orders; otherwise, one discount per order
+- add-k: add k to counts, then mle
+    Speckal flags:
+      --k,-k: The amount to add
+- katz: Katz backoff
+      --katz-threshold: Discounting will not be applied above this threshold
+- kn: modified Kneser-Ney
+      --delta,-d: Absolute discount to apply to non-zero values. A single value will
+                  be applied to all orders; otherwise, one discount per order. Note:
+                  specifying more than one value per order is not supported by this
+                  flag, whereas the default 
+- sgt: simple Good-Turing
+- mle: maximum likelihood estimate (no smoothing; no backoff)
+""",
+    )
+    parser.add_argument(
+        "--max-order",
+        "-o",
+        metavar="P_INT",
+        type=_pos_int,
+        default=6,
+        help="Max order of n-gram in model",
+    )
+    parser.add_argument(
+        "--in-file",
+        "-f",
+        metavar="PTH",
+        type=argparse.FileType("rb"),
+        default=argparse.FileType("rb")("-"),
+        help="If specified, reads from this file instead of stdin",
+    )
+    parser.add_argument(
+        "--out-file",
+        "-O",
+        metavar="PTH",
+        type=argparse.FileType("wb"),
+        default=None,
+        help="If specified, writes to this file instead of stdout",
+    )
+    parser.add_argument(
+        "--sos", "-s", metavar="STR", default="<s>", help="Start-of-sequence token"
+    )
+    parser.add_argument(
+        "--eos", "-e", metavar="STR", default="</s>", help="End-of-sequence token"
+    )
+    parser.add_argument(
+        "--compress",
+        "-c",
+        action="store_true",
+        default=False,
+        help="If set, write gzip-compressed format instead of plaintext",
+    )
+    parser.add_argument(
+        "--sent-end-expr",
+        metavar="REGEX",
+        type=re.compile,
+        default=None,
+        help="If specified, the entire text file will be read at once, then split into "
+        "sentences according to this expression",
+    )
+    parser.add_argument(
+        "--word-delim-expr",
+        metavar="REGEX",
+        type=re.compile,
+        default=DEFT_WORD_DELIM_EXPR,
+        help="Delimiter to split sentences into tokens",
+    )
+    parser.add_argument(
+        "--to-case",
+        choices=("upper", "lower"),
+        default=None,
+        help="Convert all tokens to either upper or lower case",
+    )
+    parser.add_argument(
+        "--trim-empty-sents",
+        action="store_true",
+        default=False,
+        help="If specified, remove any empty sentences from counting",
+    )
+    parser.add_argument(
+        "--count-unigram-sos",
+        action="store_true",
+        default=False,
+        help="If specified, collect unigram counts of start-of-sequence-token",
+    )
+    parser.add_argument(
+        "--prune-by-lprob-threshold",
+        metavar="FLOAT",
+        type=float,
+        default=None,
+        help="If specified, remove any n-grams with log-prob lte this threshold",
+    )
+    parser.add_argument(
+        "--prune-by-entropy-threshold",
+        metavar="FLOAT",
+        type=float,
+        default=None,
+        help="If specified, prune by SRI's relative entropy criterion",
+    )
+    parser.add_argument(
+        "--prune-by-count-thresholds",
+        "-t",
+        metavar="NN_INT",
+        type=_nonneg_int,
+        nargs="+",
+        default=None,
+        help="If specified, remove any n-grams with lte this count. If there are k "
+        "counts specified, the first k-1 counts will apply to the first k-1 orders of "
+        "n-gram, while the last count covers the remaing orders. E.g. 0 1 will not "
+        "prune unigrams but prune everything above with a count <= 1. Note that 0 will "
+        "not prune count-0 terms.",
+    )
+    parser.add_argument(
+        "--temp-dir",
+        "-T",
+        metavar="PTH",
+        nargs="?",
+        const=1,
+        help="If specified, counts and probs will be stored to files in this directory "
+        "in order to reduce memory pressure. If the flag is passed an argument, count "
+        "files will be stored in the provided directory. If count files up to the "
+        "maximum order have been previously completed and are stored in this "
+        "directory, those counts will be used instead of processing the input. If the "
+        "flag is not passed an argument, a temporary directory will be used",
+    )
+    parser.add_argument(
+        "--max-cache-age-seconds",
+        metavar="SEC",
+        type=float,
+        default=DEFT_MAX_CACHE_AGE_SECONDS,
+        help="When --count-directory/-T is specified, how many seconds before cache "
+        "elements expire",
+    )
+    parser.add_argument(
+        "--max-cache-len",
+        metavar="SEC",
+        type=float,
+        default=DEFT_MAX_CACHE_LEN,
+        help="When --count-directory/-T is specified, the maximum number of elements "
+        "which can exist in the cache of a single order of n-gram counts",
+    )
+    parser.add_argument(
+        "--eps-lprob",
+        metavar="FLOAT",
+        type=float,
+        default=DEFT_EPS_LPROB,
+        help="Log-probability considered approx. 0",
+    )
+    parser.add_argument(
+        "--delta",
+        "-d",
+        metavar="FLOAT",
+        nargs="+",
+        type=float,
+        default=None,
+        help="See epilogue",
+    )
+    parser.add_argument(
+        "--k",
+        "-k",
+        metavar="FLOAT",
+        type=float,
+        default=DEFT_ADD_K_K,
+        help="See epilogue",
+    )
+    parser.add_argument(
+        "--katz-threshold",
+        metavar="PINT",
+        type=_pos_int,
+        default=DEFAULT_KATZ_THRESH,
+        help="See epilogue",
+    )
+    parser.add_argument(
+        "--method",
+        "-m",
+        choices=["abs", "add-k", "katz", "kn", "sgt", "mle"],
+        default="kn",
+        help="Smoothing method (see epilogue)",
+    )
+    prune = parser.add_mutually_exclusive_group()
+    prune.add_argument(
+        "--prune-by-name-list",
+        metavar="NGRAM",
+        nargs="+",
+        default=None,
+        help="Each argument to this flag is an n-gram (first word to last) to be "
+        "pruned. Same word delimiters as text",
+    )
+    prune.add_argument(
+        "--prune-by-name-file",
+        metavar="FILE",
+        type=argparse.FileType("r"),
+        default=None,
+        help="A file storing n-grams (first word to last) to be pruned as a series of "
+        "sentences. Same sentence and word delimeters as text",
+    )
+    parser.add_argument("--verbose", "-v", action="store_true", default=False)
+
+    options = parser.parse_args(args)
+
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s: %(message)s",
+        level=logging.INFO if options.verbose else logging.WARNING,
+    )
+
+    if options.prune_by_name_file is not None:
+        if options.sent_end_expr is None:
+            prune_names = (x.rstrip("\n") for x in options.prune_by_name_file)
+        else:
+            prune_names = options.sent_end_expr.split(options.prune_by_name_file.read())
+    elif options.prune_by_name_list is not None:
+        prune_names = options.prune_by_name_list
+    else:
+        prune_names = []
+    prune_names = (tuple(options.word_delim_expr.split(x)) for x in prune_names if x)
+    prune_names = {x[0] if len(x) == 1 else x for x in prune_names}
+
+    temp_dir, N, count_dicts = options.temp_dir, options.max_order, None
+    if temp_dir is not None:
+        if temp_dir == 1:
+            temp_dir_ = TemporaryDirectory()
+            temp_dir = os.fspath(temp_dir_.name)
+        os.makedirs(temp_dir, exist_ok=True)
+        logging.info(f"Count directory set to '{temp_dir}'")
+        count_prefixes = []
+        all_complete = True
+        for n in range(1, N + 1):
+            count_prefix = os.path.join(temp_dir, COUNTFILE_FMT_PREFIX.format(order=n))
+            complete_file = count_prefix + COMPLETE_SUFFIX
+            complete_file_exists = os.path.exists(complete_file)
+            all_complete &= complete_file_exists
+            count_prefixes.append(count_prefix)
+        if all_complete:
+            logging.info("Counts already done! Just reading")
+            # fire-hose read. Bad for cache
+            count_dicts = [
+                open_count_dict(p, "r", max_cache_len=1, max_cache_age_seconds=1)
+                for p in count_prefixes
+            ]
+        else:
+            N = []
+            for count_prefix in count_prefixes:
+                if os.path.exists(count_prefix + COMPLETE_SUFFIX):
+                    os.unlink(count_prefix + COMPLETE_SUFFIX)
+                N.append(
+                    open_count_dict(
+                        count_prefix,
+                        "n",
+                        max_cache_len=options.max_cache_len,
+                        max_cache_age_seconds=options.max_cache_age_seconds,
+                    )
+                )
+
+    if count_dicts is None:
+        if options.in_file.peek()[:2] == b"\x1f\x8b":
+            options.in_file = gzip.open(options.in_file, "rt")
+        else:
+            options.in_file = TextIOWrapper(options.in_file)
+        if options.sent_end_expr is None:
+            sents = (x.rstrip("\n") for x in options.in_file)
+        else:
+            sents = options.sent_end_expr.split(options.in_file.read())
+        sents = titer_to_siter(
+            sents,
+            options.word_delim_expr,
+            options.to_case,
+            options.trim_empty_sents,
+        )
+
+        logging.info("Beginning to count n-grams")
+        count_dicts = sents_to_count_dicts(
+            sents, N, options.sos, options.eos, options.count_unigram_sos
+        )
+        logging.info("Done counting n-grams")
+        del sents
+
+        if temp_dir is not None:
+            for count_prefix in count_prefixes:
+                Path(count_prefix + COMPLETE_SUFFIX).touch()
+    del N
+
+    if options.prune_by_count_thresholds is not None:
+        k = len(options.prune_by_count_thresholds) - 1
+        for i, counts in enumerate(count_dicts):
+            t = options.prune_by_count_thresholds[min(i, k)]
+            if i == 0 and t > 0:
+                logging.warning(
+                    "Possibly pruning unigrams. You probably don't want this"
+                )
+            elif t > 0:
+                logging.info(f"Pruning {i + 1}-grams with threshold {t}")
+            else:
+                continue
+            prune_names.update(k for (k, v) in counts.items() if v <= t)
+    logging.info(f"{len(prune_names)} n-grams will be pruned")
+
+    if options.method == "abs":
+        logging.info("Performing absolute discounting")
+        if options.delta is not None and len(options.delta) == 1:
+            options.delta = options.delta[0]
+        prob_list = count_dicts_to_prob_list_absolute_discounting(
+            count_dicts, options.delta, prune_names
+        )
+        prune_names = set()
+    elif options.method == "add-k":
+        logging.info("Performing add-k smoothing")
+        prob_list = count_dicts_to_prob_list_add_k(
+            count_dicts, options.eps_lprob, options.k
+        )
+    elif options.method == "katz":
+        logging.info("Performing Katz backoff")
+        prob_list = count_dicts_to_prob_list_katz_backoff(
+            count_dicts, options.katz_threshold, options.eps_lprob
+        )
+    elif options.method == "kn":
+        logging.info("Performing modified Kneser-Ney smoothing")
+        if options.delta is not None and len(options.delta) == 1:
+            options.delta = options.delta[0]
+        prob_list = count_dicts_to_prob_list_kneser_ney(
+            count_dicts, options.delta, options.sos, prune_names, temp_dir
+        )
+        prune_names = set()
+    elif options.method == "sgt":
+        logging.info("Performing Simple Good-Turing smoothing")
+        prob_list = count_dicts_to_prob_list_simple_good_turing(
+            count_dicts, options.eps_lprob
+        )
+    else:  # mle
+        logging.info("Taking the MLE (no smoothing)")
+        prob_list = count_dicts_to_prob_list_mle(count_dicts, options.eps_lprob)
+    logging.info("Done collecting probabilities")
+    if temp_dir is not None:
+        for counts in count_dicts:
+            counts.close()
+    del count_dicts
+
+    if (
+        options.prune_by_entropy_threshold is not None
+        or options.prune_by_lprob_threshold is not None
+        or prune_names
+    ):
+        logging.info("Pruning necessary. Constructing trie")
+        ngram_lm = BackoffNGramLM(prob_list, options.sos, options.eos)
+        del prob_list
+        if prune_names:
+            logging.info("Pruning by name")
+            ngram_lm.prune_by_name(prune_names, options.eps_lprob)
+        if options.prune_by_lprob_threshold is not None:
+            logging.info(
+                "Pruning by log-probability threshold "
+                f"{options.prune_by_lprob_threshold}"
+            )
+            ngram_lm.prune_by_threshold(options.prune_by_lprob_threshold)
+        if options.prune_by_entropy_threshold is not None:
+            logging.info(
+                "Pruning by relative entropy threshold "
+                f"{options.prune_by_entropy_threshold}"
+            )
+            ngram_lm.relative_entropy_pruning(options.prune_by_entropy_threshold)
+        logging.info("Renormalizing backoffs")
+        ngram_lm.renormalize_backoffs()
+        logging.info("Reconstructing log probabilities from trie")
+        prob_list = ngram_lm.to_prob_list()
+        del ngram_lm
+
+    logging.info(f"Writing out LM in arpa format")
+    if options.out_file is None:
+        if options.compress:
+            raise ValueError(
+                "compressed output does not work nicely with stdout. Pipe to gzip -c "
+                "if you want this"
+            )
+        else:
+            options.out_file = sys.stdout
+    else:
+        if options.compress:
+            options.out_file = gzip.open(options.out_file, "wt")
+        else:
+            options.out_file = TextIOWrapper(options.out_file)
+    write_arpa(prob_list, options.out_file)
+    logging.info("Done")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

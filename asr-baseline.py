@@ -1112,6 +1112,17 @@ def decode(options: argparse.Namespace):
     print_(f"Done {doing}")
 
 
+def info(options: argparse.Namespace):
+    bparams: BaselineParams = options.bparams
+    bparams.initialize_missing()
+
+    recognizer = construct_baseline(bparams, beam_width=0)
+
+    print("feat_size", recognizer.encoder.input_size)
+    print("vocab_size", bparams.vocab_size)
+    print("num_params", sum(p.numel() for p in recognizer.parameters()))
+
+
 def main(args: Optional[Sequence[str]] = None):
     """Train and decode baseline, supervised speech recognizers"""
 
@@ -1293,6 +1304,8 @@ def main(args: Optional[Sequence[str]] = None):
         help="If set, writes per-frame logits to file rather than hypotheses",
     )
 
+    subparsers.add_parser("info", description="Get model info")
+
     options = parser.parse_args(args)
     if options.device is None:
         if torch.cuda.is_available():
@@ -1310,6 +1323,8 @@ def main(args: Optional[Sequence[str]] = None):
         train(options)
     elif options.cmd == "decode":
         decode(options)
+    elif options.cmd == "info":
+        info(options)
     else:
         raise NotImplementedError(f"command 'cmd' not implemented")
 
